@@ -50,7 +50,6 @@ void test("session-scoped navigator shows metadata and confirms terminal deletio
   const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
   const prompts: string[] = [];
   const selections: string[][] = [];
-  const deleteConfirmed = false;
   const copied: string[] = [];
   const pi = { registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["read", "workflow"] };
   workflowExtension(pi as never, home, async (value) => { copied.push(value); });
@@ -58,7 +57,7 @@ void test("session-scoped navigator shows metadata and confirms terminal deletio
   const workingMessages: Array<string | undefined> = [];
   registerWorkflowExtension({ version: "1.0.0", headline: "Navigator actions", description: "Navigator action test", agentAttemptActions: { inspectLatest: { label: "Inspect latest attempt", visible: (context) => context.attempt.attempt === 2, run: (context) => { actionRuns.push({ attempt: context.attempt.attempt, sessionId: context.session?.sessionId, live: context.liveSession !== undefined }); context.ui.setWorkingMessage?.("navigator working"); } } } });
   let selectCall = 0;
-  const ctx = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "session-a" }, ui: { notify() {}, setWorkingMessage(message?: string) { workingMessages.push(message); }, select: async (prompt: string, options: string[]) => { prompts.push(prompt); selections.push(options); selectCall += 1; if (selectCall === 1) return options.find((option) => option.includes("completed")); if (selectCall === 2) return "Agents..."; if (selectCall === 3) return options.find((option) => option.includes("#1")); if (selectCall === 4) return "Inspect latest attempt"; if (selectCall === 5) return "Back"; return prompt === "Workflows\n" ? "Close" : "Back"; }, confirm: async () => deleteConfirmed } };
+  const ctx = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "session-a" }, ui: { notify() {}, setWorkingMessage(message?: string) { workingMessages.push(message); }, select: async (prompt: string, options: string[]) => { prompts.push(prompt); selections.push(options); selectCall += 1; if (selectCall === 1) return options.find((option) => option.includes("completed")); if (selectCall === 2) return "Agents..."; if (selectCall === 3) return options.find((option) => option.includes("#1")); if (selectCall === 4) return "Inspect latest attempt"; if (selectCall === 5) return "Back"; return prompt === "Workflows\n" ? "Close" : "Back"; }, confirm: async () => false } };
   const command = commands[0]?.handler;
   assert.ok(command);
   await command("", ctx as never);
@@ -75,9 +74,6 @@ void test("session-scoped navigator shows metadata and confirms terminal deletio
   assert.deepEqual(actionRuns, [{ attempt: 2, sessionId: "native-a", live: false }]);
   assert.deepEqual(workingMessages, ["navigator working"]);
   assert.doesNotMatch(`${prompts.join("\n")}\n${selections.flat().join("\n")}`, /other/);
-  await command("delete run-a", ctx as never);
-  assert.equal(existsSync(store.directory), true);
-  assert.equal(deleteConfirmed, false);
   await store.delete(true);
   assert.equal(existsSync(store.directory), false);
 });
@@ -190,6 +186,7 @@ void test("TUI navigator exposes agent-scoped worktree actions without transcrip
           // Select the agent node, then open its actions inline (no separate picker).
           component.handleInput?.("j");
           component.handleInput?.("j");
+          component.handleInput?.("j");
           component.handleInput?.("tui.select.confirm");
           const withActions = component.render(80).join("\n");
           assert.match(withActions, /Agent actions/);
@@ -211,10 +208,8 @@ void test("TUI navigator exposes agent-scoped worktree actions without transcrip
           chooseAction("Copy worktree path");
           chooseAction("Copy agent ID");
           chooseAction("Back");
-          // Back at the tree: climb to the run root so run-level actions apply.
-          component.handleInput?.("h");
-          component.handleInput?.("h");
-          component.handleInput?.("h");
+          // Back at the tree: climb to the Workflow root so run-level actions apply.
+          for (let step = 0; step < 12 && !component.render(80).join("\n").split("\n").some((line) => line.startsWith("→") && line.includes("Workflow ·")); step += 1) component.handleInput?.("h");
           component.handleInput?.("tui.select.confirm");
           chooseAction("Copy run path");
         } else if (customCalls === 2) {
@@ -427,7 +422,9 @@ void test("navigator dashboard auto-refreshes the selected run", async () => {
         assert.ok(grown.length <= 8);
         assert.match(grown.join("\n"), /phase: after/);
         assert.match(grown.join("\n"), /Tree/);
-        for (let index = 0; index < 10; index += 1) component.handleInput?.("tui.select.pageDown");
+        component.handleInput?.("tui.editor.cursorRight");
+        component.handleInput?.("tui.editor.cursorRight");
+        for (let index = 0; index < 12; index += 1) component.handleInput?.("tui.select.down");
         const bottom = component.render(200);
         assert.ok(bottom.length <= 8);
         assert.match(bottom.join("\n"), /agent-11/);
@@ -436,7 +433,7 @@ void test("navigator dashboard auto-refreshes the selected run", async () => {
         await new Promise((resolve) => setTimeout(resolve, 1100));
         const compact = component.render(200);
         assert.ok(compact.length <= 8);
-        assert.match(compact.join("\n"), /Tree/);
+        assert.match(compact.join("\n"), /Workflow/);
         assert.doesNotMatch(compact.join("\n"), /→ Stop/);
         component.dispose?.();
         return undefined;
@@ -471,13 +468,9 @@ void test("navigator returns to the picker after cancelling a recovered run dash
       assert.match(dashboard, /interrupted/);
       assert.match(dashboard, /Tree/);
       const narrowTree = component.render(79).join("\n");
-      assert.match(narrowTree, /enter inspect/);
-      component.handleInput?.("tui.select.confirm");
-      const narrowDetails = component.render(40).join("\n");
-      assert.match(narrowDetails, /enter run actions/);
+      assert.match(narrowTree, /enter run actions/);
       component.handleInput?.("tui.select.confirm");
       assert.match(component.render(40).join("\n"), /Run actions/);
-      component.handleInput?.("tui.select.cancel");
       component.handleInput?.("tui.select.cancel");
       component.handleInput?.("a");
       assert.match(component.render(200).join("\n"), /Resume/);
@@ -610,9 +603,10 @@ void test("navigator opens the workflow script in the configured external editor
       custom: async (factory: (tui: { terminal: { rows: number }; stop(): void; start(): void; requestRender(force?: boolean): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }) => {
         const component = factory({ terminal: { rows: 8 }, stop() { stops += 1; }, start() { starts += 1; }, requestRender() { renders += 1; } }, { fg: (_color, text) => text }, { matches: (data, binding) => data === binding }, () => {});
         component.handleInput?.("a");
-        component.handleInput?.("tui.select.down");
-        component.handleInput?.("tui.select.down");
-        component.handleInput?.("tui.select.confirm");
+        for (let step = 0; step < 12; step += 1) {
+          if (component.render(80).join("\n").includes("→ Open script in editor")) { component.handleInput?.("tui.select.confirm"); break; }
+          component.handleInput?.("tui.select.down");
+        }
         const deadline = Date.now() + 5_000;
         while (Date.now() < deadline) {
           if (starts === 1 && existsSync(editedPath) && readFileSync(editedPath, "utf8").includes("SCRIPT_START")) break;
@@ -684,6 +678,7 @@ void test("navigator opens a persisted top-level agent prompt and result in the 
         assert.doesNotMatch(phase, /Open result in editor/);
         component.handleInput?.("tui.select.down");
         assert.doesNotMatch(component.render(120).join("\n"), /Open result in editor/);
+        component.handleInput?.("tui.select.down");
         component.handleInput?.("tui.select.down");
         component.handleInput?.("tui.select.confirm");
         const actions = component.render(120).join("\n");

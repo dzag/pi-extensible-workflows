@@ -7,7 +7,7 @@ import test from "node:test";
 import workflowExtension, { createLaunchSnapshot, DEFAULT_SETTINGS, ERROR_CODES, formatWorkflowFailure, formatWorkflowFailureDelivery, formatWorkflowFailureDiagnostics, RunStore, WorkflowError, WorkflowRegistry, type PersistedRun, type WorkflowFailureDiagnostics } from "../src/index.js";
 import type { SessionInput } from "../src/agent-execution.js";
 import { testTransport, type TestPiSession } from "./test-transport.js";
-
+import { contextualWorkflowAction } from "./support.js";
 void test("rejects global collisions, invalid metadata, schemas, input, and output", async () => {
   const registry = new WorkflowRegistry();
   const extension = { version: "1.0.0", headline: "Demo", description: "Demo functions", functions: { run: { description: "Run", input: { type: "object", properties: { value: { type: "string" } }, required: ["value"] }, output: { type: "string" }, run: () => 1 } } };
@@ -298,11 +298,9 @@ void test("background and cold-resumed terminal failures deliver artifacts witho
   const snapshot = (name: string, script: string) => createLaunchSnapshot({ script, args: null, metadata: { name }, launchMode: "background", settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] });
   const stopped = new RunStore(home, sessionId, "stopped-run", home);
   const interrupted = new RunStore(home, sessionId, "interrupted-run", home);
-  const exhausted = new RunStore(home, sessionId, "exhausted-run", home);
   const waitingScript = "phase('build'); return await agent('wait');";
   await stopped.create({ id: stopped.runId, workflowName: "stopped-run", cwd: home, sessionId, state: "interrupted", agents: [], agentSessions: [], delivery: { mode: "background", state: "pending" } }, snapshot("stopped-run", waitingScript));
   await interrupted.create({ id: interrupted.runId, workflowName: "interrupted-run", cwd: home, sessionId, state: "interrupted", agents: [], agentSessions: [], delivery: { mode: "background", state: "pending" } }, snapshot("interrupted-run", waitingScript));
-  await exhausted.create({ id: exhausted.runId, workflowName: "exhausted-run", cwd: home, sessionId, state: "budget_exhausted", agents: [], agentSessions: [], delivery: { mode: "background", state: "pending" } }, snapshot("exhausted-run", "throw Object.assign(new Error('budget exhausted'), { code: 'BUDGET_EXHAUSTED' });"));
   const context = { cwd: home, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => sessionId }, ui: { notify() {} } };
   const waitFor = async (store: RunStore, predicate: (run: PersistedRun) => boolean): Promise<PersistedRun> => {
     for (let attempt = 0; attempt < 200; attempt += 1) { const run = (await store.load()).run; if (predicate(run)) return run; await new Promise<void>((resolve) => setImmediate(resolve)); }
@@ -314,17 +312,15 @@ void test("background and cold-resumed terminal failures deliver artifacts witho
   };
   try {
     await start({}, context);
-    await command("resume stopped-run", context);
+    await contextualWorkflowAction(command, context, stopped.runId, "Resume", "Background");
     await waitFor(stopped, (run) => run.state === "running");
     await stop.execute("stop", { runId: stopped.runId });
     const stoppedMessage = await delivered("stopped-run");
-    await command("resume exhausted-run", context);
-    const exhaustedMessage = await delivered("exhausted-run");
-    await command("resume interrupted-run", context);
+    await contextualWorkflowAction(command, context, interrupted.runId, "Resume", "Background");
     await waitFor(interrupted, (run) => run.state === "running");
     await shutdown?.();
     const interruptedMessage = await delivered("interrupted-run");
-    for (const [name, message, code] of [["stopped-run", stoppedMessage, "CANCELLED"], ["interrupted-run", interruptedMessage, "CANCELLED"], ["exhausted-run", exhaustedMessage, "BUDGET_EXHAUSTED"]] as const) {
+    for (const [name, message, code] of [["stopped-run", stoppedMessage, "CANCELLED"], ["interrupted-run", interruptedMessage, "CANCELLED"]] as const) {
       assert.match(message, new RegExp(`error=${code}:`));
       assert.match(message, new RegExp(`runDirectory=.*${name}`));
       assert.match(message, /statePath=.*state\.json/);

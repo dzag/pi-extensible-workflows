@@ -314,8 +314,9 @@ void test("workflow TUI manages aliases without runs and preserves settings", as
   let menuCalls = 0;
   let targetCalls = 0;
   let inputCalls = 0;
+  let openedAliases = false;
   const select = async (prompt: string, options: string[]) => {
-    if (prompt === "Workflows\n") { assert.ok(options.includes("Model aliases")); return "Close"; }
+    if (prompt === "Workflows\n") { assert.ok(options.includes("Model aliases")); if (openedAliases) return "Close"; openedAliases = true; return "Model aliases"; }
     if (prompt.startsWith("Model aliases")) { menuCalls += 1; return (["Add alias", "Edit portable", "Delete portable", "Back"][menuCalls - 1] ?? "Back"); }
     targetCalls += 1;
     return targetCalls === 1 ? "Manual model ID" : "openai/gpt";
@@ -335,7 +336,6 @@ void test("workflow TUI manages aliases without runs and preserves settings", as
     assert.ok(start && command);
     await start({}, ctx);
     await command("", ctx);
-    await command("model-aliases", ctx);
     assert.equal(inputCalls, 2);
     assert.equal(targetCalls, 2);
     assert.ok(notices.some((message) => message.includes("not currently available")));
@@ -392,16 +392,24 @@ void test("resume reloads aliases for pending and retried calls while replaying 
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let shutdown: (() => Promise<void>) | undefined;
   let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+  let pickerSelected = false;
   const ctx = {
-    cwd, hasUI: false, model: { provider: "root", id: "model" }, sessionManager: { getSessionId: () => "session" },
-    modelRegistry: { getAll: () => [{ provider: "root", id: "model" }, { provider: "new", id: "model" }] }, ui: { notify() {} },
+    cwd, mode: "rpc", hasUI: true, model: { provider: "root", id: "model" }, sessionManager: { getSessionId: () => "session" },
+    modelRegistry: { getAll: () => [{ provider: "root", id: "model" }, { provider: "new", id: "model" }] },
+    ui: { notify() {}, select: async (prompt: string, options: string[]) => {
+      if (options.includes("Skip")) return "Skip";
+      if (prompt === "Workflows\n") { if (pickerSelected) return "Close"; pickerSelected = true; return options.find((option) => option.includes("alias-resume")) ?? "Close"; }
+      if (prompt.startsWith("Resume ")) return "Foreground";
+      if (options.includes("Resume")) return "Resume";
+      return "Back";
+    } },
   };
   try {
     const events: Array<{ channel: string; data: unknown }> = [];
     workflowExtension({ registerTool() {}, registerCommand(_name: string, value: { handler: typeof command }) { command = value.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { events.push({ channel, data }); } } } as never, home, async () => {}, testTransport(createSession));
     assert.ok(start && command);
     await start({}, ctx);
-    await command("resume run", ctx);
+    await command("", ctx);
     for (let attempt = 0; attempt < 1000; attempt += 1) {
       if ((await store.load()).run.state === "completed" && events.some(({ channel }) => channel === WORKFLOW_RUN_COMPLETED_EVENT)) break;
       await new Promise((resolve) => setImmediate(resolve));

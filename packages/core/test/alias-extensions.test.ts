@@ -11,7 +11,7 @@ import type { SessionInput } from "../src/agent-execution.js";
 import { listRunIds } from "../src/persistence.js";
 import { testTransport, type TestPiSession } from "./test-transport.js";
 import { reuseExtension } from "./support.js";
-
+import { contextualWorkflowAction } from "./support.js";
 void test("registered extension functions can run as script globals with args", async () => {
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> }> = [];
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never);
@@ -170,7 +170,7 @@ void test("production resume reruns dynamic aliases, replays completed work, and
     const context = { cwd, hasUI: false, model: { provider: "root", id: "model" }, modelRegistry: { getAll: () => [{ provider: "root", id: "model" }, { provider: "old", id: "model" }, { provider: "new", id: "model" }], getAvailable: () => [{ provider: "root", id: "model" }, { provider: "new", id: "model" }] }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
     assert.ok(start && command);
     await start({}, context);
-    await command("resume run", context);
+    await contextualWorkflowAction(command, context, "run", "Resume");
     for (let attempt = 0; attempt < 1000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
     const loaded = await store.load();
     assert.equal(loaded.run.state, "completed");

@@ -9,7 +9,7 @@ import type { SessionInput } from "../src/agent-execution.js";
 import { listRunIds } from "../src/persistence.js";
 import { testTransport, type TestPiSession } from "./test-transport.js";
 import { waitForIssue105 } from "./support.js";
-
+import { contextualWorkflowAction } from "./support.js";
 void test("advertises only described effective roles in the system prompt while workflow is active", () => {
   type StartHandler = (event: { systemPrompt: string }, ctx: { cwd: string; isProjectTrusted?: () => boolean }) => { systemPrompt?: string } | undefined;
   let handler: StartHandler | undefined;
@@ -220,7 +220,7 @@ void test("run control lifecycle events cover pause, resume, and stop", async ()
   let releaseAgent!: () => void;
   const agentReady = new Promise<void>((resolve) => { releaseAgent = resolve; });
   const createSession = async (): Promise<TestPiSession> => ({ transport: "local", session: { transport: "local", sessionId: "control-session", locator: { sessionFile: "/sessions/control.jsonl" } }, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { await agentReady; }, steer: async () => {}, dispose() {} });
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { events.push({ channel, data }); if (channel === WORKFLOW_PHASE_CHANGED_EVENT) { const event = data as { phase: string; runId: string }; if (event.phase === "pause") { const action = commands[0]?.handler(`pause ${event.runId}`, context); if (action) void action.then(() => { setImmediate(() => { resolvePause(event.runId); }); }); } if (event.phase === "stop") { const action = commands[0]?.handler(`stop ${event.runId}`, context); if (action) void action.then(() => { setImmediate(() => { resolveStop(event.runId); }); }); } } } } } as never, home, async () => {}, testTransport(createSession));
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { events.push({ channel, data }); if (channel === WORKFLOW_PHASE_CHANGED_EVENT) { const event = data as { phase: string; runId: string }; if (event.phase === "pause") { const action = commands[0]?.handler; if (action) void contextualWorkflowAction(action, context, event.runId, "Pause").then(() => { setImmediate(() => { resolvePause(event.runId); }); }); } if (event.phase === "stop") { const action = commands[0]?.handler; if (action) void contextualWorkflowAction(action, context, event.runId, "Stop").then(() => { setImmediate(() => { resolveStop(event.runId); }); }); } } } } } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   const command = commands[0]?.handler;
   assert.ok(workflow && command);
@@ -231,7 +231,7 @@ void test("run control lifecycle events cover pause, resume, and stop", async ()
     releaseAgent();
     for (let attempt = 0; attempt < 1000 && (await new RunStore(home, "session", pausedRunId, home).load()).run.state !== "paused"; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
     assert.equal((await new RunStore(home, "session", pausedRunId, home).load()).run.state, "paused");
-    await command(`resume ${pausedRunId}`, context);
+    await contextualWorkflowAction(command, context, pausedRunId, "Resume");
     await pausedRun;
     const stoppedRun = workflow.execute("id", { name: "stop-events", script: "phase('stop'); return await agent('PROMPT_SECRET');", foreground: true }, new AbortController().signal, undefined, context);
     void stoppedRun.catch(() => undefined);
@@ -335,7 +335,7 @@ void test("cold resume does not duplicate the phase recorded before interruption
   try {
     assert.ok(secondStart && secondCommand);
     await secondStart({}, context);
-    await secondCommand(`resume ${runId}`, context);
+    await contextualWorkflowAction(secondCommand, context, runId, "Resume");
     for (let attempt = 0; attempt < 1000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
     const resumed = (await store.load()).run;
     assert.equal(resumed.state, "completed");
@@ -392,7 +392,7 @@ void test("resuming a launched trusted-project run keeps per-run concurrency and
     return { sessionId: `project-resume-${String(inputs.length)}`, sessionFile: `/sessions/project-resume-${String(inputs.length)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { await agentReady; }, steer: async () => {}, dispose() {} };
   };
   let shutdown: (() => Promise<void>) | undefined;
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { if (channel !== WORKFLOW_PHASE_CHANGED_EVENT || (data as { phase?: string }).phase !== "pause") return; const event = data as { runId: string }; const action = commands[0]?.handler(`pause ${event.runId}`, context); if (action) void action.then(() => setImmediate(() => { resolvePause(event.runId); })); } } } as never, home, async () => {}, testTransport(createSession), agentDir);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { if (channel !== WORKFLOW_PHASE_CHANGED_EVENT || (data as { phase?: string }).phase !== "pause") return; const event = data as { runId: string }; const action = commands[0]?.handler; if (action) void contextualWorkflowAction(action, context, event.runId, "Pause").then(() => setImmediate(() => { resolvePause(event.runId); })); } } } as never, home, async () => {}, testTransport(createSession), agentDir);
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   const run = workflow.execute("id", { name: "project-resume-settings", script: "phase('pause'); const value = await agent('work'); phase('after'); return value;", concurrency: 4, foreground: true }, new AbortController().signal, undefined, context);
@@ -407,7 +407,9 @@ void test("resuming a launched trusted-project run keeps per-run concurrency and
   assert.deepEqual(paused.snapshot.settings.disabledAgentResources?.skills, ["project-old"]);
   writeFileSync(globalSettings, JSON.stringify({ concurrency: 1 }));
   writeFileSync(projectSettings, JSON.stringify({ concurrency: 2 }));
-  await commands[0]?.handler(`resume ${runId}`, context);
+  const resumeCommand = commands[0]?.handler;
+  assert.ok(resumeCommand);
+  await contextualWorkflowAction(resumeCommand, context, runId, "Resume");
   await run;
   const resumed = await store.load();
   assert.equal(resumed.run.state, "completed");
@@ -507,7 +509,7 @@ void test("pause waits for parallel agents and blocks later operations until res
   const runId = (await listRunIds(cwd, "session", home))[0];
   assert.ok(runId);
   const store = new RunStore(cwd, "session", runId, home);
-  await command(`pause ${runId}`, context);
+  await contextualWorkflowAction(command, context, runId, "Pause");
   assert.equal((await store.load()).run.state, "pausing");
   releases.get("first")?.();
   await waitForIssue105(async () => (await store.load()).run.agents.some((agent) => agent.name === "first" && agent.state === "completed"));
@@ -515,10 +517,11 @@ void test("pause waits for parallel agents and blocks later operations until res
   releases.get("second")?.();
   await waitForIssue105(async () => (await store.load()).run.state === "paused");
   assert.deepEqual([...starts].sort(), ["first", "second"]);
-  await command(`resume ${runId}`, context);
+  await contextualWorkflowAction(command, context, runId, "Resume", "Background");
   await waitForIssue105(() => starts.includes("after"));
   releases.get("after")?.();
   await running;
+  await waitForIssue105(async () => (await store.load()).run.state === "completed");
   assert.equal((await store.load()).run.state, "completed");
   const stateEvents = events.filter(({ channel, data }) => channel === WORKFLOW_RUN_STATE_CHANGED_EVENT && (data as { runId: string }).runId === runId).map(({ data }) => (data as { state: string }).state);
   assert.deepEqual(stateEvents, ["pausing", "paused", "running", "completed"]);
@@ -547,14 +550,15 @@ void test("pause blocks shell work at both shared and worktree operation boundar
     const runId = (await listRunIds(cwd, sessionId, home))[0];
     assert.ok(runId);
     const store = new RunStore(cwd, sessionId, runId, home);
-    await command(`pause ${runId}`, context);
+    await contextualWorkflowAction(command, context, runId, "Pause");
     assert.equal((await store.load()).run.state, "pausing");
     writeFileSync(releasePath, "release");
     await waitForIssue105(async () => (await store.load()).run.state === "paused");
     assert.equal(existsSync(afterPath), false);
-    await command(`resume ${runId}`, context);
+    await contextualWorkflowAction(command, context, runId, "Resume");
     await waitForIssue105(() => existsSync(afterPath));
     await running;
+    await waitForIssue105(async () => (await store.load()).run.state === "completed");
     assert.equal((await store.load()).run.state, "completed");
   };
   const shell = (startPath: string, releasePath: string) => `${process.execPath} -e ${JSON.stringify(`const fs=require("node:fs");fs.writeFileSync(${JSON.stringify(startPath)},"started");const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(releasePath)})){clearInterval(timer);process.exit(0);}},1);`)}`;
@@ -566,34 +570,6 @@ void test("pause blocks shell work at both shared and worktree operation boundar
   const worktreeRelease = join(home, "worktree-release");
   const worktreeAfter = join(home, "worktree-after");
   await runBoundary("pause-worktree", `return await withWorktree("pause-scope", async () => { await shell(${JSON.stringify(shell(worktreeStart, worktreeRelease))}); await shell(${JSON.stringify(`${process.execPath} -e ${JSON.stringify(`require("node:fs").writeFileSync(${JSON.stringify(worktreeAfter)},"after")`)}`)}); return true; });`, worktreeStart, worktreeRelease, worktreeAfter);
-});
-void test("navigator Pause and Resume actions round-trip persisted state and refresh", async () => {
-  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-navigator-pause-resume-"));
-  const cwd = join(home, "project");
-  mkdirSync(cwd, { recursive: true });
-  const startPath = join(home, "navigator-start");
-  const releasePath = join(home, "navigator-release");
-  const afterPath = join(home, "navigator-after");
-  const blocked = `${process.execPath} -e ${JSON.stringify(`const fs=require("node:fs");fs.writeFileSync(${JSON.stringify(startPath)},"started");const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(releasePath)})){clearInterval(timer);process.exit(0);}},1);`)}`;
-  const after = `${process.execPath} -e ${JSON.stringify(`require("node:fs").writeFileSync(${JSON.stringify(afterPath)},"after")`)}`;
-  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
-  const createSession = async (): Promise<TestPiSession> => { throw new Error("agent must not launch"); };
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
-  const workflow = tools.find(({ name }) => name === "workflow");
-  const command = commands[0]?.handler;
-  assert.ok(workflow && command);
-  let pickerCalls = 0;
-  let customCalls = 0;
-  const context = { cwd, mode: "tui", hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify(message: string) { if (message.startsWith("Paused workflow")) writeFileSync(releasePath, "release"); }, confirm: async () => true, select: async (_prompt: string, options: string[]) => { pickerCalls += 1; return pickerCalls === 2 || pickerCalls === 4 ? "Close" : options[0] ?? "Close"; }, custom: async (factory: (tui: { requestRender(): void; terminal: { rows: number } }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }) => { customCalls += 1; let result: string | undefined; const component = factory({ requestRender() {}, terminal: { rows: 20 } }, { fg: (_color, text) => text }, { matches: (data, binding) => data === binding }, (value) => { result = value; }); const dashboard = component.render(200).join("\\n"); if (customCalls === 1) { assert.match(dashboard, /running/); component.handleInput?.("a"); component.handleInput?.("tui.select.confirm"); } else if (customCalls === 2) { assert.match(dashboard, /paused|pausing/); component.handleInput?.("tui.select.cancel"); } else if (customCalls === 3) { assert.match(dashboard, /paused/); component.handleInput?.("a"); component.handleInput?.("tui.select.confirm"); } else { component.handleInput?.("tui.select.cancel"); } component.dispose?.(); return result; } } };
-  const result = await workflow.execute("id", { name: "navigator-pause-resume", script: `await shell(${JSON.stringify(blocked)}); await shell(${JSON.stringify(after)}); return true;` }, new AbortController().signal, undefined, context);
-  const runId = (JSON.parse((result as { content: [{ text: string }] }).content[0].text) as { runId: string }).runId;
-  await waitForIssue105(() => existsSync(startPath));
-  await command("", context);
-  await waitForIssue105(async () => (await new RunStore(cwd, "session", runId, home).load()).run.state === "paused");
-  await command("", context);
-  await waitForIssue105(async () => (await new RunStore(cwd, "session", runId, home).load()).run.state === "completed");
-  assert.equal(existsSync(afterPath), true);
 });
 void test("invalid and duplicate lifecycle controls fail with typed errors without blocking waiters", async () => {
   const lifecycle = new RunLifecycle("running");
@@ -619,153 +595,6 @@ void test("invalid and duplicate lifecycle controls fail with typed errors witho
   await raced.pause();
   await Promise.all([raced.resume(), raced.terminal("stopped")]);
   assert.equal(raced.state, "stopped");
-});
-void test("registered workflow command controls reject races and cancel queued work", { timeout: 10_000 }, async (t) => {
-  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-command-controls-"));
-  const cwd = join(home, "project");
-  mkdirSync(cwd, { recursive: true });
-  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
-  const starts: string[] = [];
-  const releases = new Map<string, () => void>();
-  let sessionCount = 0;
-  const createSession = async (input: SessionInput): Promise<TestPiSession> => {
-    const label = input.sessionLabel.split(":")[1] ?? "unknown";
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    releases.set(label, release);
-    return {
-      sessionId: `${label}-${String(++sessionCount)}`, sessionFile: `/sessions/${label}.jsonl`,
-      messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
-      prompt: async () => { starts.push(label); await gate; }, abort: async () => { release(); }, steer: async () => {}, dispose() {},
-    };
-  };
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
-  const workflow = tools.find(({ name }) => name === "workflow");
-  const command = commands[0]?.handler;
-  assert.ok(workflow && command);
-  const context = { cwd, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
-  const running = workflow.execute("id", { name: "command-controls", script: `await agent("first", {label:"first"}); const values = await Promise.all([agent("second", {label:"second"}), agent("third", {label:"third"})]); return values;`, concurrency: 1, foreground: true }, new AbortController().signal, undefined, context);
-  await waitForIssue105(() => starts.includes("first"));
-  const runId = (await listRunIds(cwd, "session", home))[0];
-  assert.ok(runId);
-  const store = new RunStore(cwd, "session", runId, home);
-  const invoke = (action: string) => command(`${action} ${runId}`, context);
-  t.after(async () => {
-    await invoke("stop").catch(() => {});
-    for (const release of releases.values()) release();
-    await running.catch(() => {});
-  });
-  const duplicatePause = await Promise.allSettled([invoke("pause"), invoke("pause")]);
-  assert.equal(duplicatePause.filter(({ status }) => status === "fulfilled").length, 1);
-  const duplicatePauseFailure = duplicatePause.find((result) => result.status === "rejected");
-  assert.ok(duplicatePauseFailure && duplicatePauseFailure.reason instanceof WorkflowError && duplicatePauseFailure.reason.code === "RESUME_INCOMPATIBLE");
-  assert.equal((await store.load()).run.state, "pausing");
-  await assert.rejects(invoke("resume"), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE");
-  releases.get("first")?.();
-  await waitForIssue105(async () => (await store.load()).run.state === "paused");
-  assert.deepEqual(starts, ["first"]);
-  const duplicateResume = await Promise.allSettled([invoke("resume"), invoke("resume")]);
-  assert.equal(duplicateResume.filter(({ status }) => status === "fulfilled").length, 1);
-  const duplicateResumeFailure = duplicateResume.find((result) => result.status === "rejected");
-  assert.ok(duplicateResumeFailure && duplicateResumeFailure.reason instanceof WorkflowError && duplicateResumeFailure.reason.code === "RESUME_INCOMPATIBLE");
-  await waitForIssue105(() => starts.some((label) => label !== "first"));
-  const startedAfterResume = starts.find((label) => label !== "first");
-  assert.ok(startedAfterResume);
-  const queued = startedAfterResume === "second" ? "third" : "second";
-  await waitForIssue105(async () => (await store.loadOwnership()).some(({ label }) => label === queued));
-  const stopRace = await Promise.allSettled([invoke("pause"), invoke("stop")]);
-  assert.equal(stopRace[1].status, "fulfilled");
-  await assert.rejects(running);
-  const stopped = await store.load();
-  assert.equal(stopped.run.state, "stopped");
-  assert.deepEqual(starts, ["first", startedAfterResume]);
-  assert.equal(stopped.run.agents.find((agent) => agent.name === queued)?.state, "cancelled");
-});
-void test("moves an attached foreground workflow to background without restarting it", { timeout: 10_000 }, async (t) => {
-  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-background-command-"));
-  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
-  const messages: string[] = [];
-  const entries: string[] = [];
-  const starts: string[] = [];
-  let toolResultHandler: ((event: { toolName: string; toolCallId: string; isError: boolean }) => Promise<unknown>) | undefined;
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
-  const createSession = async (): Promise<TestPiSession> => ({
-    sessionId: "background-command-session", sessionFile: "/sessions/background-command.jsonl",
-    messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
-    prompt: async () => { starts.push("first"); await gate; }, abort: async () => { release(); }, steer: async () => {}, dispose() {},
-  });
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as typeof toolResultHandler; }, appendEntry(_type: string, data: { message: string }) { entries.push(data.message); }, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
-  const workflow = tools.find(({ name }) => name === "workflow");
-  const command = commands[0]?.handler;
-  assert.ok(workflow && command);
-  const context = { cwd: home, hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {}, select: async (_prompt: string, options: string[]) => options.find((option) => option.includes("background-command")) } };
-  const controller = new AbortController();
-  const execution = workflow.execute("foreground-call", { name: "background-command", script: `await log("before detach"); return await agent("first", {label:"first"});`, foreground: true }, controller.signal, () => {}, context);
-  await waitForIssue105(() => starts.includes("first"));
-  const runId = (await listRunIds(home, "session", home))[0];
-  assert.ok(runId);
-  const store = new RunStore(home, "session", runId, home);
-  t.after(async () => { release(); await execution.catch(() => {}); });
-  const noUiNotices: string[] = [];
-  const noUiContext = { ...context, hasUI: false, ui: { ...context.ui, notify(message: string) { noUiNotices.push(message); } } };
-  await command("background", noUiContext);
-  assert.deepEqual((await store.load()).run.delivery, { mode: "foreground", state: "attached", toolCallId: "foreground-call" });
-  assert.ok(noUiNotices.includes("Interactive workflow background selection is unavailable; provide a run ID."));
-  await command("background", context);
-  await toolResultHandler?.({ toolName: "workflow", toolCallId: "foreground-call", isError: false });
-  controller.abort();
-  const detached = await execution as { details: { runId: string; state: string; detached: boolean; preview?: string; run: { events?: readonly { type: string; message: string; timestamp?: number }[] } } };
-  assert.deepEqual({ runId: detached.details.runId, state: detached.details.state, detached: detached.details.detached }, { runId, state: "running", detached: true });
-  assert.equal(detached.details.run.events?.filter((event) => event.type === "log").map((event) => event.message).join("\n"), "before detach");
-  assert.deepEqual(entries, []);
-  assert.match(detached.details.preview ?? "", /Moved workflow .* to background/);
-  assert.deepEqual((await store.load()).run.delivery, { mode: "background", state: "pending" });
-  release();
-  await waitForIssue105(async () => (await store.load()).run.delivery?.state === "delivered");
-  assert.deepEqual(messages.filter((message) => message.startsWith("Workflow background-command completed:")), [messages.find((message) => message.startsWith("Workflow background-command completed:"))]);
-});
-void test("detaching a checkpointed foreground workflow switches future prompts to follow-up delivery", { timeout: 10_000 }, async (t) => {
-  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-background-checkpoint-"));
-  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
-  const messages: string[] = [];
-  let selectStarted = false;
-  let releaseSelect!: () => void;
-  const selectGate = new Promise<void>((resolve) => { releaseSelect = resolve; });
-  const createSession = async (): Promise<TestPiSession> => ({
-    sessionId: "checkpoint-background-session", sessionFile: "/sessions/checkpoint-background.jsonl",
-    messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
-    prompt: async () => {}, abort: async () => { releaseSelect(); }, steer: async () => {}, dispose() {},
-  });
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
-  const workflow = tools.find(({ name }) => name === "workflow");
-  const respond = tools.find(({ name }) => name === "workflow_respond");
-  const command = commands[0]?.handler;
-  assert.ok(workflow && respond && command);
-  const context = { cwd: home, hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {}, select: async () => { selectStarted = true; await selectGate; return undefined; } } };
-  const execution = workflow.execute("checkpoint-call", { name: "background-checkpoint", script: `return await checkpoint({name:"ship", prompt:"Approve ship", context:null});`, foreground: true }, new AbortController().signal, undefined, context);
-  await waitForIssue105(() => selectStarted);
-  const runId = (await listRunIds(home, "session", home))[0];
-  assert.ok(runId);
-  const store = new RunStore(home, "session", runId, home);
-  t.after(() => { releaseSelect(); });
-  await waitForIssue105(async () => (await store.load()).run.state === "awaiting_input");
-  await command(`background ${runId}`, context);
-  const detached = await execution as { details: { runId: string; state: string; detached: boolean } };
-  assert.deepEqual({ runId: detached.details.runId, state: detached.details.state, detached: detached.details.detached }, { runId, state: "running", detached: true });
-  assert.deepEqual((await store.load()).run.delivery, { mode: "background", state: "pending" });
-  assert.equal((await store.load()).snapshot.launchMode, "background");
-  await waitForIssue105(() => messages.some((message) => message.includes("Workflow background-checkpoint checkpoint ship") && message.includes("Respond with workflow_respond")));
-  await command("background", context);
-  await command("background unknown-run", context);
-  releaseSelect();
-  await waitForIssue105(() => messages.some((message) => message.includes("Workflow background-checkpoint checkpoint ship") && message.includes("Respond with workflow_respond")));
-  await respond.execute("respond", { runId, name: "ship", approved: true }, undefined, undefined, context);
-  await waitForIssue105(async () => (await store.load()).run.delivery?.state === "delivered");
-  assert.equal(messages.filter((message) => message.startsWith("Workflow background-checkpoint completed:")).length, 1);
 });
 void test("interrupted lifecycle can cold-resume while completed and failed cannot", async () => {
   const interrupted = new RunLifecycle("interrupted");

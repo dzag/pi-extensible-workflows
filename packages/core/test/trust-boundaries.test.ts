@@ -10,6 +10,19 @@ import type { SessionInput } from "../src/agent-execution.js";
 import { testTransport, type TestPiSession } from "./test-transport.js";
 import { executeShellCommand } from "../src/execution.js";
 
+type WorkflowCommand = (args: string, context: unknown) => Promise<void>;
+async function resumeFromDashboard(command: WorkflowCommand, source: Record<string, unknown>, runId: string): Promise<void> {
+  let picked = false;
+  let used = false;
+  const baseUi = source.ui as { notify: (message: string) => void };
+  await command("", { ...source, hasUI: true, mode: "rpc", ui: { ...baseUi, select: async (prompt: string, options: string[]) => {
+    if (options.includes("Skip")) return "Skip";
+    if (prompt === "Workflows\n") { if (picked) return "Close"; picked = true; return options.find((option) => option.includes(runId)) ?? options[0] ?? "Close"; }
+    if (prompt.startsWith("Resume ")) return "Foreground";
+    if (options.includes("Resume")) { if (used) return "Back"; used = true; return "Resume"; }
+    return "Back";
+  } } });
+}
 void test("untrusted project policy cannot influence launch validation", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-trust-launch-"));
   const cwd = join(root, "project");
@@ -130,12 +143,16 @@ void test("cold resume rejects persisted project roles before launching them", a
   let shutdown: (() => Promise<void>) | undefined;
   let launched = 0;
   const createSession = async (): Promise<TestPiSession> => { launched += 1; throw new Error("must not launch"); };
-  const context = { cwd, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, isProjectTrusted: () => false, ui: { notify() {} } };
+  const notices: string[] = [];
+  const context = { cwd, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, isProjectTrusted: () => false, ui: { notify(message: string) { notices.push(message); } } };
   workflowExtension({ on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, registerTool() {}, registerCommand(_name: string, value: { handler: typeof command }) { command = value.handler; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession), home);
-  assert.ok(start && command);
-  await start({}, context);
+  const startHandler = start;
+  const commandHandler = command;
+  assert.ok(startHandler && commandHandler);
+  await startHandler({}, context);
   assert.equal((await store.load()).run.state, "interrupted");
-  await assert.rejects(command("resume run", context), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE" && /untrusted project/.test(error.message));
+  await resumeFromDashboard(commandHandler, context, "run");
+  assert.ok(notices.some((message) => /untrusted project/.test(message)));
   assert.equal(launched, 0);
   assert.deepEqual((await store.load()).run.agents, []);
   await shutdown?.();
@@ -166,7 +183,7 @@ void test("cold resume propagates persisted roles with current global exclusions
   workflowExtension({ on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, registerTool() {}, registerCommand(_name: string, value: { handler: typeof command }) { command = value.handler; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession), agentDir);
   assert.ok(start && command);
   await start({}, context);
-  await command("resume run", context);
+  await resumeFromDashboard(command, context, "run");
   for (let attempt = 0; attempt < 1_000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal((await store.load()).run.state, "completed");
   assert.equal(inputs.length, 1);

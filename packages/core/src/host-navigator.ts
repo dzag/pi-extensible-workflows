@@ -101,12 +101,11 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
         return entries.filter((entry): entry is { store: RunStore; loaded: { run: PersistedRun; snapshot: Readonly<LaunchSnapshot> }; resolvedAt: number | undefined } => entry !== undefined);
       };
       let stores = await loadStores();
-      const usage = "Workflow actions are available through the /workflow picker or workflow tools.";
       const setWorkflowStatus = (text: string | undefined) => {
         const setStatus = uiHostCapabilities(ctx.ui)?.setStatus;
         setStatus?.call(ctx.ui, "workflow-stop", text);
       };
-      const runAction = async (actionCommand: string, keepContext: boolean, status: (text: string | undefined) => void = setWorkflowStatus): Promise<"dashboard" | "picker" | "done"> => {
+      const runAction = async (actionCommand: string, status: (text: string | undefined) => void = setWorkflowStatus): Promise<"dashboard" | "picker"> => {
         const [action, runId, ...rest] = actionCommand.split(/\s+/);
         try {
           const run = runId ? runs.get(runId) : undefined;
@@ -115,24 +114,24 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
           if (action === "background" && runId) {
             const result = await moveForegroundToBackground(runId);
             ctx.ui.notify(`Moved workflow ${result.runId} to background.`, "info");
-            return keepContext ? "dashboard" : "done";
+            return "dashboard";
           }
           if ((action === "approve" || action === "reject") && runId && rest.length) {
             const accepted = await answerCheckpoint(runId, rest.join(" "), action === "approve", true);
             ctx.ui.notify(accepted ? `${action === "approve" ? "Approved" : "Rejected"} checkpoint ${rest.join(" ")}.` : "Checkpoint is not awaiting a response.", accepted ? "info" : "warning");
-            return keepContext ? "dashboard" : "done";
+            return "dashboard";
           }
           if ((action === "budget-approve" || action === "budget-reject") && runId && rest[0]) {
             const result = await recovery.answerBudgetDecision(runId, rest[0], action === "budget-approve", true, ctx, undefined, false);
             ctx.ui.notify(result ? `Budget adjustment ${rest[0]} ${result.approved ? "approved" : "rejected"}.` : "Budget proposal is not pending.", result ? "info" : "warning");
-            return keepContext ? "dashboard" : "done";
+            return "dashboard";
           }
           if (action === "delete" && stored) {
-            if (!hardTerminalRunStates.has(stored.loaded.run.state)) { ctx.ui.notify("Stop the workflow before deleting it.", "warning"); return keepContext ? "dashboard" : "done"; }
-            if (!await ctx.ui.confirm("Delete workflow?", `Delete ${stored.loaded.run.workflowName} (${stored.store.runId}) and all owned artifacts? This cannot be undone.`)) return keepContext ? "dashboard" : "done";
-            await stored.store.delete(true); runs.delete(stored.store.runId); terminalRunStates.delete(stored.store.runId); ctx.ui.notify(`Deleted workflow ${stored.store.runId}.`, "info"); return keepContext ? "picker" : "done";
+            if (!hardTerminalRunStates.has(stored.loaded.run.state)) { ctx.ui.notify("Stop the workflow before deleting it.", "warning"); return "dashboard"; }
+            if (!await ctx.ui.confirm("Delete workflow?", `Delete ${stored.loaded.run.workflowName} (${stored.store.runId}) and all owned artifacts? This cannot be undone.`)) return "dashboard";
+            await stored.store.delete(true); runs.delete(stored.store.runId); terminalRunStates.delete(stored.store.runId); ctx.ui.notify(`Deleted workflow ${stored.store.runId}.`, "info"); return "picker";
           }
-          if (action === "pause" && run) { await run.lifecycle.pause(); ctx.ui.notify(`Paused workflow ${run.store.runId}.`, "info"); return keepContext ? "dashboard" : "done"; }
+          if (action === "pause" && run) { await run.lifecycle.pause(); ctx.ui.notify(`Paused workflow ${run.store.runId}.`, "info"); return "dashboard"; }
           if (action === "resume" && run) {
             if (run.lifecycle.state === "budget_exhausted") {
               const patch: unknown = rest.length ? JSON.parse(rest.join(" ")) as unknown : undefined;
@@ -146,29 +145,27 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
               }
               ctx.ui.notify(`Resumed workflow ${run.store.runId}.`, "info");
             }
-            return keepContext ? "dashboard" : "done";
+            return "dashboard";
           }
           if (action === "adjust" && run?.lifecycle.state === "budget_exhausted") {
             const input = await uiHostCapabilities(ctx.ui)?.input?.call(ctx.ui, "Budget patch (JSON)", "{\"tokens\":{\"hard\":null}}" );
-            if (input === undefined) return keepContext ? "dashboard" : "done";
+            if (input === undefined) return "dashboard";
             const result = await recovery.resumeWorkflowRun(run.store.runId, JSON.parse(input), ctx, undefined, undefined, false);
             ctx.ui.notify(result.state === "completed" ? `Workflow ${run.store.runId} completed.` : result.state === "running" ? `Resumed workflow ${run.store.runId}.` : `Budget adjustment for ${run.store.runId} is awaiting approval.`, result.state === "awaiting_approval" ? "warning" : "info");
-            return keepContext ? "dashboard" : "done";
+            return "dashboard";
           }
           if (action === "stop" && run) {
             const workflowName = stored?.loaded.run.workflowName ?? run.metadata.name;
-            if (keepContext && !await ctx.ui.confirm("Stop workflow?", `Stop workflow ${workflowName} (${run.store.runId})? This cannot be undone.`)) return "dashboard";
-            if (keepContext) status(`Stopping workflow ${workflowName}...`);
+            if (!await ctx.ui.confirm("Stop workflow?", `Stop workflow ${workflowName} (${run.store.runId})? This cannot be undone.`)) return "dashboard";
+            status(`Stopping workflow ${workflowName}...`);
             await stopWorkflowRun(run.store.runId);
-            if (keepContext) status(`Workflow ${run.store.runId} stopped.`);
-            ctx.ui.notify(`Stopped workflow ${run.store.runId}.`, "info"); return keepContext ? "dashboard" : "done";
+            status(`Workflow ${run.store.runId} stopped.`);
+            ctx.ui.notify(`Stopped workflow ${run.store.runId}.`, "info"); return "dashboard";
           }
-          if (keepContext && action && runId) { ctx.ui.notify(`Cannot ${action} workflow ${runId}: the run is no longer available.`, "warning"); return "dashboard"; }
-          ctx.ui.notify(usage, "warning");
-          return "done";
+          if (action && runId) ctx.ui.notify(`Cannot ${action} workflow ${runId}: the run is no longer available.`, "warning");
+          else ctx.ui.notify("Workflow action is no longer available.", "warning");
+          return "dashboard";
         } catch (error) {
-          if (!keepContext && action !== "background") throw error;
-          if (!keepContext && action === "background") { ctx.ui.notify(usage, "warning"); return "done"; }
           const message = error instanceof Error ? error.message : String(error);
           if (action === "stop") status(`Could not stop workflow ${runId ?? ""}: ${message}`);
           ctx.ui.notify(`Cannot ${action ?? "workflow action"}${runId ? ` for ${runId}` : ""}: ${message}`, "warning");
@@ -484,7 +481,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                     stopRequested = true;
                     stopStatus = undefined;
                     setWorkflowStatus(undefined);
-                    void runAction(`stop ${store.runId}`, true, (status) => {
+                    void runAction(`stop ${store.runId}`, (status) => {
                       stopStatus = status;
                       setWorkflowStatus(status);
                       if (!disposed) tui.requestRender();
@@ -703,7 +700,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
             }
             const actionCommand = view.actions.get(actionChoice);
             if (!actionCommand) { ctx.ui.notify(`Cannot select workflow action: ${actionChoice}`, "warning"); continue; }
-            const outcome = await runAction(actionCommand, true);
+            const outcome = await runAction(actionCommand);
             if (outcome === "picker") { stores = await loadStores(); break; }
           }
         }
