@@ -891,7 +891,7 @@ function formatAccounting(accounting: NonNullable<AgentRecord["accounting"]>): s
 
 function formatAgentAccounting(accounting: NonNullable<AgentRecord["accounting"]>): string[] {
   const total = accounting.input + accounting.output + accounting.cacheRead + accounting.cacheWrite;
-  return [`Tokens: ${formatAccountingValue(total)} (in=${formatAccountingValue(accounting.input)} out=${formatAccountingValue(accounting.output)} cache-read=${formatAccountingValue(accounting.cacheRead)} cache-write=${formatAccountingValue(accounting.cacheWrite)})`, `Cost: $${accounting.cost.toFixed(2)}`];
+  return [`Tokens: ∑${formatAccountingValue(total)} ↑${formatAccountingValue(accounting.input)} ↓${formatAccountingValue(accounting.output)} ⇢${formatAccountingValue(accounting.cacheRead)} ⇠${formatAccountingValue(accounting.cacheWrite)}`, `Cost: $${accounting.cost.toFixed(2)}`];
 }
 
 export function formatNavigatorDashboard(run: PersistedRun, checkpoints: readonly AwaitingCheckpoint[], worktrees: readonly WorktreeReference[], now = Date.now()): string {
@@ -1015,14 +1015,11 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
     }
     const agent = node.agent;
     if (!agent) return [styles.muted("Agent details are unavailable")];
-    const byId = new Map(run.agents.map((candidate) => [candidate.id, candidate]));
     const duration = agentDuration(agent, now);
-    const result = [styles.bold(`Selected agent: ${agentBreadcrumb(agent, byId, true)}`), `State: ${phaseStyle(agent.state)(agent.state)}`, `Structural path: ${agent.structuralPath?.join(" > ") || "(root)"}`, `Model: ${agent.model.provider}/${agent.model.model}${agent.model.thinking ? `:${agent.model.thinking}` : ""}`, `Role: ${agent.role ?? "(none)"}`, `Tools: ${agent.tools.join(", ") || "(none)"}`, `Attempts: ${String(agent.attempts)}`, ...(duration === undefined ? [] : [`Duration: ${formatWorkflowRuntime(duration)}`]), ...(agent.accounting ? formatAgentAccounting(agent.accounting) : []), ...(selection.actions ? [] : [styles.muted("enter for agent actions")])];
+    const stalled = stalledDuration(agent, now);
+    const result = [...(agent.activity ? [`Activity: ${agent.activity.text}`] : []), ...(stalled === undefined ? [] : [styles.warning(`stalled? ${formatStalledDuration(stalled)}`)]), `State: ${phaseStyle(agent.state)(agent.state)}`, ...(agent.structuralPath?.length ? [`Structural path: ${agent.structuralPath.join(" > ")}`] : []), `Model: ${agent.model.provider}/${agent.model.model}${agent.model.thinking ? `:${agent.model.thinking}` : ""}`, `Role: ${agent.role ?? "(none)"}`, `Tools: ${agent.tools.join(", ") || "(none)"}`, ...(agent.attempts > 1 ? [`Attempts: ${String(agent.attempts)}`] : []), ...(duration === undefined ? [] : [`Duration: ${formatWorkflowRuntime(duration)}`]), ...(agent.accounting ? formatAgentAccounting(agent.accounting) : []), ...(selection.actions ? [] : [styles.muted("enter for agent actions")])];
     const error = agent.attemptDetails?.at(-1)?.error;
     if (error) result.push(styles.error(`Error: ${error.code}: ${error.message}`));
-    if (agent.activity) result.push(`Activity: ${agent.activity.text}`);
-    const stalled = stalledDuration(agent, now);
-    if (stalled !== undefined) result.push(styles.warning(`stalled? ${formatStalledDuration(stalled)}`));
     return result;
   };
   const stateNames: readonly WorkflowPhaseState[] = ["not started", "running", "completed", "failed", "cancelled", "interrupted", "budget_exhausted"];

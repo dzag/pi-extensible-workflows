@@ -121,15 +121,25 @@ void test("phase dashboard shows agent accounting breakdown only when measured",
   const render = (accounting?: AgentRecord["accounting"]): string => formatWorkflowPhaseDashboard(run("running", [{ ...agent("worker", "running"), ...(accounting ? { accounting } : {}) }], [{ phase: "review", afterAgent: 0 }]), snapshot(["review"]), 120, { detailsOnly: true, agentId: "worker" }).join("\n");
 
   const measured = render({ input: 90_100, output: 12_200, cacheRead: 26_100, cacheWrite: 0, cost: 0.43 });
-  assert.match(measured, /Tokens: 128\.4k \(in=90\.1k out=12\.2k cache-read=26\.1k cache-write=0\)/);
+  assert.match(measured, /Tokens: ∑128\.4k ↑90\.1k ↓12\.2k ⇢26\.1k ⇠0/);
   assert.match(measured, /Cost: \$0\.43/);
 
   const missing = render();
   assert.doesNotMatch(missing, /Tokens:|Cost:/);
 
   const free = render({ input: 1, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0 });
-  assert.match(free, /Tokens: 3 \(in=1 out=2 cache-read=0 cache-write=0\)/);
+  assert.match(free, /Tokens: ∑3 ↑1 ↓2 ⇢0 ⇠0/);
   assert.match(free, /Cost: \$0\.00/);
+});
+void test("phase dashboard puts activity first and only shows repeated attempts", () => {
+  const selected = { ...agent("worker", "running"), structuralPath: ["work", "worker"], activity: { kind: "text" as const, text: "responding" } };
+  const render = (value: AgentRecord): string => formatWorkflowPhaseDashboard(run("running", [value], [{ phase: "review", afterAgent: 0 }]), snapshot(["review"]), 120, { detailsOnly: true, agentId: value.id }).join("\n");
+  const firstAttempt = render(selected);
+  assert.ok(firstAttempt.indexOf("Activity: responding") < firstAttempt.indexOf("State: running"));
+  assert.doesNotMatch(firstAttempt, /Selected agent:/);
+  assert.match(firstAttempt, /Structural path: work > worker/);
+  assert.doesNotMatch(firstAttempt, /Attempts:/);
+  assert.match(render({ ...selected, attempts: 2 }), /Attempts: 2/);
 });
 void test("phase dashboard shows workflow and selected agent durations", () => {
   const now = 100_000;

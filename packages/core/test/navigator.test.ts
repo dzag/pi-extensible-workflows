@@ -105,7 +105,7 @@ void test("narrow navigator drills from tree to details to agent actions", { ski
 
     // First Enter opens details for the selected agent.
     h.sendKey("enter");
-    await h.waitFor(`Selected agent: ${selectedAgent}`, 10_000);
+    await h.waitFor("State:", 10_000);
 
     // Second Enter on an agent opens its actions.
     h.sendKey("enter");
