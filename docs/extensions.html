@@ -181,18 +181,26 @@
       <section id="model-aliases">
         <h2>Dynamic model aliases</h2>
         <p><code>modelAliases</code> registers trusted host resolvers for model names. A <code>WorkflowModelAlias</code> has one <code>resolve(context)</code> function, which may be synchronous or asynchronous and returns a target string in the normal <code>provider/model[:thinking]</code> syntax or another alias. The read-only context contains <code>cwd</code>, <code>projectTrusted</code>, the selected <code>rootModel</code>, <code>knownModels</code>, <code>availableModels</code>, and a launch or resume <code>AbortSignal</code>.</p>
-        <pre><code class="language-typescript"><span class="tok-function">registerWorkflowExtension</span>({
-  version: "1.0.0",
-  headline: "Model policy",
-  description: "Selects an available review model",
-  modelAliases: {
-    reviewer: {
-      async resolve({ availableModels }) {
-        return availableModels.has("anthropic/opus") ? "anthropic/opus:high" : "openai/gpt:high";
-      },
-    },
-  },
-});</code></pre>
+        <p>For a complete advanced example, see the shipped <a href="https://github.com/vekexasia/pi-extensible-workflows/blob/main/packages/core/examples/advanced-patterns/auto-model-router.mjs">dynamic model router</a>, which selects aliases from the live available-model inventory.</p>
+        <pre><code class="language-typescript"><span class="tok-keyword">import</span> <span class="tok-punctuation">{</span> registerWorkflowExtension <span class="tok-punctuation">}</span> <span class="tok-keyword">from</span> <span class="tok-string">"pi-extensible-workflows"</span><span class="tok-punctuation">;</span>
+<span class="tok-keyword">export</span> <span class="tok-keyword">default</span> <span class="tok-keyword">function</span> extension<span class="tok-punctuation">()</span> <span class="tok-punctuation">{</span>
+  <span class="tok-function">registerWorkflowExtension</span><span class="tok-punctuation">({</span>
+    <span class="tok-property">version</span><span class="tok-punctuation">:</span> <span class="tok-string">"1.0.0"</span><span class="tok-punctuation">,</span>
+    <span class="tok-property">headline</span><span class="tok-punctuation">:</span> <span class="tok-string">"Model policy"</span><span class="tok-punctuation">,</span>
+    <span class="tok-property">description</span><span class="tok-punctuation">:</span> <span class="tok-string">"Selects an available review model"</span><span class="tok-punctuation">,</span>
+    <span class="tok-property">modelAliases</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
+      reviewer<span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
+        <span class="tok-keyword">async</span> <span class="tok-function">resolve</span><span class="tok-punctuation">({</span> availableModels <span class="tok-punctuation">}</span><span class="tok-punctuation">)</span> <span class="tok-punctuation">{</span>
+          <span class="tok-keyword">const</span> preferred <span class="tok-punctuation">=</span> <span class="tok-string">"anthropic/opus"</span><span class="tok-punctuation">;</span>
+          <span class="tok-keyword">if</span> <span class="tok-punctuation">(</span>availableModels<span class="tok-punctuation">.</span><span class="tok-function">has</span><span class="tok-punctuation">(</span>preferred<span class="tok-punctuation">))</span> <span class="tok-keyword">return</span> preferred <span class="tok-punctuation">+</span> <span class="tok-string">":high"</span><span class="tok-punctuation">;</span>
+          <span class="tok-keyword">const</span> fallback <span class="tok-punctuation">=</span> availableModels<span class="tok-punctuation">.</span><span class="tok-function">values</span><span class="tok-punctuation">()</span><span class="tok-punctuation">.</span><span class="tok-function">next</span><span class="tok-punctuation">()</span><span class="tok-punctuation">.</span>value<span class="tok-punctuation">;</span>
+          <span class="tok-keyword">if</span> <span class="tok-punctuation">(</span><span class="tok-punctuation">!</span>fallback<span class="tok-punctuation">)</span> <span class="tok-keyword">throw</span> <span class="tok-keyword">new</span> <span class="tok-function">Error</span><span class="tok-punctuation">(</span><span class="tok-string">"No available models"</span><span class="tok-punctuation">)</span><span class="tok-punctuation">;</span>
+          <span class="tok-keyword">return</span> fallback<span class="tok-punctuation">;</span>
+        <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
+      <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
+    <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
+  <span class="tok-punctuation">}</span><span class="tok-punctuation">)</span><span class="tok-punctuation">;</span>
+<span class="tok-punctuation">}</span></code></pre>
         <p>Resolvers run once per launch, before static workflow preflight, availability checks, role validation, and run creation. The resolved concrete map is captured in the launch snapshot and applies everywhere a workflow model is accepted, including role files, direct agent options, thinking suffixes, and chained aliases. An explicit call-level <code>thinking</code> option overrides an alias or target suffix.</p>
         <p>Dynamic aliases are package defaults. Static aliases from global settings override them, and trusted project settings override the global map; a same-named shadowed resolver is not called. Duplicate registrations fail with <code>DUPLICATE_NAME</code>. Invalid resolver results, cycles, and unavailable targets fail before a run starts with an existing typed error and include the alias and registering extension headline. Resolver cancellation remains <code>CANCELLED</code>.</p>
         <h3>Launch, resume, and retry</h3>

@@ -47,7 +47,7 @@
 <span class="tok-command">pi</span> install "$PWD/packages/core"</code></pre>
         <p>For a one-session trial without changing Pi settings:</p>
         <pre><code class="language-shell"><span class="tok-command">pi</span> --no-extensions --extension "$PWD/packages/core/src/index.ts"</code></pre>
-        <p>The package declares Pi AI, Pi coding agent, and TypeBox as peer dependencies. The repository development setup currently pins the Pi packages to 0.80.9. The repository is an npm-workspaces monorepo: <code>packages/core</code> is the public <code>pi-extensible-workflows</code> package and <code>packages/cli</code> publishes the <code>@piewf/cli</code> CLI. Satellite packages use the <code>@piew</code> scope while the core package keeps its established unscoped name; <code>packages/extensions/*</code> holds repo-local extension packages such as the private <code>@piewf/herdr</code>. The private root orchestrates checks.</p>
+        <p>The package declares Pi AI, Pi coding agent, and TypeBox as peer dependencies. The repository development setup currently pins the Pi packages to 0.82.1. The repository is an npm-workspaces monorepo: <code>packages/core</code> is the public <code>pi-extensible-workflows</code> package and <code>packages/cli</code> publishes the <code>@piewf/cli</code> CLI. <code>packages/extensions/*</code> holds repo-local extension packages such as <code>@piewf/herdr</code>. The private root orchestrates checks.</p>
       </section>
       <section id="settings">
         <h2>Global and project settings</h2>
