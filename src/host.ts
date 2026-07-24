@@ -242,9 +242,13 @@ function textBlock(text: string) {
     invalidate() {},
   };
 }
-function workflowCatalogBlock(text: string) {
+function workflowCatalogBlock(text: string, expanded: boolean) {
   return {
-    render(width: number) { return truncateWorkflowProgress(text, width); },
+    render(width: number) {
+      const safeWidth = Math.max(1, width);
+      if (!expanded) return truncateWorkflowProgress(text, safeWidth);
+      return truncateToVisualLines(text, Number.MAX_SAFE_INTEGER, safeWidth, 0).visualLines.map((line) => line.trimEnd());
+    },
     invalidate() {},
   };
 }
@@ -308,7 +312,7 @@ function catalogSchemaLines(schema: unknown, theme: Theme): string[] {
 
 function formatCatalogDetail(value: WorkflowCatalogFunction | WorkflowCatalogVariable, expanded: boolean, theme: Theme): string {
   const kind = "input" in value ? "Function" : "Variable";
-  if (!expanded) return [theme.fg("accent", theme.bold(kind)), `  ${theme.fg("accent", value.name)}  ${theme.fg("toolOutput", catalogText(value.description))}`].join("\n");
+  if (!expanded) return [theme.fg("accent", theme.bold(kind)), `  ${theme.fg("accent", value.name)}  ${theme.fg("toolOutput", catalogText(value.description))}`, `  ${theme.fg("muted", "version")}: ${theme.fg("toolOutput", value.version)}  ${theme.fg("muted", "headline")}: ${theme.fg("toolOutput", catalogText(value.headline))}`].join("\n");
   const lines = [
     theme.fg("accent", theme.bold(`${kind}: ${value.name}`)),
     `${theme.fg("muted", "description")}: ${theme.fg("toolOutput", value.description)}`,
@@ -1365,7 +1369,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         return textBlock(args.name === undefined ? title : `${title} ${theme.fg("accent", args.name)}`);
       },
       renderResult(result, options, theme) {
-        return workflowCatalogBlock(formatWorkflowCatalog(catalogResultValue(result), options.expanded, theme));
+        return workflowCatalogBlock(formatWorkflowCatalog(catalogResultValue(result), options.expanded, theme), options.expanded);
       },
     });
     catalogRegistered = true;
