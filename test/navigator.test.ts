@@ -55,30 +55,35 @@ void test("navigator shows attention-ordered runs and the selected phase tree in
     assert.ok(testLine < deployLine, `failed should appear before completed`);
     assert.ok(screen.includes("Close"), `Expected 'Close' option`);
 
+    // The herdr pane is narrower than the 80-column wide-layout threshold, so
+    // the overlay renders tree-only and Enter drills in one level at a time.
     h.sendKey("enter");
     await h.waitFor("Tree", 10_000);
     const detail = h.readVisiblePane();
     assert.match(detail, /Tree/);
     assert.match(detail, /review/);
-    assert.match(detail, /scout/);
-    assert.match(detail, /reviewer/);
     assert.doesNotMatch(detail, /Agents\.\.\./);
 
-    // Navigate down to an agent node and open its actions inline.
+    // Walk the tree until an agent leaf is selected.
+    let selectedAgent = "";
     for (let step = 0; step < 12; step += 1) {
-      if (/→.*(scout|reviewer)/.test(h.readVisiblePane())) break;
+      const match = /→.*?(scout|reviewer)/.exec(h.readVisiblePane());
+      if (match) { selectedAgent = match[1] ?? ""; break; }
       h.sendKey("down");
       await new Promise((resolve) => setTimeout(resolve, 120));
     }
-    assert.match(h.readVisiblePane(), /→.*(scout|reviewer)/, "expected an agent row to be selected");
+    assert.ok(selectedAgent, "expected an agent row to be selected");
 
+    // First Enter opens details for the selected agent.
+    h.sendKey("enter");
+    await h.waitFor(`Selected agent: ${selectedAgent}`, 10_000);
+
+    // Second Enter on an agent opens its actions.
     h.sendKey("enter");
     await h.waitFor("Agent actions", 10_000);
     const withActions = h.readVisiblePane();
-    const actionRow = withActions.split("\n").find((line) => line.includes("Copy agent ID"));
-    assert.ok(actionRow, `expected inline agent actions:\n${withActions}`);
-    assert.match(actionRow, /\|/, `agent actions must stay in the details column: ${actionRow}`);
-    assert.match(withActions, /Tree/, "tree must remain visible while actions are open");
+    assert.match(withActions, /Copy agent ID/, `expected inline agent actions:\n${withActions}`);
+    assert.match(withActions, /→ Copy agent ID/, `expected a selected action row:\n${withActions}`);
   } finally {
     await h.close();
   }
