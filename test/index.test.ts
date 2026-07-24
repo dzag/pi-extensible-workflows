@@ -3000,6 +3000,30 @@ void test("freezes registries and produces a deterministic flat catalog", () => 
   assert.throws(() => { registry.register({ version: "1.0.0", headline: "Late", description: "Late", functions: { x: { description: "x", input: { type: "object" }, output: { type: "string" }, run: () => "x" } } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "REGISTRY_FROZEN");
   assert.throws(() => registry.function("release.check"), (error: unknown) => error instanceof WorkflowError && error.code === "MISSING_WORKFLOW");
 });
+void test("loads extension role directories as defaults beneath standard roles", () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-extension-roles-"));
+  const cwd = join(home, "project");
+  const agentDir = join(home, "agent");
+  const extensionDirectory = join(home, "extension-roles");
+  const secondExtensionDirectory = join(home, "second-extension-roles");
+  mkdirSync(join(cwd, ".pi", "pi-extensible-workflows", "roles"), { recursive: true });
+  mkdirSync(join(agentDir, "pi-extensible-workflows", "roles"), { recursive: true });
+  mkdirSync(extensionDirectory);
+  mkdirSync(secondExtensionDirectory);
+  writeFileSync(join(extensionDirectory, "packaged.md"), "---\ndescription: Packaged role\n---\nPackaged body");
+  writeFileSync(join(secondExtensionDirectory, "packaged.md"), "---\ndescription: Later packaged role\n---\nLater packaged body");
+  writeFileSync(join(secondExtensionDirectory, "extension-only.md"), "Extension-only body");
+  writeFileSync(join(agentDir, "pi-extensible-workflows", "roles", "packaged.md"), "Global override body");
+  writeFileSync(join(cwd, ".pi", "pi-extensible-workflows", "roles", "packaged.md"), "Project override body");
+  const registry = new WorkflowRegistry();
+  registry.register({ version: "1.0.0", headline: "Roles", description: "Packaged roles", roleDirectories: [extensionDirectory, pathToFileURL(secondExtensionDirectory)] });
+  assert.deepEqual(registry.roleDirectories(), [extensionDirectory, secondExtensionDirectory]);
+  const roles = loadAgentDefinitions(cwd, agentDir, true, registry.roleDirectories());
+  assert.equal(roles["extension-only"]?.prompt, "Extension-only body");
+  assert.equal(roles.packaged?.prompt, "Project override body");
+  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Invalid", description: "Invalid", roleDirectories: ["relative/roles"] }); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Invalid", description: "Invalid", roleDirectories: [new URL("https://example.com/roles")] }); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+});
 void test("registers setup hooks by priority and stable name", () => {
   const registry = new WorkflowRegistry();
   registry.register({ version: "1.0.0", headline: "Hooks", description: "Hooks", agentSetupHooks: { z: { setup() {} }, a: { priority: 10, setup() {} }, early: { priority: 1, setup() {} } } });

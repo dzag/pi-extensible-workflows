@@ -17,6 +17,7 @@ import {
   resolveModelReference,
   parseRoleMarkdown,
   registeredWorkflowFunctions,
+  registeredWorkflowRoleDirectories,
   workflowRoleDirectories,
   workflowProjectSettingsPath,
   workflowSettingsPath,
@@ -29,7 +30,7 @@ import type { AgentDefinition } from "./agent-execution.js";
 
 export type DoctorSeverity = "error" | "warning";
 export interface DoctorDiagnostic { severity: DoctorSeverity; code: string; message: string; source?: string; hint?: string }
-export interface DoctorRole { name: string; path: string; scope: "global" | "project"; active: boolean; overrides?: string; overriddenBy?: string }
+export interface DoctorRole { name: string; path: string; scope: "extension" | "global" | "project"; active: boolean; overrides?: string; overriddenBy?: string }
 export interface DoctorFunction { name: string; description: string; valid: boolean }
 export interface DoctorTrust { required: boolean; trusted: boolean; source: string }
 export interface DoctorPiState {
@@ -228,24 +229,42 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
   const aliases = settings.modelAliases ?? {};
   const roles: DoctorRole[] = [];
   const definitions = new Map<string, AgentDefinition>();
+  const extensionPaths = new Map<string, string>();
+  for (const path of roleFilesFrom(registeredWorkflowRoleDirectories())) {
+    const name = basename(path, ".md");
+    roles.push({ name, path, scope: "extension", active: true });
+    extensionPaths.set(name, path);
+    const definition = inspectRole(path, activeTools, knownModels, availableModels, diagnostics, aliases, settingsPath);
+    if (definition) definitions.set(name, definition);
+  }
   const globalPaths = new Map<string, string>();
   const globalRoleDirs = workflowRoleDirectories(agentDir);
   for (const path of roleFilesFrom(globalRoleDirs)) {
     const name = basename(path, ".md");
-    roles.push({ name, path, scope: "global", active: true });
+    const extensionPath = extensionPaths.get(name);
+    roles.push({ name, path, scope: "global", active: true, ...(extensionPath ? { overrides: extensionPath } : {}) });
     globalPaths.set(name, path);
+    if (extensionPath) {
+      const extension = roles.find((role) => role.path === extensionPath);
+      if (extension) { extension.active = false; extension.overriddenBy = path; }
+    }
     const definition = inspectRole(path, activeTools, knownModels, availableModels, diagnostics, aliases, settingsPath);
-    if (definition) definitions.set(name, definition);
+    if (definition) definitions.set(name, definition); else definitions.delete(name);
   }
   for (const path of roleFilesFrom([join(cwd, ".pi", "pi-extensible-workflows", "roles")])) {
     const name = basename(path, ".md");
     const globalPath = globalPaths.get(name);
+    const extensionPath = extensionPaths.get(name);
+    const overriddenPath = globalPath ?? extensionPath;
     const active = pi.trust.trusted;
-    roles.push({ name, path, scope: "project", active, ...(active && globalPath ? { overrides: globalPath } : {}) });
+    roles.push({ name, path, scope: "project", active, ...(active && overriddenPath ? { overrides: overriddenPath } : {}) });
     if (!active) continue;
     if (globalPath) {
       const global = roles.find((role) => role.path === globalPath);
       if (global) { global.active = false; global.overriddenBy = path; }
+    } else if (extensionPath) {
+      const extension = roles.find((role) => role.path === extensionPath);
+      if (extension) { extension.active = false; extension.overriddenBy = path; }
     }
     const definition = inspectRole(path, activeTools, knownModels, availableModels, diagnostics, aliases, settingsPath);
     if (definition) definitions.set(name, definition); else definitions.delete(name);
