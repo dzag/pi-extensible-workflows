@@ -320,7 +320,8 @@ void test("registers workflow_catalog only for active non-empty registries", asy
   assert.equal(inactiveTools.some(({ name }) => name === "workflow_catalog"), false);
   await inactiveShutdown();
   const activeHome = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-catalog-active-"));
-  const activeTools: Array<{ name: string; execute?: (...args: never[]) => Promise<{ content: Array<{ text: string }> }> }> = [];
+   type CatalogTool = { name: string; execute?: (...args: never[]) => Promise<{ content: Array<{ text: string }> }>; renderCall?: (...args: never[]) => { render(width: number): string[] }; renderResult?: (...args: never[]) => { render(width: number): string[] } };
+   const activeTools: CatalogTool[] = [];
   let activeStart: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let activeShutdown: (() => Promise<void>) | undefined;
   workflowExtension({ registerTool(tool: (typeof activeTools)[number]) { activeTools.push(tool); }, registerCommand() {}, getActiveTools: () => ["workflow"], on(name: string, handler: unknown) { if (name === "session_start") activeStart = handler as typeof activeStart; if (name === "session_shutdown") activeShutdown = handler as typeof activeShutdown; } } as never, activeHome);
@@ -348,6 +349,73 @@ void test("registers workflow_catalog only for active non-empty registries", asy
   assert.deepEqual(variableDetail.schema, { type: "string" });
   const missing = JSON.parse((await catalogTool.execute("id" as never, { name: "missing" } as never)).content[0]?.text ?? "null") as { error: { code: string; name: string; message: string } };
   assert.deepEqual(missing.error, { code: "NOT_FOUND", name: "missing", message: "No registered workflow function or variable is available: missing" });
+  const theme = { fg: (color: string, text: string) => `[${color}]${text}[/${color}]`, bold: (text: string) => `<bold>${text}</bold>` };
+  const ansiTheme = {
+    fg: (color: string, text: string) => `\u001b[${color === "error" ? "31" : "36"}m${text}\u001b[0m`,
+    bold: (text: string) => `\u001b[1m${text}\u001b[0m`,
+  };
+  const stripAnsi = (value: string): string => value.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g"), "");
+  const renderCatalog = (value: unknown, expanded: boolean, name?: string, renderTheme = theme, width = 120) => {
+    const renderResult = catalogTool.renderResult;
+    assert.ok(renderResult);
+    const component = renderResult({ content: [{ type: "text", text: JSON.stringify(value) }], details: value } as never, { expanded, isPartial: false } as never, renderTheme as never, { args: name ? { name } : {}, expanded } as never);
+    return component.render(width).join("\n");
+  };
+  const indexView = renderCatalog(catalog, false);
+  assert.match(indexView, /\[accent\].*Functions \(2\)/);
+  assert.match(indexView, /hello.*Say hello/);
+  assert.match(indexView, /Variables \(1\)/);
+  assert.doesNotMatch(indexView, /"properties"/);
+  const aliasIndexView = renderCatalog({ ...catalog, modelAliases: { "developer-model": "openai/gpt" } }, false);
+  assert.match(aliasIndexView, /Model aliases \(1\)/);
+  assert.match(aliasIndexView, /developer-model.*openai\/gpt/);
+  const compactDetail = renderCatalog(functionDetail, false, "hello");
+  assert.match(compactDetail, /Function/);
+  assert.match(compactDetail, /hello.*Say hello/);
+  assert.match(compactDetail, /version.*1\.0\.0/);
+  assert.match(compactDetail, /headline.*Reusable/);
+  assert.doesNotMatch(compactDetail, /"properties"/);
+  const compactVariable = renderCatalog(variableDetail, false, "branch");
+  assert.match(compactVariable, /Variable/);
+  assert.match(compactVariable, /branch.*Branch/);
+  assert.match(compactVariable, /version.*1\.0\.0/);
+  assert.match(compactVariable, /headline.*Reusable/);
+  assert.doesNotMatch(compactVariable, /Variable schema|"type"/);
+  const expandedDetail = renderCatalog(functionDetail, true, "hello");
+  assert.match(expandedDetail, /Reusable test workflows/);
+  assert.match(expandedDetail, /"properties"/);
+  assert.match(expandedDetail, /Output schema/);
+  const expandedVariable = renderCatalog(variableDetail, true, "branch");
+  assert.match(expandedVariable, /Variable: branch/);
+  assert.match(expandedVariable, /Variable schema/);
+  assert.match(expandedVariable, /"type"/);
+  const missingView = renderCatalog(missing, false, "missing");
+  assert.match(missingView, /No registered workflow function or variable is available: missing/);
+  const narrowFunctionDetail = {
+    ...functionDetail,
+    description: "A_DESCRIPTION_THAT_MUST_REMAIN_VISIBLE",
+    headline: "A_HEADLINE_THAT_MUST_REMAIN_VISIBLE",
+    extensionDescription: "AN_EXTENSION_DESCRIPTION_THAT_MUST_REMAIN_VISIBLE",
+    input: { type: "object", properties: { detail: { type: "string", description: "THIS_TEXT_MUST_REMAIN_VISIBLE_WHEN_EXPANDED" } } },
+    output: { type: "string", description: "OUTPUT_DESCRIPTION_MUST_REMAIN_VISIBLE" },
+  };
+  const narrowExpanded = renderCatalog(narrowFunctionDetail, true, "hello", ansiTheme, 24);
+  const narrowVisible = stripAnsi(narrowExpanded).replace(/\s+/g, "");
+  assert.match(narrowVisible, /THIS_TEXT_MUST_REMAIN_VISIBLE_WHEN_EXPANDED/);
+  assert.match(narrowVisible, /A_HEADLINE_THAT_MUST_REMAIN_VISIBLE/);
+  assert.match(narrowVisible, /AN_EXTENSION_DESCRIPTION_THAT_MUST_REMAIN_VISIBLE/);
+  assert.match(narrowVisible, /OUTPUT_DESCRIPTION_MUST_REMAIN_VISIBLE/);
+  for (const line of narrowExpanded.split("\n")) assert.ok(stripAnsi(line).length <= 24, `rendered line exceeds width: ${line}`);
+  const renderCall = catalogTool.renderCall;
+  assert.ok(renderCall);
+  const narrowCall = renderCall({ name: "hello" } as never, {
+    fg: (color: string, text: string) => `\u001b[38;2;21;${color === "accent" ? "101" : "201"};${color === "toolTitle" ? "201" : "101"}m${text}\u001b[0m`,
+    bold: (text: string) => `\u001b[1m${text}\u001b[0m`,
+  } as never).render(10);
+  assert.equal(narrowCall.length, 1);
+  assert.ok(narrowCall[0]);
+  assert.doesNotMatch(narrowCall[0], new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[^0-9;m]`));
+  assert.ok(stripAnsi(narrowCall[0]).length <= 10);
   await activeShutdown();
 });
 

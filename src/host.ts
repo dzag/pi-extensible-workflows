@@ -15,7 +15,7 @@ import { asWorkflowError, aliasDrift, createLaunchSnapshot, deepFreeze, errorCod
 import { launchScriptForSnapshot, loadAgentDefinitions, loadSettings, preflight, resolveAgentResourcePolicy, saveModelAliases, validateAgentOptions, validateCheckpoint, validateShellOptions, validateWorkflowLaunchWithRegistry, workflowPrompt, workflowSettingsPath } from "./validation.js";
 import { beginWorkflowExtensionLoading, loadingRegistry, resetWorkflowRegistry, type WorkflowRegistryApi } from "./registry.js";
 import { agentIdentityPath, agentWorktree, encoded, executeShellCommand, persistActiveAgentAttempt, persistAgentAttempts, readShellResult, runWorkflow, shellIdentityPath } from "./execution.js";
-import { ERROR_CODES, LAUNCH_SNAPSHOT_IDENTITY_VERSION, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentAttemptSummary, type AgentOptions, type AgentRecord, type BudgetApprovalRequest, type BudgetEvent, type JsonValue, type LaunchSnapshot, type ModelSpec, type RunState, type ShellIdentity, type ShellOptions, type ShellResult, type WorkflowBridge, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowFailureAgent, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowExecution, type WorkflowMetadata, type WorkflowRetryProvenance, type WorkflowRunContext, type WorkflowSiblingAgent, type WorkflowWorktreeReference } from "./types.js";
+import { ERROR_CODES, LAUNCH_SNAPSHOT_IDENTITY_VERSION, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentAttemptSummary, type AgentOptions, type AgentRecord, type BudgetApprovalRequest, type BudgetEvent, type JsonValue, type LaunchSnapshot, type ModelSpec, type RunState, type ShellIdentity, type ShellOptions, type ShellResult, type WorkflowBridge, type WorkflowCatalogFunction, type WorkflowCatalogIndex, type WorkflowCatalogVariable, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowFailureAgent, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowExecution, type WorkflowMetadata, type WorkflowRetryProvenance, type WorkflowRunContext, type WorkflowSiblingAgent, type WorkflowWorktreeReference } from "./types.js";
 const SETTLED_AGENT_STATES: ReadonlySet<import("./types.js").AgentState> = new Set(["completed", "failed", "cancelled"]);
 export interface WorkflowProgressStyles {
   accent(text: string): string;
@@ -241,6 +241,110 @@ function textBlock(text: string) {
     },
     invalidate() {},
   };
+}
+function styledTextBlock(text: string) {
+  return {
+    render(width: number) {
+      return truncateWorkflowProgress(text, width);
+    },
+    invalidate() {},
+  };
+}
+function workflowCatalogBlock(text: string, expanded: boolean) {
+  return {
+    render(width: number) {
+      const safeWidth = Math.max(1, width);
+      if (!expanded) return truncateWorkflowProgress(text, safeWidth);
+      return truncateToVisualLines(text, Number.MAX_SAFE_INTEGER, safeWidth, 0).visualLines.map((line) => line.trimEnd());
+    },
+    invalidate() {},
+  };
+}
+
+function catalogText(value: string): string { return value.replace(/\s+/g, " ").trim(); }
+
+type CatalogToolResult = { details?: unknown; content?: readonly { type: string; text?: string }[] };
+
+function catalogResultValue(result: CatalogToolResult): unknown {
+  if (result.details !== undefined) return result.details;
+  const text = result.content?.find((entry) => entry.type === "text")?.text;
+  if (!text) return undefined;
+  try { return JSON.parse(text) as unknown; } catch { return text; }
+}
+
+function isCatalogIndex(value: unknown): value is WorkflowCatalogIndex {
+  return object(value) && Array.isArray(value.functions) && Array.isArray(value.variables);
+}
+
+function isCatalogFunction(value: unknown): value is WorkflowCatalogFunction {
+  return object(value) && typeof value.name === "string" && typeof value.description === "string" && object(value.input) && object(value.output);
+}
+
+function isCatalogVariable(value: unknown): value is WorkflowCatalogVariable {
+  return object(value) && typeof value.name === "string" && typeof value.description === "string" && object(value.schema);
+}
+
+function isCatalogError(value: unknown): value is { error: { message: string } } {
+  return object(value) && object(value.error) && typeof value.error.message === "string";
+}
+
+function catalogSectionTitle(label: string, count: number, theme: Theme): string {
+  return theme.fg("accent", theme.bold(`${label} (${String(count)})`));
+}
+
+function catalogIndexEntries(entries: readonly { name: string; description: string }[], theme: Theme): string[] {
+  const width = Math.max(0, ...entries.map((entry) => entry.name.length));
+  return entries.map((entry) => `  ${theme.fg("accent", entry.name.padEnd(width))}  ${theme.fg("toolOutput", catalogText(entry.description))}`);
+}
+
+function formatCatalogIndex(catalog: WorkflowCatalogIndex, theme: Theme): string {
+  const aliases = Object.entries(catalog.modelAliases ?? {}).sort(([left], [right]) => left.localeCompare(right));
+  const aliasWidth = Math.max(0, ...aliases.map(([name]) => name.length));
+  const aliasLines = aliases.map(([name, model]) => `  ${theme.fg("accent", name.padEnd(aliasWidth))}  ${theme.fg("toolOutput", model)}`);
+  return [
+    catalogSectionTitle("Functions", catalog.functions.length, theme),
+    ...catalogIndexEntries(catalog.functions, theme),
+    "",
+    catalogSectionTitle("Variables", catalog.variables.length, theme),
+    ...catalogIndexEntries(catalog.variables, theme),
+    "",
+    catalogSectionTitle("Model aliases", aliases.length, theme),
+    ...aliasLines,
+  ].join("\n");
+}
+
+function catalogSchemaLines(schema: unknown, theme: Theme): string[] {
+  const json = JSON.stringify(schema, null, 2);
+  return json.split("\n").map((line) => `  ${theme.fg("toolOutput", line)}`);
+}
+
+function formatCatalogDetail(value: WorkflowCatalogFunction | WorkflowCatalogVariable, expanded: boolean, theme: Theme): string {
+  const kind = "input" in value ? "Function" : "Variable";
+  if (!expanded) return [theme.fg("accent", theme.bold(kind)), `  ${theme.fg("accent", value.name)}  ${theme.fg("toolOutput", catalogText(value.description))}`, `  ${theme.fg("muted", "version")}: ${theme.fg("toolOutput", value.version)}  ${theme.fg("muted", "headline")}: ${theme.fg("toolOutput", catalogText(value.headline))}`].join("\n");
+  const lines = [
+    theme.fg("accent", theme.bold(`${kind}: ${value.name}`)),
+    `${theme.fg("muted", "description")}: ${theme.fg("toolOutput", value.description)}`,
+    "",
+    theme.fg("accent", theme.bold("Extension")),
+    `  ${theme.fg("muted", "version")}: ${theme.fg("toolOutput", value.version)}`,
+    `  ${theme.fg("muted", "headline")}: ${theme.fg("toolOutput", value.headline)}`,
+    `  ${theme.fg("muted", "description")}: ${theme.fg("toolOutput", value.extensionDescription)}`,
+    "",
+    theme.fg("accent", theme.bold("Schema")),
+  ];
+  if ("input" in value) {
+    lines.push(theme.fg("muted", "Input schema"), ...catalogSchemaLines(value.input, theme), "", theme.fg("muted", "Output schema"), ...catalogSchemaLines(value.output, theme));
+  } else {
+    lines.push(theme.fg("muted", "Variable schema"), ...catalogSchemaLines(value.schema, theme));
+  }
+  return lines.join("\n");
+}
+
+function formatWorkflowCatalog(value: unknown, expanded: boolean, theme: Theme): string {
+  if (isCatalogIndex(value)) return formatCatalogIndex(value, theme);
+  if (isCatalogFunction(value) || isCatalogVariable(value)) return formatCatalogDetail(value, expanded, theme);
+  if (isCatalogError(value)) return theme.fg("error", value.error.message);
+  return theme.fg("error", "The workflow catalog returned an invalid result.");
 }
 
 const ANSI_SGR = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`);
@@ -1267,7 +1371,14 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       async execute(_id, params = {}) {
         const result = params.name === undefined ? registry.catalogIndex() : registry.catalogDetail(params.name);
         return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result };
-      }
+      },
+      renderCall(args, theme) {
+        const title = theme.fg("toolTitle", theme.bold("workflow_catalog"));
+        return styledTextBlock(args.name === undefined ? title : `${title} ${theme.fg("accent", args.name)}`);
+      },
+      renderResult(result, options, theme) {
+        return workflowCatalogBlock(formatWorkflowCatalog(catalogResultValue(result), options.expanded, theme), options.expanded);
+      },
     });
     catalogRegistered = true;
   };
