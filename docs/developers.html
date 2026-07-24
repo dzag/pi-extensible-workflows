@@ -14,6 +14,7 @@
       <nav aria-label="Primary navigation">
         <a class="active" href="developers.html">Developers</a>
         <a href="agents.html">Agents</a>
+        <a href="extensions.html">Extensions</a>
         <a href="https://github.com/vekexasia/pi-extensible-workflows">Repository</a>
       </nav>
     </div>
@@ -187,96 +188,9 @@
       </section>
       <section id="extensions">
         <h2>Extensions, reusable functions, and roles</h2>
-        <p>Trusted Pi extensions can register global functions and run-scoped variables while extensions load. Register from the default extension factory so every session-loading cycle receives a fresh registration. Registration validates the semantic version, descriptions, and function or variable schemas. A registered function is the reusable workflow: there is no separate workflow-script registration API.</p>
-        <p>The following is the core of <code>~/.pi/agent/extensions/review-loop.ts</code>. It registers a reusable developer-review loop as <code>developUntilApproved</code>.</p>
-        <pre><code class="language-typescript"><span class="tok-keyword">import</span> <span class="tok-punctuation">{</span>
-  registerWorkflowExtension<span class="tok-punctuation">,</span>
-  <span class="tok-keyword">type</span> JsonSchema<span class="tok-punctuation">,</span>
-  <span class="tok-keyword">type</span> JsonValue<span class="tok-punctuation">,</span>
-  <span class="tok-keyword">type</span> WorkflowExtension<span class="tok-punctuation">,</span>
-<span class="tok-punctuation">}</span> <span class="tok-keyword">from</span> <span class="tok-string">"pi-extensible-workflows"</span><span class="tok-punctuation">;</span>
-
-<span class="tok-keyword">const</span> reviewSchema<span class="tok-punctuation">:</span> <span class="tok-keyword">JsonSchema</span> <span class="tok-punctuation">=</span> <span class="tok-punctuation">{</span>
-  <span class="tok-keyword">type</span><span class="tok-punctuation">:</span> <span class="tok-string">"object"</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">properties</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
-    <span class="tok-property">pass</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span> <span class="tok-keyword">type</span><span class="tok-punctuation">:</span> <span class="tok-string">"boolean"</span> <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-    <span class="tok-property">findings</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span> <span class="tok-keyword">type</span><span class="tok-punctuation">:</span> <span class="tok-string">"array"</span><span class="tok-punctuation">,</span> <span class="tok-property">items</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span> <span class="tok-keyword">type</span><span class="tok-punctuation">:</span> <span class="tok-string">"string"</span> <span class="tok-punctuation">}</span> <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-  <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">required</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">[</span><span class="tok-string">"pass"</span><span class="tok-punctuation">,</span> <span class="tok-string">"findings"</span><span class="tok-punctuation">]</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">additionalProperties</span><span class="tok-punctuation">:</span> <span class="tok-boolean">false</span><span class="tok-punctuation">,</span>
-<span class="tok-punctuation">}</span><span class="tok-punctuation">;</span>
-
-<span class="tok-keyword">const</span> reviewLoopExtension<span class="tok-punctuation">:</span> <span class="tok-keyword">WorkflowExtension</span> <span class="tok-punctuation">=</span> <span class="tok-punctuation">{</span>
-  <span class="tok-property">version</span><span class="tok-punctuation">:</span> <span class="tok-string">"1.0.0"</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">headline</span><span class="tok-punctuation">:</span> <span class="tok-string">"Developer-review loop"</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">description</span><span class="tok-punctuation">:</span>
-    <span class="tok-string">"Runs developer and reviewer agents in a loop until review passes."</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">functions</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
-    <span class="tok-property">developUntilApproved</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
-      <span class="tok-property">description</span><span class="tok-punctuation">:</span>
-        <span class="tok-string">"Run developer and reviewer agents until review passes or the iteration limit is reached"</span><span class="tok-punctuation">,</span>
-      <span class="tok-property">input</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
-        <span class="tok-keyword">type</span><span class="tok-punctuation">:</span> <span class="tok-string">"object"</span><span class="tok-punctuation">,</span>
-        <span class="tok-property">properties</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
-          <span class="tok-property">task</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span> <span class="tok-keyword">type</span><span class="tok-punctuation">:</span> <span class="tok-string">"string"</span> <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-          <span class="tok-property">maxIterations</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span> <span class="tok-keyword">type</span><span class="tok-punctuation">:</span> <span class="tok-string">"integer"</span><span class="tok-punctuation">,</span> <span class="tok-property">minimum</span><span class="tok-punctuation">:</span> <span class="tok-number">1</span> <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-        <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-        <span class="tok-property">required</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">[</span><span class="tok-string">"task"</span><span class="tok-punctuation">]</span><span class="tok-punctuation">,</span>
-        <span class="tok-property">additionalProperties</span><span class="tok-punctuation">:</span> <span class="tok-boolean">false</span><span class="tok-punctuation">,</span>
-      <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-      <span class="tok-property">output</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
-        <span class="tok-keyword">type</span><span class="tok-punctuation">:</span> <span class="tok-string">"object"</span><span class="tok-punctuation">,</span>
-        <span class="tok-property">properties</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
-          <span class="tok-property">pass</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span> <span class="tok-keyword">type</span><span class="tok-punctuation">:</span> <span class="tok-string">"boolean"</span> <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-          <span class="tok-property">iterations</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span> <span class="tok-keyword">type</span><span class="tok-punctuation">:</span> <span class="tok-string">"integer"</span> <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-          <span class="tok-property">devResult</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span><span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-          <span class="tok-property">review</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span> <span class="tok-keyword">type</span><span class="tok-punctuation">:</span> <span class="tok-string">"object"</span> <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-        <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-        <span class="tok-property">required</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">[</span><span class="tok-string">"pass"</span><span class="tok-punctuation">,</span> <span class="tok-string">"iterations"</span><span class="tok-punctuation">,</span> <span class="tok-string">"devResult"</span><span class="tok-punctuation">,</span> <span class="tok-string">"review"</span><span class="tok-punctuation">]</span><span class="tok-punctuation">,</span>
-        <span class="tok-property">additionalProperties</span><span class="tok-punctuation">:</span> <span class="tok-boolean">false</span><span class="tok-punctuation">,</span>
-      <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-      <span class="tok-keyword">async</span> <span class="tok-function">run</span><span class="tok-punctuation">(</span>input<span class="tok-punctuation">,</span> <span class="tok-punctuation">{</span> agent<span class="tok-punctuation">,</span> prompt <span class="tok-punctuation">}</span><span class="tok-punctuation">)</span> <span class="tok-punctuation">{</span>
-        <span class="tok-keyword">const</span> <span class="tok-punctuation">{</span> task<span class="tok-punctuation">,</span> maxIterations <span class="tok-punctuation">=</span> <span class="tok-number">5</span> <span class="tok-punctuation">}</span> <span class="tok-punctuation">=</span> input <span class="tok-keyword">as</span> <span class="tok-punctuation">{</span>
-          <span class="tok-property">task</span><span class="tok-punctuation">:</span> <span class="tok-keyword">string</span><span class="tok-punctuation">;</span>
-          <span class="tok-property">maxIterations?</span><span class="tok-punctuation">:</span> <span class="tok-keyword">number</span><span class="tok-punctuation">;</span>
-        <span class="tok-punctuation">}</span><span class="tok-punctuation">;</span>
-        <span class="tok-keyword">let</span> devResult<span class="tok-punctuation">:</span> <span class="tok-keyword">JsonValue</span> <span class="tok-punctuation">=</span> <span class="tok-keyword">null</span><span class="tok-punctuation">;</span>
-        <span class="tok-keyword">let</span> review<span class="tok-punctuation">:</span> <span class="tok-keyword">JsonValue</span> <span class="tok-punctuation">=</span> <span class="tok-punctuation">{</span> <span class="tok-property">pass</span><span class="tok-punctuation">:</span> <span class="tok-boolean">false</span><span class="tok-punctuation">,</span> <span class="tok-property">findings</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">[</span><span class="tok-punctuation">]</span> <span class="tok-punctuation">}</span><span class="tok-punctuation">;</span>
-
-        <span class="tok-keyword">for</span> <span class="tok-punctuation">(</span><span class="tok-keyword">let</span> iterations <span class="tok-punctuation">=</span> <span class="tok-number">1</span><span class="tok-punctuation">;</span> iterations <span class="tok-punctuation">&lt;=</span> maxIterations<span class="tok-punctuation">;</span> iterations <span class="tok-punctuation">+=</span> <span class="tok-number">1</span><span class="tok-punctuation">)</span> <span class="tok-punctuation">{</span>
-          <span class="tok-keyword">const</span> devPrompt <span class="tok-punctuation">=</span>
-            iterations <span class="tok-punctuation">===</span> <span class="tok-number">1</span>
-              <span class="tok-punctuation">?</span> <span class="tok-function">prompt</span><span class="tok-punctuation">(</span><span class="tok-string">"Implement this task:\n\n{task}"</span><span class="tok-punctuation">,</span> <span class="tok-punctuation">{</span> task <span class="tok-punctuation">}</span><span class="tok-punctuation">)</span>
-              <span class="tok-punctuation">:</span> <span class="tok-function">prompt</span><span class="tok-punctuation">(</span>
-                  <span class="tok-string">"Address the review findings.\n\nTask:\n{task}\n\nReview:\n{review}"</span><span class="tok-punctuation">,</span>
-                  <span class="tok-punctuation">{</span> task<span class="tok-punctuation">,</span> review <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-                <span class="tok-punctuation">)</span><span class="tok-punctuation">;</span>
-          devResult <span class="tok-punctuation">=</span> <span class="tok-keyword">await</span> <span class="tok-function">agent</span><span class="tok-punctuation">(</span>devPrompt<span class="tok-punctuation">,</span> <span class="tok-punctuation">{</span> <span class="tok-property">role</span><span class="tok-punctuation">:</span> <span class="tok-string">"developer"</span> <span class="tok-punctuation">}</span><span class="tok-punctuation">)</span><span class="tok-punctuation">;</span>
-          review <span class="tok-punctuation">=</span> <span class="tok-keyword">await</span> <span class="tok-function">agent</span><span class="tok-punctuation">(</span>
-            <span class="tok-function">prompt</span><span class="tok-punctuation">(</span>
-              <span class="tok-string">"Review the implementation. Set pass=true only when complete.\n\nTask:\n{task}\n\nDeveloper result:\n{devResult}"</span><span class="tok-punctuation">,</span>
-              <span class="tok-punctuation">{</span> task<span class="tok-punctuation">,</span> devResult <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-            <span class="tok-punctuation">)</span><span class="tok-punctuation">,</span>
-            <span class="tok-punctuation">{</span> <span class="tok-property">role</span><span class="tok-punctuation">:</span> <span class="tok-string">"reviewer"</span><span class="tok-punctuation">,</span> <span class="tok-property">outputSchema</span><span class="tok-punctuation">:</span> reviewSchema <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-          <span class="tok-punctuation">)</span><span class="tok-punctuation">;</span>
-
-          <span class="tok-keyword">if</span> <span class="tok-punctuation">(</span><span class="tok-punctuation">(</span>review <span class="tok-keyword">as</span> <span class="tok-punctuation">{</span> <span class="tok-property">pass</span><span class="tok-punctuation">:</span> <span class="tok-keyword">boolean</span> <span class="tok-punctuation">}</span><span class="tok-punctuation">)</span><span class="tok-punctuation">.</span>pass<span class="tok-punctuation">)</span> <span class="tok-punctuation">{</span>
-            <span class="tok-keyword">return</span> <span class="tok-punctuation">{</span> <span class="tok-property">pass</span><span class="tok-punctuation">:</span> <span class="tok-boolean">true</span><span class="tok-punctuation">,</span> iterations<span class="tok-punctuation">,</span> devResult<span class="tok-punctuation">,</span> review <span class="tok-punctuation">}</span><span class="tok-punctuation">;</span>
-          <span class="tok-punctuation">}</span>
-        <span class="tok-punctuation">}</span>
-
-        <span class="tok-keyword">return</span> <span class="tok-punctuation">{</span> <span class="tok-property">pass</span><span class="tok-punctuation">:</span> <span class="tok-boolean">false</span><span class="tok-punctuation">,</span> <span class="tok-property">iterations</span><span class="tok-punctuation">:</span> maxIterations<span class="tok-punctuation">,</span> devResult<span class="tok-punctuation">,</span> review <span class="tok-punctuation">}</span><span class="tok-punctuation">;</span>
-      <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-    <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-  <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-<span class="tok-punctuation">}</span><span class="tok-punctuation">;</span>
-
-<span class="tok-keyword">export</span> <span class="tok-keyword">default</span> <span class="tok-keyword">function</span> <span class="tok-punctuation">(</span><span class="tok-punctuation">)</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">void</span> <span class="tok-punctuation">{</span>
-  <span class="tok-function">registerWorkflowExtension</span><span class="tok-punctuation">(</span>reviewLoopExtension<span class="tok-punctuation">)</span><span class="tok-punctuation">;</span>
-<span class="tok-punctuation">}</span></code></pre>
-        <p>After Pi loads the extension, <code>workflow_catalog</code> returns a compact index by default with registered function names, descriptions, input schemas, variables, and model aliases. Pass <code>{ "name": "developUntilApproved" }</code> to load one complete function or variable definition when inspecting output schemas, extension metadata, or composing programmatically. Launch functions directly with <code>{ "workflow": "developUntilApproved", "args": { "task": "..." } }</code>; registered functions use their registered name as the run name, while inline scripts require a non-empty <code>name</code>. The runtime validates the input before creating the run and validates the final result against the output schema. Registered functions also receive <code>agent</code>, <code>prompt</code>, combinators, lifecycle helpers, and run metadata through their context. They can compose registered functions without importing their source, for example <code>const report = await context.invoke("reviewRepository", { focus: "security" });</code>. The catalog exposes metadata and schemas, never implementations, resolver values, or source.</p>
-        <p>Host integrations can call <code>workflowCatalogIndex()</code> for compact registered-function and variable metadata, <code>workflowCatalogDetail(name)</code> for one complete definition, and <code>registeredWorkflowFunctions()</code> for the registered implementations keyed by name. These package APIs are for trusted host code, while <code>workflow_catalog</code> is the agent-facing tool for discovering workflow metadata and schemas.</p>
-        <h3>Role files</h3>
+        <p>Trusted Pi extensions can register reusable workflow functions, run-scoped variables, and per-agent setup hooks. The complete field-level authoring contract, validation rules, replay semantics, and copy-pasteable examples now live on the dedicated <a href="extensions.html">Extensions page</a>.</p>
+        <p>This anchor remains for compatibility with existing links. Keep role-file format documentation on this page and use the <a href="extensions.html#resources">extension resources section</a> for the boundary between author-facing extension APIs, roles, and settings-backed model aliases.</p>
+        <h3 id="roles">Role files</h3>
         <p>Global roles live under <code>&lt;agentDir&gt;/pi-extensible-workflows/roles/&lt;name&gt;.md</code>, defaulting to <code>~/.pi/agent/pi-extensible-workflows/roles/&lt;name&gt;.md</code>; set <code>PI_CODING_AGENT_DIR</code> to change it. Trusted project roles live under <code>&lt;cwd&gt;/.pi/pi-extensible-workflows/roles/&lt;name&gt;.md</code>.</p>
         <pre><code class="language-yaml"><span class="tok-punctuation">---</span>
 <span class="tok-property">description</span><span class="tok-punctuation">:</span> Reviews code for correctness
@@ -291,29 +205,7 @@ Focus on correctness and regressions.</code></pre>
   <span class="tok-property">skills</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">[</span>interactive-skill<span class="tok-punctuation">]</span>
   <span class="tok-property">extensions</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">[</span>../extensions/review-only.ts<span class="tok-punctuation">]</span>
 <span class="tok-punctuation">---</span></code></pre>
-        <p>Skill selectors are names; extension paths are normalized relative to the role file, with the same <code>~</code>, <code>file://</code>, canonicalization, and deduplication rules as settings.</p>
-        <p>When <code>role</code> is present, omit <code>model</code>, <code>thinking</code>, and <code>tools</code> from the agent call. The role body is appended to the native Pi system prompt.</p>
-        <h3>Prioritized agent setup hooks</h3>
-        <p><strong>Security:</strong> setup hooks are trusted extension code. They run after ordinary workflow model, tool, cwd, and role policy validation, but before the native Pi session is created. Hooks can bypass those boundaries by mutating the prompt, raw options, resolved session input, or session factory; never register untrusted code as a setup hook.</p>
-        <p><strong>TypeScript:</strong> hook callbacks are contextually typed. <code>agent.options</code> is the workflow-owned <code>AgentOptions</code> object, including its typed core fields and JSON-compatible extension options. <code>agent.sessionInput</code> is the workflow-owned pre-session input with typed <code>cwd</code>, <code>model</code>, <code>tools</code>, and system-prompt fields; its <code>customTools</code> and <code>extensionFactories</code> fields use Pi's <code>ToolDefinition</code> and <code>InlineExtension</code> types. <code>agent.createSession</code> is the typed workflow session factory and is callable with that session input; it is not Pi's raw <code>CreateAgentSessionOptions</code> object.</p>
-        <p>Register named hooks with an optional finite <code>priority</code>. Hooks run in ascending priority order (default <code>10</code>); equal priorities use the stable hook name as the tie-breaker. Each retry starts from a fresh baseline and runs every hook again. Hooks receive the workflow cancellation signal, and their asynchronous runtime is not charged against <code>timeoutMs</code>. A thrown hook error fails the agent immediately, prevents later hooks and session creation, and is not retried as a native-session failure.</p>
-        <pre><code class="language-typescript"><span class="tok-function">registerWorkflowExtension</span><span class="tok-punctuation">(</span><span class="tok-punctuation">{</span>
-  <span class="tok-property">version</span><span class="tok-punctuation">:</span> <span class="tok-string">"1.0.0"</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">headline</span><span class="tok-punctuation">:</span> <span class="tok-string">"Advisor setup"</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">description</span><span class="tok-punctuation">:</span> <span class="tok-string">"Adds optional advisor behavior"</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">agentSetupHooks</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
-    <span class="tok-property">advisor</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
-      <span class="tok-property">priority</span><span class="tok-punctuation">:</span> <span class="tok-number">10</span><span class="tok-punctuation">,</span>
-      <span class="tok-keyword">async</span> <span class="tok-function">setup</span><span class="tok-punctuation">(</span>agent<span class="tok-punctuation">,</span> context<span class="tok-punctuation">)</span> <span class="tok-punctuation">{</span>
-        <span class="tok-keyword">if</span> <span class="tok-punctuation">(</span>agent<span class="tok-punctuation">.</span>options<span class="tok-punctuation">.</span>advisor <span class="tok-punctuation">!==</span> <span class="tok-boolean">true</span><span class="tok-punctuation">)</span> <span class="tok-keyword">return</span><span class="tok-punctuation">;</span>
-        agent<span class="tok-punctuation">.</span>sessionInput<span class="tok-punctuation">.</span>extensionFactories <span class="tok-punctuation">??=</span> <span class="tok-punctuation">[</span><span class="tok-punctuation">]</span><span class="tok-punctuation">;</span>
-        agent<span class="tok-punctuation">.</span>sessionInput<span class="tok-punctuation">.</span>extensionFactories<span class="tok-punctuation">.</span><span class="tok-function">push</span><span class="tok-punctuation">(</span>scopedAdvisorFactory<span class="tok-punctuation">)</span><span class="tok-punctuation">;</span>
-        <span class="tok-keyword">if</span> <span class="tok-punctuation">(</span>context<span class="tok-punctuation">.</span>signal<span class="tok-punctuation">.</span>aborted<span class="tok-punctuation">)</span> <span class="tok-keyword">return</span><span class="tok-punctuation">;</span>
-      <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-    <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-  <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-<span class="tok-punctuation">}</span><span class="tok-punctuation">)</span><span class="tok-punctuation">;</span></code></pre>
-        <p>Unknown JSON-compatible agent options are preserved for setup hooks and native setup, but are not inherited by child agents. Inspection records only executed hook names and the effective model, tools, and cwd; it never serializes hook functions, opaque setup values, or raw options. Cold recovery reruns the hooks currently registered with the host; persisted runs do not pin an extension version.</p>
+        <p>Skill selectors are names; extension paths are normalized relative to the role file, with the same <code>~</code>, <code>file://</code>, canonicalization, and deduplication rules as settings. When <code>role</code> is present, omit <code>model</code>, <code>thinking</code>, and <code>tools</code> from the agent call. The role body is appended to the native Pi system prompt.</p>
       </section>
       <section id="lifecycle">
         <h2>Lifecycle, checkpoints, and worktrees</h2>
