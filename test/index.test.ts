@@ -2241,6 +2241,8 @@ void test("validates minimatch resource selectors and resolves extension globs",
   assert.deepEqual(loadSettings(path).disabledAgentResources, { skills: ["*", "!my-project-*", "{one,two}"], extensions: ["**/*", `!${resolve(root, "../../extensions/**")}`] });
   writeFileSync(path, JSON.stringify({ disabledAgentResources: { skills: [""] } }));
   assert.throws(() => loadSettings(path), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_SETTINGS" && error.message.includes(`${path}.disabledAgentResources.skills[0]`));
+  writeFileSync(path, JSON.stringify({ disabledAgentResources: { extensions: ["!"] } }));
+  assert.throws(() => loadSettings(path), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_SETTINGS" && error.message.includes(`${path}.disabledAgentResources.extensions[0]`));
 });
 void test("preserves rooted extension glob selectors", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-rooted-globs-"));

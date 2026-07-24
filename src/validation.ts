@@ -57,6 +57,7 @@ function validateAgentResourceExclusions(value: unknown, settingsPath: string, e
       if (kind === "extensions") {
         const negated = selector.startsWith("!");
         const body = negated ? selector.slice(1) : selector;
+        if (!body) fail(errorCode, `${base}.${kind}[${String(index)}] must be a valid minimatch pattern: Empty minimatch pattern ${JSON.stringify(selector)}`);
         try { selector = `${negated ? "!" : ""}${normalizedResourcePath(body, settingsPath)}`; } catch (error) { fail(errorCode, `${base}.${kind}[${String(index)}] must be a valid path: ${errorText(error)}`); }
       }
       try { validateResourcePattern(selector); } catch (error) { fail(errorCode, `${base}.${kind}[${String(index)}] must be a valid minimatch pattern: ${errorText(error)}`); }
