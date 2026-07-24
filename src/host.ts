@@ -1727,7 +1727,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
   });
   pi.on("before_agent_start", (event, ctx) => {
     if (!pi.getActiveTools().includes("workflow")) return;
-    const roles = Object.entries(loadAgentDefinitions(ctx.cwd, extensionAgentDir, projectTrusted(ctx))).filter(([, definition]) => definition.description);
+    const roles = Object.entries(loadAgentDefinitions(ctx.cwd, extensionAgentDir, projectTrusted(ctx), typeof registry.roleDirectoryRegistrations === "function" ? registry.roleDirectoryRegistrations() : undefined)).filter(([, definition]) => definition.description);
     if (!roles.length) return;
     const content = `Workflow role descriptions:\n${roles.map(([name, definition]) => `- \`${name}\`: ${String(definition.description)}`).join("\n")}`;
     return { systemPrompt: `${event.systemPrompt}\n\n${content}` };

@@ -125,7 +125,9 @@ export interface AgentSetup { prompt: string; options: AgentOptions; sessionInpu
 export interface AgentSetupContext { readonly run: Readonly<WorkflowRunContext>; readonly identity: Readonly<AgentIdentity>; readonly attempt: number; readonly signal: AbortSignal }
 export interface AgentSetupHook { priority?: number; setup: (agent: AgentSetup, context: Readonly<AgentSetupContext>) => void | Promise<void> }
 export interface RegisteredAgentSetupHook { name: string; priority: number; setup: AgentSetupHook["setup"] }
-export interface WorkflowExtension { version: string; headline: string; description: string; functions?: Readonly<Record<string, WorkflowFunction>>; variables?: Readonly<Record<string, WorkflowVariable>>; agentSetupHooks?: Readonly<Record<string, AgentSetupHook>> }
+export interface WorkflowExtensionMetadata { version: string; headline: string; description: string }
+export interface WorkflowRoleDirectoryRegistration { path: string; extension: WorkflowExtensionMetadata }
+export interface WorkflowExtension extends WorkflowExtensionMetadata { functions?: Readonly<Record<string, WorkflowFunction>>; variables?: Readonly<Record<string, WorkflowVariable>>; agentSetupHooks?: Readonly<Record<string, AgentSetupHook>>; roleDirectories?: readonly (string | URL)[] }
 export interface WorkflowJournal { get(path: string): JsonValue | undefined; put(path: string, value: JsonValue): void }
 export class WorkflowError extends Error { constructor(public readonly code: WorkflowErrorCode, message: string) { super(message); this.name = "WorkflowError"; } }
 export interface WorkflowFailureAgent { id: string; label?: string; role?: string; structuralPath: readonly string[]; attempt: number; sessionId?: string; sessionFile?: string }
