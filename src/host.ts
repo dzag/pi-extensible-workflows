@@ -180,7 +180,91 @@ export const WORKFLOW_TOOL_PARAMETERS = Type.Object({
 export const WORKFLOW_RETRY_PARAMETERS = Type.Object({ runId: Type.String({ description: "Explicit failed workflow run ID" }) });
 
 type WorkflowToolUpdate = { content: [{ type: "text"; text: string }]; details: { runId: string; run: PersistedRun } };
-
+export type WorkflowPhaseState = "not started" | "running" | "completed" | "failed" | "cancelled" | "interrupted" | "budget_exhausted";
+export interface WorkflowPhaseAgentCounts { total: number; completed: number; running: number; failed: number; cancelled: number; pending: number }
+export interface WorkflowPhaseView { id: string; name: string; occurrence: number; state: WorkflowPhaseState; status: WorkflowPhaseState; observed: boolean; afterAgent?: number; agents: readonly AgentRecord[]; counts: WorkflowPhaseAgentCounts }
+export interface WorkflowPhaseModel { declaredPhases: readonly string[]; phases: readonly WorkflowPhaseView[]; currentPhaseIndex?: number; currentPhaseId?: string; counts: Readonly<Partial<Record<WorkflowPhaseState, number>>>; unassignedAgents?: readonly AgentRecord[] }
+type WorkflowPhaseSource = readonly string[] | Pick<LaunchSnapshot, "phases"> | undefined;
+function phaseNames(source: WorkflowPhaseSource): string[] {
+  const phases: readonly unknown[] = source === undefined ? [] : Array.isArray(source) ? source : (source as Pick<LaunchSnapshot, "phases">).phases ?? [];
+  return phases.filter((phase): phase is string => typeof phase === "string" && phase.trim() !== "").map((phase) => phase.trim());
+}
+function phaseAgentCounts(agents: readonly AgentRecord[]): WorkflowPhaseAgentCounts {
+  const counts: WorkflowPhaseAgentCounts = { total: agents.length, completed: 0, running: 0, failed: 0, cancelled: 0, pending: 0 };
+  for (const agent of agents) {
+    if (agent.state === "completed") counts.completed += 1;
+    else if (agent.state === "running") counts.running += 1;
+    else if (agent.state === "failed") counts.failed += 1;
+    else if (agent.state === "cancelled") counts.cancelled += 1;
+    else counts.pending += 1;
+  }
+  return counts;
+}
+function phaseState(runState: RunState, counts: WorkflowPhaseAgentCounts, isLatest: boolean): WorkflowPhaseState {
+  if (!isLatest) return "completed";
+  if (runState === "failed") return "failed";
+  if (runState === "stopped") return "cancelled";
+  if (runState === "interrupted") return "interrupted";
+  if (runState === "budget_exhausted") return "budget_exhausted";
+  if (counts.failed > 0) return "failed";
+  if (counts.cancelled > 0) return "cancelled";
+  if (counts.running > 0 || counts.pending > 0) return "running";
+  return runState === "completed" ? "completed" : "running";
+}
+export function buildWorkflowPhaseModel(run: Pick<PersistedRun, "state" | "phase" | "phaseHistory" | "agents">, source?: WorkflowPhaseSource): WorkflowPhaseModel {
+  const declaredPhases = phaseNames(source);
+  const rawHistory: readonly unknown[] = Array.isArray(run.phaseHistory) ? run.phaseHistory : [];
+  const observed: Array<{ name: string; afterAgent: number }> = [];
+  let boundary = 0;
+  for (const record of rawHistory) {
+    if (!object(record) || typeof record.phase !== "string" || !record.phase.trim() || typeof record.afterAgent !== "number" || !Number.isSafeInteger(record.afterAgent)) continue;
+    boundary = Math.max(boundary, Math.min(run.agents.length, Math.max(0, record.afterAgent)));
+    observed.push({ name: record.phase.trim(), afterAgent: boundary });
+  }
+  if (!observed.length && typeof run.phase === "string" && run.phase.trim()) observed.push({ name: run.phase.trim(), afterAgent: 0 });
+  const observedEntries = observed.map((entry, index) => ({ ...entry, index, agents: run.agents.slice(entry.afterAgent, observed[index + 1]?.afterAgent ?? run.agents.length) }));
+  const matchedDeclarations = new Set<number>();
+  const declarationIndices = observedEntries.map((entry) => {
+    const index = declaredPhases.findIndex((name, candidate) => !matchedDeclarations.has(candidate) && name === entry.name);
+    if (index >= 0) matchedDeclarations.add(index);
+    return index >= 0 ? index : undefined;
+  });
+  const entries: Array<{ name: string; observedIndex?: number; declarationIndex?: number }> = observedEntries.map((entry, index) => ({ name: entry.name, observedIndex: index, ...(declarationIndices[index] === undefined ? {} : { declarationIndex: declarationIndices[index] }) }));
+  for (const [declarationIndex, name] of declaredPhases.entries()) {
+    if (matchedDeclarations.has(declarationIndex)) continue;
+    const insertion = entries.findIndex((entry) => entry.declarationIndex !== undefined && entry.declarationIndex > declarationIndex);
+    const pending = { name };
+    if (insertion < 0) entries.push(pending); else entries.splice(insertion, 0, pending);
+  }
+  const occurrences = new Map<string, number>();
+  const phases = entries.map((entry) => {
+    const occurrence = (occurrences.get(entry.name) ?? 0) + 1;
+    occurrences.set(entry.name, occurrence);
+    const observation = entry.observedIndex === undefined ? undefined : observedEntries[entry.observedIndex];
+    const agents = observation?.agents ?? [];
+    const counts = phaseAgentCounts(agents);
+    const state = observation ? phaseState(run.state, counts, entry.observedIndex === observedEntries.length - 1) : "not started";
+    return { id: `${entry.name}#${String(occurrence)}`, name: entry.name, occurrence, state, status: state, observed: observation !== undefined, ...(observation ? { afterAgent: observation.afterAgent } : {}), agents, counts };
+  });
+  let currentPhaseIndex: number | undefined;
+  for (let index = phases.length - 1; index >= 0; index -= 1) { if (phases[index]?.observed) { currentPhaseIndex = index; break; } }
+  const counts: Partial<Record<WorkflowPhaseState, number>> = {};
+  for (const phase of phases) counts[phase.state] = (counts[phase.state] ?? 0) + 1;
+  const current = currentPhaseIndex === undefined ? undefined : phases[currentPhaseIndex];
+  const assigned = new Set(observedEntries.flatMap(({ agents }) => agents.map((agent) => agent.id)));
+  const unassignedAgents = run.agents.filter((agent) => !assigned.has(agent.id));
+  const result: WorkflowPhaseModel = { declaredPhases, phases, counts };
+  if (current !== undefined && currentPhaseIndex !== undefined) { result.currentPhaseIndex = currentPhaseIndex; result.currentPhaseId = current.id; }
+  if (unassignedAgents.length) result.unassignedAgents = unassignedAgents;
+  return result;
+}
+export interface WorkflowPhaseSelection { phaseId?: string | undefined; agentId?: string | undefined }
+export function preserveWorkflowPhaseSelection(model: WorkflowPhaseModel, selection: WorkflowPhaseSelection): WorkflowPhaseSelection {
+  const phase = model.phases.find((candidate) => candidate.id === selection.phaseId) ?? (model.currentPhaseIndex === undefined ? undefined : model.phases[model.currentPhaseIndex]) ?? model.phases[0];
+  if (!phase) return {};
+  const agentId = phase.agents.some((agent) => agent.id === selection.agentId) ? selection.agentId : phase.agents[0]?.id;
+  return { phaseId: phase.id, ...(agentId === undefined ? {} : { agentId }) };
+}
 type AgentGroup = { label: string; entries: readonly { agent: AgentRecord; index: number; depth: number }[] };
 function agentGroupKey(agent: AgentRecord): string { return JSON.stringify([agent.structuralPath ?? [], agent.parentBreadcrumb ?? null]); }
 function agentGroupLabel(agents: readonly AgentRecord[]): string {
@@ -193,7 +277,8 @@ function agentGroups(agents: readonly AgentRecord[], allAgents: readonly AgentRe
   const groups = new Map<string, { agents: Array<{ agent: AgentRecord; index: number; depth: number }> }>();
   for (const [index, agent] of agents.entries()) {
     let depth = 0;
-    for (let parent = agent.parentId; parent && byId.has(parent); parent = byId.get(parent)?.parentId) depth += 1;
+    const seen = new Set<string>([agent.id]);
+    for (let parent = agent.parentId; parent && byId.has(parent); parent = byId.get(parent)?.parentId) { if (seen.has(parent)) break; seen.add(parent); depth += 1; }
     const key = agentGroupKey(agent);
     const group = groups.get(key) ?? { agents: [] };
     group.agents.push({ agent, index, depth });
@@ -375,7 +460,7 @@ function themeWorkflowProgressStyles(theme: Theme): WorkflowProgressStyles {
     warning: (text) => theme.fg("warning", text),
     muted: (text) => theme.fg("muted", text),
     dim: (text) => theme.fg("dim", text),
-    bold: (text) => theme.bold(text),
+    bold: (text) => typeof theme.bold === "function" ? theme.bold(text) : text,
   };
 }
 function workflowProgressBlock(run: PersistedRun, theme: Theme) {
@@ -429,28 +514,29 @@ function navigatorRunLabels(entries: readonly { store: RunStore; loaded: { run: 
   });
 }
 
-function agentBreadcrumbParts(agent: AgentRecord, byId: Map<string, AgentRecord>): string[] {
-  const name = agent.label ?? agent.name;
-  const parts: string[] = agent.parentBreadcrumb ? [agent.parentBreadcrumb] : [];
+export function agentBreadcrumbParts(agent: AgentRecord, byId: Map<string, AgentRecord>, includeStructuralPath = false): string[] {
+  const leaf = agent.label ?? agent.name;
+  const parts: string[] = includeStructuralPath && agent.structuralPath?.length ? [agent.structuralPath.join(" > ")] : [];
+  if (agent.parentBreadcrumb) parts.push(agent.parentBreadcrumb);
+  const ancestors: string[] = [];
   const seen = new Set<string>([agent.id]);
   for (let parentId = agent.parentId; parentId; parentId = byId.get(parentId)?.parentId) {
-    if (seen.has(parentId)) break; // ponytail: cycle guard for corrupt data
+    if (seen.has(parentId)) break;
     seen.add(parentId);
     const parent = byId.get(parentId);
-    if (parent) parts.push(parent.label ?? parent.name);
-    else break;
+    if (!parent) break;
+    ancestors.push(parent.label ?? parent.name);
   }
-  parts.push(name);
+  parts.push(...ancestors.reverse(), leaf);
   return parts;
 }
-function agentBreadcrumb(agent: AgentRecord, byId: Map<string, AgentRecord>): string {
-  const parts = agentBreadcrumbParts(agent, byId);
-  return parts.length > 1 ? parts.join(" > ") : parts[0] ?? "";
+export function agentBreadcrumb(agent: AgentRecord, byId: Map<string, AgentRecord>, includeStructuralPath = false): string {
+  return agentBreadcrumbParts(agent, byId, includeStructuralPath).join(" > ");
 }
 function styledAgentBreadcrumb(agent: AgentRecord, byId: Map<string, AgentRecord>, styles: WorkflowProgressStyles): string {
   const parts = agentBreadcrumbParts(agent, byId);
   if (parts.length <= 1) return parts[0] ?? "";
-  return `${styles.muted(parts.slice(0, -1).join(" > "))} > ${parts[parts.length - 1] ?? ""}`;
+  return `${styles.muted(parts.slice(0, -1).join(" > "))} > ${styles.bold(parts[parts.length - 1] ?? "")}`;
 }
 
 function formatAgentActivity(agent: AgentRecord, spinner: string, styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES): string {
@@ -533,6 +619,60 @@ export function formatNavigatorRun(loaded: { run: PersistedRun; snapshot: Readon
   lines.push(`Worktrees: ${String(_worktrees.length)}`);
   lines.push(`Native Pi transcripts: ${String(run.nativeSessions.length)}`);
   return lines.join("\n");
+}
+export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readonly<LaunchSnapshot>, width: number, selection: WorkflowPhaseSelection = {}, styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES): string[] {
+  const safeWidth = Math.max(1, width);
+  const model = buildWorkflowPhaseModel(run, snapshot);
+  const wrap = (text: string, limit = safeWidth): string[] => truncateToVisualLines(text, Number.MAX_SAFE_INTEGER, Math.max(1, limit), 0).visualLines.map((line) => line.trimEnd());
+  const phaseStyle = (state: WorkflowPhaseState): ((text: string) => string) => state === "completed" ? (text) => styles.success(text) : state === "failed" || state === "cancelled" ? (text) => styles.error(text) : state === "running" ? (text) => styles.accent(text) : state === "interrupted" || state === "budget_exhausted" ? (text) => styles.warning(text) : (text) => styles.muted(text);
+  const phaseName = (phase: WorkflowPhaseView): string => `${phase.name}${phase.occurrence > 1 ? ` #${String(phase.occurrence)}` : ""}`;
+  const phaseCounts = (phase: WorkflowPhaseView): string => `agents completed=${String(phase.counts.completed)} running=${String(phase.counts.running)} failed=${String(phase.counts.failed)} cancelled=${String(phase.counts.cancelled)} pending=${String(phase.counts.pending)}`;
+  const phaseLine = (phase: WorkflowPhaseView, selected: boolean): string => `${selected ? "→" : " "} ${phaseName(phase)} · ${phaseStyle(phase.state)(phase.state)} · ${phaseCounts(phase)}`;
+  const stateNames: readonly WorkflowPhaseState[] = ["not started", "running", "completed", "failed", "cancelled", "interrupted", "budget_exhausted"];
+  const statusSummary = stateNames.filter((state) => (model.counts[state] ?? 0) > 0).map((state) => `${String(model.counts[state])} ${state}`).join(" · ") || "0 phases";
+  const selectedIndex = selection.phaseId ? model.phases.findIndex((phase) => phase.id === selection.phaseId) : -1;
+  const activeIndex = selectedIndex >= 0 ? selectedIndex : model.currentPhaseIndex ?? (model.phases.length ? 0 : -1);
+  const selectedPhase = activeIndex >= 0 ? model.phases[activeIndex] : undefined;
+  const lines: string[] = [styles.bold(styles.accent(`Workflow: ${run.workflowName}`))];
+  if (run.error) lines.push(styles.error(`ERROR ${run.error.code}: ${run.error.message}`));
+  lines.push(`phase: ${run.phase ?? selectedPhase?.name ?? "none"}`, `Run state: ${run.state}`, `Phases: ${statusSummary}`);
+  for (const event of run.events ?? []) lines.push(styles.warning(`Warning: ${event.message}`));
+  lines.push(...formatCompactBudgetStatus(run));
+  const byId = new Map(run.agents.map((agent) => [agent.id, agent]));
+  const renderAgentLines = (agents: readonly AgentRecord[], selectedAgentId: string | undefined): string[] => {
+    if (!agents.length) return [styles.muted("Agents: none")];
+    const rendered: string[] = [];
+    for (const agent of agents) {
+      const selected = agent.id === selectedAgentId;
+      const stateStyle = progressStyleForState(agent.state, styles);
+      const icon = agent.state === "completed" ? "✓" : agent.state === "failed" || agent.state === "cancelled" ? "✗" : agent.state === "running" ? "⠦" : "○";
+      rendered.push(`${selected ? "→" : " "} ${stateStyle(icon)} ${styledAgentBreadcrumb(agent, byId, styles)} · ${stateStyle(agent.state)}`);
+      if (agent.state === "failed") {
+        const error = agent.attemptDetails?.at(-1)?.error;
+        if (error) rendered.push(styles.error(`  error: ${error.code}: ${error.message}`));
+      }
+    }
+    return rendered;
+  };
+  if (!model.phases.length) {
+    lines.push(styles.muted("Phases: no declared or observed phases (legacy snapshot)"), styles.bold("Agents"), ...renderAgentLines(run.agents, selection.agentId));
+    return lines.flatMap((line) => wrap(line));
+  }
+  const selectedAgent = selectedPhase?.agents.find((agent) => agent.id === selection.agentId) ?? selectedPhase?.agents[0];
+  if (safeWidth >= 80) {
+    const sidebarWidth = Math.min(38, Math.max(24, Math.floor(safeWidth * 0.36)));
+    const detailWidth = Math.max(1, safeWidth - sidebarWidth - 3);
+    const sidebar = [styles.bold("Phases"), ...model.phases.flatMap((phase, index) => wrap(phaseLine(phase, index === activeIndex), sidebarWidth))];
+    const detail = selectedPhase ? [styles.bold(`Phase: ${phaseName(selectedPhase)}`), ...wrap(`Status: ${phaseStyle(selectedPhase.state)(selectedPhase.state)}`, detailWidth), ...wrap(phaseCounts(selectedPhase), detailWidth), "Agents", ...renderAgentLines(selectedPhase.agents, selectedAgent?.id).flatMap((line) => wrap(line, detailWidth))] : [styles.muted("No phase is selected")];
+    const rows = Math.max(sidebar.length, detail.length);
+    for (let index = 0; index < rows; index += 1) lines.push(`${sidebar[index] ?? ""} | ${detail[index] ?? ""}`);
+  } else {
+    lines.push(styles.bold("Phases"));
+    for (const [index, phase] of model.phases.entries()) lines.push(...wrap(phaseLine(phase, index === activeIndex)));
+    if (selectedPhase) lines.push("", styles.bold(`Selected phase: ${phaseName(selectedPhase)}`), ...wrap(`Status: ${phaseStyle(selectedPhase.state)(selectedPhase.state)}`), ...wrap(phaseCounts(selectedPhase)), styles.bold("Agents"), ...renderAgentLines(selectedPhase.agents, selectedAgent?.id).flatMap((line) => wrap(line)));
+  }
+  if (model.unassignedAgents?.length) lines.push(...wrap(styles.muted(`Unassigned agents: ${String(model.unassignedAgents.length)}`)));
+  return lines.flatMap((line) => wrap(line));
 }
 function formatCheckpointReview(checkpoint: AwaitingCheckpoint): string {
   const context = JSON.stringify(checkpoint.context, null, 2);
@@ -1133,10 +1273,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
   };
   const phaseBridge = (store: RunStore, metadata: WorkflowMetadata, lifecycle: RunLifecycle) => {
     let cursor = 0;
-    let executionPhase: string | undefined;
     return async (phase: string): Promise<void> => {
-      if (phase === executionPhase) return;
-      executionPhase = phase;
       await scheduler.flush();
       await lifecycle.enter();
       try {
@@ -1800,7 +1937,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const projectRoles = roleNames.filter((role) => projectAgentDefinitions[role] !== undefined);
       const roleModels = roleNames.flatMap((role) => { const model = agentDefinitions[role]?.model; return model ? [modelCapability(model, modelAliases, knownModels, settingsPath)] : []; });
       const snapshotModels = [...new Set([rootModelName, ...checked.referenced.models, ...roleModels])];
-      const snapshot = createLaunchSnapshot({ script, args, metadata: checked.metadata, settings, settingsPath, settingsSources: { ...launch.resolution.sources, concurrency: params.concurrency === undefined ? launch.resolution.sources.concurrency : "per-run options" }, ...(functionName ? { launchKind: "function" as const, functionName } : {}), ...(Object.keys(modelAliases).length ? { modelAliases } : {}), ...(budget ? { budget } : {}), models: snapshotModels, tools: rootTools, agentTypes: checked.referenced.agentTypes, roles, projectRoles, schemas: checked.schemas });
+      const snapshot = createLaunchSnapshot({ script, args, metadata: checked.metadata, settings, settingsPath, settingsSources: { ...launch.resolution.sources, concurrency: params.concurrency === undefined ? launch.resolution.sources.concurrency : "per-run options" }, ...(functionName ? { launchKind: "function" as const, functionName } : {}), ...(Object.keys(modelAliases).length ? { modelAliases } : {}), ...(budget ? { budget } : {}), ...(checked.referenced.phases.length ? { phases: checked.referenced.phases } : {}), models: snapshotModels, tools: rootTools, agentTypes: checked.referenced.agentTypes, roles, projectRoles, schemas: checked.schemas });
       const budgetRuntime = new WorkflowBudgetRuntime(budget);
       const initialBudget = budgetRuntime.snapshot();
       await store.create({ id: runId, workflowName: checked.metadata.name, cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId(), state: "running", ...(parentRunId !== undefined ? { parentRunId } : {}), agents: [], nativeSessions: [], ...(budget ? { budget } : {}), budgetVersion: 1, ...initialBudget }, snapshot);
@@ -2143,19 +2280,11 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
               addCopy("Copy run path", store.directory, "run path");
               addCopy("Copy run ID", store.runId, "run ID");
             }
-            return { dashboard: formatNavigatorDashboard(loaded.run, checkpoints, worktrees), actions, copies, reviews, script: loaded.snapshot.script, agents: loaded.run.agents, worktrees, cwd: loaded.run.cwd };
+            return { dashboard: formatWorkflowPhaseDashboard(loaded.run, loaded.snapshot, process.stdout.columns || 80).join("\n"), phaseModel: buildWorkflowPhaseModel(loaded.run, loaded.snapshot), run: loaded.run, snapshot: loaded.snapshot, actions, copies, reviews, script: loaded.snapshot.script, agents: loaded.run.agents, worktrees, cwd: loaded.run.cwd };
           };
           const selectAgent = async (dashboard: Awaited<ReturnType<typeof loadDashboard>>): Promise<void> => {
             const byId = new Map(dashboard.agents.map((agent) => [agent.id, agent]));
-            const title = (agent: AgentRecord): string => {
-              const parents: string[] = [];
-              for (let parentId = agent.parentId; parentId; parentId = byId.get(parentId)?.parentId) {
-                const parent = byId.get(parentId);
-                if (!parent) break;
-                parents.unshift(parent.label ?? parent.name);
-              }
-              return [...((agent.structuralPath ?? []).length ? [(agent.structuralPath ?? []).join(" > ")] : []), ...(agent.parentBreadcrumb ? [agent.parentBreadcrumb] : []), ...parents, agent.label ?? agent.name].join(" > ");
-            };
+            const title = (agent: AgentRecord): string => agentBreadcrumb(agent, byId, true);
             const labels = dashboard.agents.map((agent, index) => `#${String(index + 1)} ${title(agent)} [${agent.state}]`);
             const selectedLabel = await ctx.ui.select("Agents", [...labels, "Back"]);
             const selectedIndex = selectedLabel ? labels.indexOf(selectedLabel) : -1;
@@ -2206,8 +2335,11 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                   let disposed = false;
                   let stopRequested = false;
                   let stopStatus: string | undefined;
+                  const initialSelection = preserveWorkflowPhaseSelection(view.phaseModel, {});
+                  let selectedPhaseId = initialSelection.phaseId;
+                  let selectedAgentId = initialSelection.agentId;
                   const terminalRows = () => Math.max(1, tuiRows(tui) - WORKFLOW_OVERLAY_BORDER_ROWS);
-                  const keyLabels: Record<string, string> = { up: "↑", down: "↓", pageUp: "pgup", pageDown: "pgdn", escape: "esc" };
+                  const keyLabels: Record<string, string> = { up: "↑", down: "↓", left: "←", right: "→", tab: "tab", pageUp: "pgup", pageDown: "pgdn", escape: "esc" };
                   const keyLabel = (binding: string, fallback: string) => {
                     const keys = keybindingKeys(keybindings, binding);
                     return keys?.length ? keys.map((key) => keyLabels[key] ?? key).join("/") : fallback;
@@ -2221,11 +2353,16 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                     return { rows, hintRows, separatorRows, actionViewport, dashboardViewport: available - actionViewport };
                   };
                   const updateDashboard = async (selectedOption: string | undefined) => {
+                    const phaseId = selectedPhaseId;
+                    const agentId = selectedAgentId;
                     const next = await loadDashboard();
                     if (disposed) return;
                     view = next;
                     options = [...view.actions.keys(), "Close"];
                     selectedIndex = Math.max(0, options.indexOf(selectedOption ?? ""));
+                    const preserved = preserveWorkflowPhaseSelection(view.phaseModel, { phaseId, agentId });
+                    selectedPhaseId = preserved.phaseId;
+                    selectedAgentId = preserved.agentId;
                     tui.requestRender();
                   };
                   const requestStop = () => {
@@ -2256,11 +2393,12 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                   timer.unref();
                   return borderWorkflowOverlay({
                     render(width: number) {
-                      const dashboard = stopStatus ? `${view.dashboard}\n\n${stopStatus}` : view.dashboard;
-                      const dashboardLines = truncateToVisualLines(theme.fg("accent", dashboard), Number.MAX_SAFE_INTEGER, width, 1).visualLines;
+                      const styles = themeWorkflowProgressStyles(theme);
+                      const phaseLines = formatWorkflowPhaseDashboard(view.run, view.snapshot, width, { phaseId: selectedPhaseId, agentId: selectedAgentId }, styles);
+                      const dashboardLines = stopStatus ? [styles.error(stopStatus), ...phaseLines] : phaseLines;
                       const actionLines = options.map((option, index) => truncateToVisualLines(`${index === selectedIndex ? "→ " : "  "}${option}`, Number.MAX_SAFE_INTEGER, width, 1).visualLines[0] ?? "");
                       const layout = dashboardLayout();
-                      const hint = truncateToVisualLines(theme.fg("dim", `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} navigate${dashboardLines.length > layout.dashboardViewport ? ` · ${keyLabel("tui.select.pageUp", "pgup")}/${keyLabel("tui.select.pageDown", "pgdn")} scroll` : ""} · ${keyLabel("tui.select.confirm", "enter")} select · ${keyLabel("tui.select.cancel", "esc")} close · auto-refresh 1s`), Number.MAX_SAFE_INTEGER, width, 1).visualLines[0] ?? "";
+                      const hint = truncateToVisualLines(theme.fg("dim", `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} actions · ${keyLabel("tui.editor.cursorLeft", "←")}/${keyLabel("tui.editor.cursorRight", "→")} phases · ${keyLabel("tui.input.tab", "tab")} agents${dashboardLines.length > layout.dashboardViewport ? ` · ${keyLabel("tui.select.pageUp", "pgup")}/${keyLabel("tui.select.pageDown", "pgdn")} scroll` : ""} · ${keyLabel("tui.select.confirm", "enter")} select · ${keyLabel("tui.select.cancel", "esc")} close · auto-refresh 1s`), Number.MAX_SAFE_INTEGER, width, 1).visualLines[0] ?? "";
                       const compact = [...dashboardLines, "", ...actionLines, "", hint];
                       if (compact.length <= layout.rows) { dashboardOffset = 0; return compact; }
                       const maxOffset = Math.max(0, dashboardLines.length - layout.dashboardViewport);
@@ -2276,7 +2414,27 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                     invalidate() {},
                     handleInput(data: string) {
                       if (stopRequested) return;
-                      if (keybindings.matches(data, "tui.select.up")) selectedIndex = (selectedIndex + options.length - 1) % options.length;
+                      const currentPhase = () => view.phaseModel.phases.find((phase) => phase.id === selectedPhaseId);
+                      const left = keybindings.matches(data, "tui.editor.cursorLeft");
+                      const right = keybindings.matches(data, "tui.editor.cursorRight");
+                      if (left || right) {
+                        const phases = view.phaseModel.phases;
+                        if (phases.length) {
+                          const currentIndex = Math.max(0, phases.findIndex((phase) => phase.id === selectedPhaseId));
+                          const delta = left ? -1 : 1;
+                          const nextPhase = phases[(currentIndex + delta + phases.length) % phases.length];
+                          selectedPhaseId = nextPhase?.id;
+                          selectedAgentId = nextPhase?.agents[0]?.id;
+                        }
+                      }
+                      else if (keybindings.matches(data, "tui.input.tab")) {
+                        const agents = currentPhase()?.agents ?? [];
+                        if (agents.length) {
+                          const currentIndex = Math.max(0, agents.findIndex((agent) => agent.id === selectedAgentId));
+                          selectedAgentId = agents[(currentIndex + 1) % agents.length]?.id;
+                        }
+                      }
+                      else if (keybindings.matches(data, "tui.select.up")) selectedIndex = (selectedIndex + options.length - 1) % options.length;
                       else if (keybindings.matches(data, "tui.select.down")) selectedIndex = (selectedIndex + 1) % options.length;
                       else if (keybindings.matches(data, "tui.select.pageUp")) {
                         dashboardOffset = Math.max(0, dashboardOffset - Math.max(1, dashboardLayout().dashboardViewport));

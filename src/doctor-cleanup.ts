@@ -105,6 +105,7 @@ function validateSnapshot(snapshot: unknown): void {
   validateBudget(snapshot.budget);
   if (snapshot.modelAliases !== undefined) validateModelAliases(snapshot.modelAliases);
   if (snapshot.settings.modelAliases !== undefined) validateModelAliases(snapshot.settings.modelAliases);
+  if (snapshot.phases !== undefined) stringList(snapshot.phases, "Persisted snapshot phases");
   resourceExclusions(snapshot.settings.disabledAgentResources, "Persisted snapshot disabled resources");
   if (snapshot.roles !== undefined) { if (!object(snapshot.roles)) throw new Error("Persisted snapshot roles are invalid"); for (const [name, definition] of Object.entries(snapshot.roles)) agentDefinition(definition, `Persisted snapshot role ${name}`); }
   if (snapshot.projectRoles !== undefined) stringList(snapshot.projectRoles, "Persisted snapshot project roles");
