@@ -38,6 +38,13 @@ function workflowLaunchSettings(cwd: string, projectTrusted: boolean, globalSett
   return { settings, resolution, resourcePolicy: resolveAgentResourcePolicy(cwd, projectTrusted, globalSettingsPath), modelSettingsPath: resolution.sources.modelAliases };
 }
 function frozenResourcePolicy(policy: AgentResourcePolicy): () => AgentResourcePolicy { return () => structuredClone(policy); }
+function resumedSnapshotSettings(snapshot: Readonly<LaunchSnapshot>, resolution: WorkflowSettingsResolution, modelAliases: Readonly<Record<string, string>>): { settings: WorkflowSettings; settingsSources?: NonNullable<LaunchSnapshot["settingsSources"]> } {
+  const settings: WorkflowSettings = { ...snapshot.settings, concurrency: snapshot.settingsSources === undefined || snapshot.settingsSources.concurrency === "per-run options" ? snapshot.settings.concurrency : resolution.effective.concurrency, modelAliases };
+  if (resolution.effective.disabledAgentResources === undefined) delete settings.disabledAgentResources;
+  else settings.disabledAgentResources = resolution.effective.disabledAgentResources;
+  const settingsSources = snapshot.settingsSources === undefined ? undefined : { ...snapshot.settingsSources, modelAliases: resolution.sources.modelAliases, disabledAgentResources: resolution.sources.disabledAgentResources, concurrency: snapshot.settingsSources.concurrency === "per-run options" ? "per-run options" : resolution.sources.concurrency };
+  return { settings, ...(settingsSources === undefined ? {} : { settingsSources }) };
+}
 const WORKFLOW_FAILURE_DIAGNOSTICS = Symbol("workflowFailureDiagnostics");
 
 function workflowDetail(message: string): string {
@@ -1295,7 +1302,6 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const resolution = resolveWorkflowSettings(run.store.cwd, run.projectTrusted(), settingsPath);
     const currentPolicy = resolveAgentResourcePolicy(run.store.cwd, run.projectTrusted(), settingsPath);
     const currentAliases = resolution.effective.modelAliases ?? {};
-    const resumedConcurrency = loaded.snapshot.settingsSources?.concurrency === "per-run options" ? loaded.snapshot.settings.concurrency : resolution.effective.concurrency;
     const previousAliases = loaded.snapshot.modelAliases ?? loaded.snapshot.settings.modelAliases ?? {};
     const modelRegistry = context?.modelRegistry;
     const knownModels = new Set((modelRegistry?.getAll?.() ?? modelRegistry?.getAvailable?.() ?? []).map((model) => `${model.provider}/${model.id}`));
@@ -1303,7 +1309,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const resumeModels = modelRegistry ? knownModels : new Set([...loaded.snapshot.models, ...knownModels]);
     const blockedAliases = new Set(Object.keys(previousAliases).filter((name) => !Object.prototype.hasOwnProperty.call(currentAliases, name)));
     const blockedAliasTargets = Object.fromEntries(Object.entries(previousAliases).filter(([name]) => !Object.prototype.hasOwnProperty.call(currentAliases, name)));
-    const snapshot = createLaunchSnapshot({ ...loaded.snapshot, settingsPath, settingsSources: { ...(loaded.snapshot.settingsSources ?? resolution.sources), modelAliases: resolution.sources.modelAliases, disabledAgentResources: resolution.sources.disabledAgentResources, concurrency: loaded.snapshot.settingsSources?.concurrency === "per-run options" ? "per-run options" : resolution.sources.concurrency }, settings: { ...loaded.snapshot.settings, concurrency: resumedConcurrency, modelAliases: currentAliases, ...(resolution.effective.disabledAgentResources ? { disabledAgentResources: resolution.effective.disabledAgentResources } : {}) }, modelAliases: currentAliases });
+    const refreshed = resumedSnapshotSettings(loaded.snapshot, resolution, currentAliases);
+    const snapshot = createLaunchSnapshot({ ...loaded.snapshot, settingsPath, ...refreshed, modelAliases: currentAliases });
     await run.store.saveSnapshot(snapshot);
     scheduler.updateRunLimit(run.store.runId, snapshot.settings.concurrency);
     run.executor = new WorkflowAgentExecutor({ cwd: run.store.cwd, agentDir: extensionAgentDir, model: run.model, tools: new Set(snapshot.tools.filter((tool) => pi.getActiveTools().includes(tool) && tool !== "workflow_catalog")), availableModels: resumeModels, knownModels: resumeModels, modelAliases: currentAliases, blockedAliases, blockedAliasTargets, settingsPath: resolution.sources.modelAliases, agentDefinitions: snapshot.roles ?? {}, runStore: run.store, providerPause: async () => { deliver(pi, `Workflow ${snapshot.metadata.name} paused: provider limit.`); await run.lifecycle.providerPause(); }, agentSetupHooks: registry.agentSetupHooks(), agentResourcePolicy: frozenResourcePolicy(currentPolicy) }, createSession);
@@ -1327,7 +1334,6 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const resolution = resolveWorkflowSettings(run.store.cwd, trustedProject, settingsPath);
     const currentPolicy = resolveAgentResourcePolicy(run.store.cwd, trustedProject, settingsPath);
     const currentAliases = resolution.effective.modelAliases ?? {};
-    const resumedConcurrency = loaded.snapshot.settingsSources?.concurrency === "per-run options" ? loaded.snapshot.settings.concurrency : resolution.effective.concurrency;
     const previousAliases = loaded.snapshot.modelAliases ?? loaded.snapshot.settings.modelAliases ?? {};
     const modelRegistry = context?.modelRegistry;
     const knownModels = new Set((modelRegistry?.getAll?.() ?? modelRegistry?.getAvailable?.() ?? []).map((model) => `${model.provider}/${model.id}`));
@@ -1338,7 +1344,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const blockedAliasTargets = Object.fromEntries(Object.entries(previousAliases).filter(([name]) => !Object.prototype.hasOwnProperty.call(currentAliases, name)));
     const script = launchScriptForSnapshot(loaded.snapshot, registry);
     preflight(script, { models: resumeModels, tools: active, agentTypes: new Set(loaded.snapshot.agentTypes), modelAliases: resumeAliases, knownModels: resumeModels, settingsPath: resolution.sources.modelAliases, skipModelAvailability: true }, loaded.snapshot.schemas, loaded.snapshot.metadata, true);
-    const snapshot = createLaunchSnapshot({ ...loaded.snapshot, settingsPath, settingsSources: { ...(loaded.snapshot.settingsSources ?? resolution.sources), modelAliases: resolution.sources.modelAliases, disabledAgentResources: resolution.sources.disabledAgentResources, concurrency: loaded.snapshot.settingsSources?.concurrency === "per-run options" ? "per-run options" : resolution.sources.concurrency }, settings: { ...loaded.snapshot.settings, concurrency: resumedConcurrency, modelAliases: currentAliases, ...(resolution.effective.disabledAgentResources ? { disabledAgentResources: resolution.effective.disabledAgentResources } : {}) }, modelAliases: currentAliases });
+    const refreshed = resumedSnapshotSettings(loaded.snapshot, resolution, currentAliases);
+    const snapshot = createLaunchSnapshot({ ...loaded.snapshot, settingsPath, ...refreshed, modelAliases: currentAliases });
     await run.store.saveSnapshot(snapshot);
     scheduler.updateRunLimit(run.store.runId, snapshot.settings.concurrency);
     run.executor = new WorkflowAgentExecutor({ cwd: run.store.cwd, agentDir: extensionAgentDir, model: run.model, tools: new Set(snapshot.tools.filter((tool) => pi.getActiveTools().includes(tool) && tool !== "workflow_catalog")), availableModels: resumeModels, knownModels: resumeModels, modelAliases: currentAliases, blockedAliases, blockedAliasTargets, settingsPath: resolution.sources.modelAliases, agentDefinitions: snapshot.roles ?? {}, runStore: run.store, providerPause: async () => { deliver(pi, `Workflow ${snapshot.metadata.name} paused: provider limit.`); await run.lifecycle.providerPause(); }, agentSetupHooks: registry.agentSetupHooks(), agentResourcePolicy: frozenResourcePolicy(currentPolicy) }, createSession);

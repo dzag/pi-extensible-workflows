@@ -159,6 +159,16 @@ void test("doctor reports effective resource exclusions and unmatched selectors"
   assert.equal(report.diagnostics.filter(({ code }) => code === "AGENT_RESOURCE_UNMATCHED").length, 0);
   assert.match(formatDoctorReport(report), /Effective skills: project-skill/);
 });
+void test("doctor attributes unmatched replacement selectors to the project settings field", async () => {
+  const paths = fixture();
+  const globalSettings = join(paths.agentDir, "pi-extensible-workflows", "settings.json");
+  const projectSettings = join(paths.cwd, ".pi", "pi-extensible-workflows", "settings.json");
+  writeFileSync(globalSettings, JSON.stringify({ disabledAgentResources: { skills: ["same-selector"] } }));
+  writeFileSync(projectSettings, JSON.stringify({ disabledAgentResources: { skills: ["same-selector"] } }));
+  const report = await withHome(paths.root, () => doctor({ ...paths, settingsPath: globalSettings, discoverPi: async () => pi({ skills: [] }) }));
+  assert.equal(report.settingsSources.disabledAgentResources, projectSettings);
+  assert.deepEqual(report.diagnostics.filter(({ code }) => code === "AGENT_RESOURCE_UNMATCHED").map(({ source }) => source), [`${projectSettings}.disabledAgentResources.skills`]);
+});
 void test("doctor excludes workflow_catalog from active capabilities and output", async () => {
   const paths = fixture();
   const report = await withHome(paths.root, () => doctor({ ...paths, activeTools: ["read", "workflow", "workflow_respond", "workflow_catalog"], discoverPi: async () => pi({ activeTools: ["read", "workflow", "workflow_respond", "workflow_catalog"] }) }));

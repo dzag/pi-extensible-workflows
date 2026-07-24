@@ -193,9 +193,7 @@ function matchResourcePolicy(policy: AgentResourcePolicy, pi: DoctorPiState): Ag
   const skills = new Set(pi.skills ?? []);
   return { ...policy, unmatchedSkills: policy.effective.skills.filter((name) => !skills.has(name)), unmatchedExtensions: policy.effective.extensions.filter((path) => !extensions.has(canonical(path))) };
 }
-function resourcePolicySource(policy: AgentResourcePolicy, kind: keyof AgentResourceExclusions, selector: string): string {
-  return policy.project[kind].includes(selector) && !policy.global[kind].includes(selector) ? policy.projectSettingsPath : policy.globalSettingsPath;
-}
+function resourcePolicySource(settingsSource: string): string { return settingsSource; }
 export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport> {
   const cwd = canonical(options.cwd ?? process.cwd());
   const agentDir = canonical(options.agentDir ?? getAgentDir());
@@ -234,8 +232,8 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
     if (!diagnostics.some(({ code, source: itemSource }) => code === "SETTINGS_INVALID" && itemSource === source)) diagnostics.push(diagnostic("error", "SETTINGS_INVALID", message, source, "Fix or remove the invalid workflow settings file."));
     resourcePolicy = emptyResourcePolicy(settingsPath, cwd, pi.trust.trusted);
   }
-  for (const skill of resourcePolicy.unmatchedSkills) diagnostics.push(diagnostic("warning", "AGENT_RESOURCE_UNMATCHED", `Disabled skill selector currently matches no discovered skill: ${skill}`, `${resourcePolicySource(resourcePolicy, "skills", skill)}.disabledAgentResources.skills`));
-  for (const extension of resourcePolicy.unmatchedExtensions) diagnostics.push(diagnostic("warning", "AGENT_RESOURCE_UNMATCHED", `Disabled extension selector currently matches no discovered extension source: ${extension}`, `${resourcePolicySource(resourcePolicy, "extensions", extension)}.disabledAgentResources.extensions`));
+  for (const skill of resourcePolicy.unmatchedSkills) diagnostics.push(diagnostic("warning", "AGENT_RESOURCE_UNMATCHED", `Disabled skill selector currently matches no discovered skill: ${skill}`, `${resourcePolicySource(settingsSources.disabledAgentResources)}.disabledAgentResources.skills`));
+  for (const extension of resourcePolicy.unmatchedExtensions) diagnostics.push(diagnostic("warning", "AGENT_RESOURCE_UNMATCHED", `Disabled extension selector currently matches no discovered extension source: ${extension}`, `${resourcePolicySource(settingsSources.disabledAgentResources)}.disabledAgentResources.extensions`));
 
   const activeTools = new Set(pi.activeTools);
   const knownModels = new Set(pi.knownModels);
