@@ -32,7 +32,7 @@
     "inspect": "node dist/src/cli.js inspect",
     "lint": "eslint .",
     "test": "npm run build && TEST_FILES='dist/test/*.test.js' npm run test:run",
-    "test:run": "tmp=$(mktemp -d); trap 'rm -rf \"$tmp\"' EXIT; TMPDIR=\"$tmp\" node --test $TEST_FILES",
+    "test:run": "tmp=$(mktemp -d); trap 'rm -rf \"$tmp\"' EXIT; TMPDIR=\"$tmp\" node --test --test-concurrency=1 $TEST_FILES",
     "acceptance": "npm run build && TEST_FILES='dist/test/runtime-acceptance.test.js' npm run test:run",
     "docs:check": "node scripts/check-docs.mjs",
     "check": "npm run lint && npm test && npm run docs:check",
