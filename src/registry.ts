@@ -43,7 +43,7 @@ export class WorkflowRegistry {
     const agentSetupHooks = extension.agentSetupHooks ?? {};
     const roleDirectoryValues = extension.roleDirectories === undefined ? [] : extension.roleDirectories;
     if (!Array.isArray(roleDirectoryValues)) fail("INVALID_METADATA", "Workflow extension roleDirectories must be an array");
-    const roleDirectories = [...new Set(roleDirectoryValues.map(normalizeRoleDirectory))];
+    const roleDirectories = [...new Set(Array.from(roleDirectoryValues, (value) => normalizeRoleDirectory(value)))];
     if (!object(functions) || !object(variables) || !object(agentSetupHooks) || (Object.keys(functions).length === 0 && Object.keys(variables).length === 0 && Object.keys(agentSetupHooks).length === 0 && roleDirectories.length === 0)) fail("INVALID_METADATA", "Workflow extensions require functions, variables, agent setup hooks, or role directories");
     const names = [...Object.keys(functions), ...Object.keys(variables)];
     if (new Set(names).size !== names.length) fail("GLOBAL_COLLISION", "Global name collision inside extension");
