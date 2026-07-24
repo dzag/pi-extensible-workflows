@@ -694,8 +694,8 @@ void test("isolates role resource exclusions and reapplies them on retries", asy
   await executor.execute("other", { label: "other", workflowName: "flow", role: "scout" });
   await executor.execute("plain", { label: "plain", workflowName: "flow" });
   assert.deepEqual(policies.map(({ effective }) => effective), [
-    { skills: ["global", "project", "role"], extensions: ["/global.ts", "/project.ts", roleExtension] },
-    { skills: ["global", "project", "role"], extensions: ["/global.ts", "/project.ts", roleExtension] },
+    { skills: ["global", "project", "role", "global"], extensions: ["/global.ts", "/project.ts", roleExtension, "/global.ts"] },
+    { skills: ["global", "project", "role", "global"], extensions: ["/global.ts", "/project.ts", roleExtension, "/global.ts"] },
     { skills: ["global", "project"], extensions: ["/global.ts", "/project.ts"] },
     { skills: ["global", "project"], extensions: ["/global.ts", "/project.ts"] },
   ]);

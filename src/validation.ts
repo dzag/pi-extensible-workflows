@@ -31,7 +31,13 @@ function normalizedResourcePath(value: string, settingsPath: string): string {
   if (expanded.startsWith("file://")) expanded = fileURLToPath(expanded);
   const resolved = resolve(dirname(settingsPath), expanded);
   if (expanded === "**" || expanded.startsWith("**/") || expanded.startsWith("**\\")) return expanded;
-  if (resourcePatternHasMagic(expanded)) return resolved;
+  if (resourcePatternHasMagic(expanded)) {
+    const magicIndex = resolved.search(/[*?\x5b\x5d{}()]/);
+    const separatorIndex = Math.max(resolved.lastIndexOf("/", magicIndex), resolved.lastIndexOf("\\", magicIndex));
+    const prefix = separatorIndex >= 0 ? resolved.slice(0, separatorIndex) : resolved;
+    const suffix = separatorIndex >= 0 ? resolved.slice(separatorIndex) : "";
+    try { return `${realpathSync(prefix)}${suffix}`; } catch { return resolved; }
+  }
   try { return realpathSync(resolved); } catch { return resolved; }
 }
 function validateAgentResourceExclusions(value: unknown, settingsPath: string, errorCode: "INVALID_SETTINGS" | "INVALID_METADATA" = "INVALID_SETTINGS"): AgentResourceExclusions | undefined {
@@ -44,7 +50,6 @@ function validateAgentResourceExclusions(value: unknown, settingsPath: string, e
     const entries = value[kind];
     if (entries === undefined) continue;
     if (!Array.isArray(entries)) fail(errorCode, `${base}.${kind} must be an array`);
-    const seen = new Set<string>();
     for (const [index, entry] of entries.entries()) {
       if (typeof entry !== "string" || !entry.trim()) fail(errorCode, `${base}.${kind}[${String(index)}] must be a non-empty string`);
       let selector = entry.trim();
@@ -54,7 +59,7 @@ function validateAgentResourceExclusions(value: unknown, settingsPath: string, e
         try { selector = `${negated ? "!" : ""}${normalizedResourcePath(body, settingsPath)}`; } catch (error) { fail(errorCode, `${base}.${kind}[${String(index)}] must be a valid path: ${errorText(error)}`); }
       }
       try { validateResourcePattern(selector); } catch (error) { fail(errorCode, `${base}.${kind}[${String(index)}] must be a valid minimatch pattern: ${errorText(error)}`); }
-      if (!seen.has(selector)) { seen.add(selector); normalized[kind].push(selector); }
+      normalized[kind].push(selector);
     }
   }
   return Object.freeze({ skills: Object.freeze(normalized.skills), extensions: Object.freeze(normalized.extensions) });

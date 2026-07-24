@@ -106,22 +106,9 @@ export function aliasDrift(previous: Readonly<Record<string, string>>, current: 
 }
 const RESOURCE_PATTERN_OPTIONS = { dot: true, nonegate: true, nocomment: true } as const;
 function resourcePatternBody(pattern: string): string { return pattern.startsWith("!") ? pattern.slice(1) : pattern; }
-function resourcePatternSyntaxError(pattern: string): string | undefined {
-  let escaped = false;
-  let bracket = false;
-  for (const character of pattern) {
-    if (escaped) { escaped = false; continue; }
-    if (character === "\\") { escaped = true; continue; }
-    if (character === "[") bracket = true;
-    else if (character === "]") { if (!bracket) return "unmatched ]"; bracket = false; }
-  }
-  return bracket ? "unmatched [" : undefined;
-}
 export function validateResourcePattern(pattern: string): void {
   const body = resourcePatternBody(pattern);
   if (!body) throw new Error(`Empty minimatch pattern ${JSON.stringify(pattern)}`);
-  const syntaxError = resourcePatternSyntaxError(body);
-  if (syntaxError) throw new Error(`${syntaxError} in pattern ${JSON.stringify(pattern)}`);
   const matcher = new Minimatch(body, RESOURCE_PATTERN_OPTIONS);
   if (matcher.makeRe() === false) throw new Error(`Invalid minimatch pattern ${JSON.stringify(pattern)}`);
 }
@@ -136,6 +123,6 @@ export function disabledResources(patterns: readonly string[], resources: readon
   return [...disabled];
 }
 export function unmatchedResourcePatterns(patterns: readonly string[], resources: readonly string[]): string[] { return patterns.filter((pattern) => !resources.some((resource) => resourcePatternMatches(resource, pattern))); }
-export function mergeAgentResourceExclusions(...values: (AgentResourceExclusions | undefined)[]): AgentResourceExclusions { return { skills: [...new Set(values.flatMap((value) => value?.skills ?? []))], extensions: [...new Set(values.flatMap((value) => value?.extensions ?? []))] }; }
+export function mergeAgentResourceExclusions(...values: (AgentResourceExclusions | undefined)[]): AgentResourceExclusions { return { skills: values.flatMap((value) => value?.skills ?? []), extensions: values.flatMap((value) => value?.extensions ?? []) }; }
 export function createLaunchSnapshot(input: Omit<import("./types.js").LaunchSnapshot, "identityVersion"> & { identityVersion?: number }): Readonly<import("./types.js").LaunchSnapshot> { return deepFreeze(structuredClone({ ...input, launchKind: input.launchKind ?? (input.functionName ? "function" : "inline"), identityVersion: input.identityVersion ?? LAUNCH_SNAPSHOT_IDENTITY_VERSION })); }
 export function loadLaunchSnapshot(input: import("./types.js").LaunchSnapshot): Readonly<import("./types.js").LaunchSnapshot> { return deepFreeze(structuredClone(input)); }

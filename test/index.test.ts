@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import type { AgentSessionEvent, InlineExtension, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDiagnostics, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resolveAgentResourcePolicy, resolveModelReference, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
+import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, disabledResources, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDiagnostics, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeAgentResourceExclusions, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resourcePatternMatches, resolveAgentResourcePolicy, resolveModelReference, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
 import type { NativeSession, SessionInput } from "../src/agent-execution.js";
 import { listRunIds } from "../src/persistence.js";
 
@@ -2101,7 +2101,7 @@ void test("strict role resource exclusions normalize relative and portable paths
   process.env.HOME = root;
   try {
     const definition = parseRoleMarkdown(`---\ndisabledAgentResources:\n  skills: [" role-skill", role-skill]\n  extensions:\n    - "../role-extension.ts"\n    - "~/role-extension.ts"\n    - "${pathToFileURL(extension).href}"\n---\nbody`, true, rolePath);
-    assert.deepEqual(definition, { prompt: "body", disabledAgentResources: { skills: ["role-skill"], extensions: [extension] } });
+    assert.deepEqual(definition, { prompt: "body", disabledAgentResources: { skills: ["role-skill", "role-skill"], extensions: [extension, extension, extension] } });
     for (const content of [
       "---\ndisabledAgentResources: { unknown: [x] }\n---\nbody",
       "---\ndisabledAgentResources:\n  skills: ['']\n---\nbody",
@@ -2224,12 +2224,12 @@ void test("merges trusted agent resource exclusions and ignores untrusted projec
   process.env.HOME = home;
   try {
     const trusted = resolveAgentResourcePolicy(cwd, true, globalPath);
-    assert.deepEqual(trusted.effective.skills, ["learning-opportunities", "project-only"]);
-    assert.deepEqual(trusted.effective.extensions, [extension, join(cwd, ".pi", "project-only.ts")]);
+    assert.deepEqual(trusted.effective.skills, ["learning-opportunities", "learning-opportunities", "project-only", "learning-opportunities"]);
+    assert.deepEqual(trusted.effective.extensions, [extension, extension, extension, join(cwd, ".pi", "project-only.ts")]);
     assert.equal(loadSettings(globalPath).modelAliases?.reviewer, "openai/gpt");
     const untrusted = resolveAgentResourcePolicy(cwd, false, globalPath);
-    assert.deepEqual(untrusted.effective.skills, ["learning-opportunities"]);
-    assert.deepEqual(untrusted.effective.extensions, [extension]);
+    assert.deepEqual(untrusted.effective.skills, ["learning-opportunities", "learning-opportunities"]);
+    assert.deepEqual(untrusted.effective.extensions, [extension, extension]);
   } finally {
     if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
   }
@@ -2239,8 +2239,31 @@ void test("validates minimatch resource selectors and resolves extension globs",
   const path = join(root, "settings.json");
   writeFileSync(path, JSON.stringify({ disabledAgentResources: { skills: ["*", "!my-project-*", "{one,two}"], extensions: ["**/*", "!../../extensions/**"] } }));
   assert.deepEqual(loadSettings(path).disabledAgentResources, { skills: ["*", "!my-project-*", "{one,two}"], extensions: ["**/*", `!${resolve(root, "../../extensions/**")}`] });
-  writeFileSync(path, JSON.stringify({ disabledAgentResources: { skills: ["["] } }));
+  writeFileSync(path, JSON.stringify({ disabledAgentResources: { skills: [""] } }));
   assert.throws(() => loadSettings(path), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_SETTINGS" && error.message.includes(`${path}.disabledAgentResources.skills[0]`));
+});
+void test("canonicalizes symlinked extension glob prefixes", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-symlink-globs-"));
+  const path = join(root, "settings.json");
+  const realExtensions = join(root, "real", "extensions");
+  mkdirSync(realExtensions, { recursive: true });
+  symlinkSync(realExtensions, join(root, "link"));
+  writeFileSync(path, JSON.stringify({ disabledAgentResources: { extensions: ["link/*.ts"] } }));
+  const normalized = loadSettings(path).disabledAgentResources?.extensions ?? [];
+  assert.deepEqual(normalized, [join(realExtensions, "*.ts")]);
+  assert.equal(resourcePatternMatches(join(realExtensions, "extension.ts"), normalized[0] ?? ""), true);
+});
+void test("accepts Minimatch character class forms", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "pi-extensible-workflows-character-classes-")), "settings.json");
+  const selectors = ["[[:alpha:]]", "[]]"];
+  writeFileSync(path, JSON.stringify({ disabledAgentResources: { skills: selectors } }));
+  assert.deepEqual(loadSettings(path).disabledAgentResources?.skills, selectors);
+  assert.equal(resourcePatternMatches("a", "[[:alpha:]]"), true);
+  assert.equal(resourcePatternMatches("]", "[]]"), true);
+});
+void test("preserves ordered duplicate resource selectors", () => {
+  assert.deepEqual(mergeAgentResourceExclusions({ skills: ["*", "!*"], extensions: ["/global.ts", "!/global.ts"] }, { skills: ["*"], extensions: ["/project.ts"] }), { skills: ["*", "!*", "*"], extensions: ["/global.ts", "!/global.ts", "/project.ts"] });
+  assert.deepEqual(disabledResources(["*", "!*", "*"], ["resource"]), ["resource"]);
 });
 void test("reports resource exclusion validation at the selector path", () => {
   const path = join(mkdtempSync(join(tmpdir(), "pi-extensible-workflows-resources-invalid-")), "settings.json");
