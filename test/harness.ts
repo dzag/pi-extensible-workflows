@@ -194,8 +194,10 @@ export class TestHarness {
     const extensionPath = resolve("dist/src/index.js");
 
     // Split a new pane
+    // Split downward so the new pane keeps the full terminal width (the
+    // /workflow overlay switches to narrow mode below 80 columns).
     const splitResult = herdrJson(
-      "pane", "split", this.currentPane(), "--direction", "right", "--no-focus",
+      "pane", "split", this.currentPane(), "--direction", "down", "--no-focus",
     ) as { result: { pane: { pane_id: string } } };
     this.paneId = splitResult.result.pane.pane_id;
 
@@ -239,6 +241,12 @@ export class TestHarness {
   readPane(lines = 80): string {
     if (!this.paneId) throw new Error("Not launched");
     return herdr("pane", "read", this.paneId, "--source", "recent-unwrapped", "--lines", String(lines));
+  }
+
+  /** Read the current terminal viewport. */
+  readVisiblePane(): string {
+    if (!this.paneId) throw new Error("Not launched");
+    return herdr("pane", "read", this.paneId, "--source", "visible");
   }
 
   /** Send a keypress (e.g. "Enter", "Escape", "j", "k"). */

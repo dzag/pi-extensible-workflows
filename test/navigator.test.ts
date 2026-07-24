@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { TestHarness } from "./harness.js";
 
-void test("navigator shows attention-ordered runs in the real TUI", { skip: !process.env.HERDR_ENV }, async () => {
+void test("navigator shows attention-ordered runs and the selected phase tree in the real TUI", { skip: !process.env.HERDR_ENV }, async () => {
   const h = TestHarness.create({ prefix: "nav" });
   try {
     // Write fixtures BEFORE launching Pi
@@ -54,6 +54,31 @@ void test("navigator shows attention-ordered runs in the real TUI", { skip: !pro
     assert.ok(buildLine < testLine, `interrupted should appear before failed`);
     assert.ok(testLine < deployLine, `failed should appear before completed`);
     assert.ok(screen.includes("Close"), `Expected 'Close' option`);
+
+    h.sendKey("enter");
+    await h.waitFor("Tree", 10_000);
+    const detail = h.readVisiblePane();
+    assert.match(detail, /Tree/);
+    assert.match(detail, /review/);
+    assert.match(detail, /scout/);
+    assert.match(detail, /reviewer/);
+    assert.doesNotMatch(detail, /Agents\.\.\./);
+
+    // Navigate down to an agent node and open its actions inline.
+    for (let step = 0; step < 12; step += 1) {
+      if (/→.*(scout|reviewer)/.test(h.readVisiblePane())) break;
+      h.sendKey("down");
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+    assert.match(h.readVisiblePane(), /→.*(scout|reviewer)/, "expected an agent row to be selected");
+
+    h.sendKey("enter");
+    await h.waitFor("Agent actions", 10_000);
+    const withActions = h.readVisiblePane();
+    const actionRow = withActions.split("\n").find((line) => line.includes("Copy agent ID"));
+    assert.ok(actionRow, `expected inline agent actions:\n${withActions}`);
+    assert.match(actionRow, /\|/, `agent actions must stay in the details column: ${actionRow}`);
+    assert.match(withActions, /Tree/, "tree must remain visible while actions are open");
   } finally {
     await h.close();
   }

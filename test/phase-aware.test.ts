@@ -10,6 +10,10 @@ import {
   buildWorkflowPhaseModel,
   createLaunchSnapshot,
   formatWorkflowPhaseDashboard,
+  buildWorkflowPhaseTree,
+  preserveWorkflowPhaseTreeSelection,
+  navigateWorkflowPhaseTree,
+  workflowPhaseTreeVisibleNodes,
   preflight,
   preserveWorkflowPhaseSelection,
   type AgentRecord,
@@ -103,6 +107,9 @@ void test("phase dashboard keeps wide and narrow content within bounds while ret
   }
   const wide = formatWorkflowPhaseDashboard(current, launch, 120).join("\n");
   assert.match(wide, /\|/);
+  const columns = formatWorkflowPhaseDashboard(current, launch, 120).filter((line) => line.includes(" | ")).map((line) => line.indexOf(" | "));
+  assert.ok(columns.length > 1, "expected multiple two-column rows");
+  assert.equal(new Set(columns).size, 1, `separator column drifted: ${columns.join(",")}`);
   const narrow = formatWorkflowPhaseDashboard(current, launch, 40).join("\n");
   assert.match(narrow, /Selected phase: review/);
 });
@@ -112,4 +119,100 @@ void test("phase and agent selections survive read-model polling", () => {
   const selected = preserveWorkflowPhaseSelection(before, { phaseId: "build#1", agentId: "one" });
   const after = buildWorkflowPhaseModel(run("running", [agent("one"), agent("two")], [{ phase: "build", afterAgent: 0 }, { phase: "review", afterAgent: 1 }]), ["build", "review"]);
   assert.deepEqual(preserveWorkflowPhaseSelection(after, selected), selected);
+});
+
+void test("phase tree groups structural paths and preserves stable node selection", () => {
+  const current = run("running", [
+    { ...agent("api", "running"), structuralPath: ["reviewers", "api"] },
+    { ...agent("ui", "completed"), structuralPath: ["reviewers", "ui"] },
+  ], [{ phase: "review", afterAgent: 0 }]);
+  const model = buildWorkflowPhaseModel(current, ["review"]);
+  const tree = buildWorkflowPhaseTree(model);
+  const expanded = new Set(tree.nodes.filter((node) => node.kind !== "agent").map((node) => node.id));
+  const visible = workflowPhaseTreeVisibleNodes(tree, expanded);
+  assert.deepEqual(visible.map(({ kind, label }) => [kind, label]), [
+    ["phase", "review"],
+    ["operation", "reviewers"],
+    ["operation", "api"],
+    ["agent", "api"],
+    ["operation", "ui"],
+    ["agent", "ui"],
+  ]);
+  const selected = tree.nodes.find((node) => node.kind === "agent" && node.agentId === "ui");
+  assert.ok(selected);
+  const refreshed = buildWorkflowPhaseTree(buildWorkflowPhaseModel({ ...current, agents: [...current.agents, agent("later")] }, ["review"]));
+  assert.deepEqual(preserveWorkflowPhaseTreeSelection(refreshed, { nodeId: selected.id }), { nodeId: selected.id });
+  const rendered = formatWorkflowPhaseDashboard(current, snapshot(["review"]), 120, { nodeId: selected.id, expandedNodeIds: [...expanded] }).join("\n");
+  assert.match(rendered, /reviewers/);
+  assert.match(rendered, /→.*ui/);
+});
+
+void test("agent actions render inside the details column beside the tree", () => {
+  const current = run("running", [{ ...agent("api", "completed"), structuralPath: ["reviewers", "api"] }], [{ phase: "review", afterAgent: 0 }]);
+  const model = buildWorkflowPhaseModel(current, ["review"]);
+  const tree = buildWorkflowPhaseTree(model);
+  const expanded = new Set(tree.nodes.filter((node) => node.kind !== "agent").map((node) => node.id));
+  const selected = tree.nodes.find((node) => node.kind === "agent" && node.agentId === "api");
+  assert.ok(selected);
+  const actions = { title: "Agent actions", options: ["Copy agent ID", "Back"], index: 0 };
+  const lines = formatWorkflowPhaseDashboard(current, snapshot(["review"]), 120, { nodeId: selected.id, expandedNodeIds: [...expanded], actions });
+  const actionRow = lines.find((line) => line.includes("Copy agent ID"));
+  assert.ok(actionRow, `expected an action row:\n${lines.join("\n")}`);
+  assert.ok(actionRow.includes(" | "), `actions must stay in the two-column layout: ${actionRow}`);
+  assert.ok(actionRow.indexOf("Copy agent ID") > actionRow.indexOf(" | "), `actions belong in the details column: ${actionRow}`);
+  assert.ok(lines.some((line) => line.includes("Agent actions")), "expected the actions title");
+  assert.ok(!lines.some((line) => line.includes("enter for agent actions")), "hint should disappear once actions are open");
+});
+
+void test("phase tree preserves parent nesting across different structural paths", () => {
+  const current = run("running", [
+    { ...agent("parent", "running"), structuralPath: ["reviewers", "parent"] },
+    { ...agent("child", "completed", "parent"), structuralPath: ["other", "child"] },
+  ], [{ phase: "review", afterAgent: 0 }]);
+  const tree = buildWorkflowPhaseTree(buildWorkflowPhaseModel(current, ["review"]));
+  const phase = tree.nodes.find((node) => node.kind === "phase");
+  const parent = tree.nodes.find((node) => node.agentId === "parent");
+  const child = tree.nodes.find((node) => node.agentId === "child");
+  const suffix = tree.nodes.find((node) => node.kind === "operation" && node.operationPath.join("/") === "other/child");
+  const scope = tree.nodes.find((node) => node.kind === "operation" && node.operationPath.join("/") === "other");
+  assert.ok(phase && parent && child && suffix && scope);
+  assert.deepEqual(phase.children, [tree.nodes.find((node) => node.kind === "operation" && node.operationPath[0] === "reviewers")?.id]);
+  assert.ok(parent.children.includes(scope.id));
+  assert.equal(suffix.children.includes(child.id), true);
+  assert.equal(child.operationPath.join("/"), "other/child");
+  const visible = workflowPhaseTreeVisibleNodes(tree, new Set(tree.nodes.filter((node) => node.children.length).map((node) => node.id)));
+  assert.equal(visible.filter((node) => node.kind === "agent" && node.agentId === "child").length, 1);
+  const sameScope = buildWorkflowPhaseTree(buildWorkflowPhaseModel(run("running", [
+    { ...agent("same-parent", "running"), structuralPath: ["shared"] },
+    { ...agent("same-child", "completed", "same-parent"), structuralPath: ["shared"] },
+  ], [{ phase: "review", afterAgent: 0 }]), ["review"]));
+  const sameParent = sameScope.nodes.find((node) => node.agentId === "same-parent");
+  const sameChild = sameScope.nodes.find((node) => node.agentId === "same-child");
+  assert.ok(sameParent && sameChild);
+  assert.equal(sameChild.parentId, sameParent.id);
+  const repeatedScope = buildWorkflowPhaseTree(buildWorkflowPhaseModel(run("running", [
+    { ...agent("parent-a", "running"), structuralPath: ["parents", "a"] },
+    { ...agent("child-a", "completed", "parent-a"), structuralPath: ["shared", "child"] },
+    { ...agent("parent-b", "running"), structuralPath: ["parents", "b"] },
+    { ...agent("child-b", "completed", "parent-b"), structuralPath: ["shared", "child"] },
+  ], [{ phase: "review", afterAgent: 0 }]), ["review"]));
+  assert.equal(repeatedScope.nodes.filter((node) => node.kind === "operation" && node.operationPath.join("/") === "shared/child").length, 2);
+  const cycle = buildWorkflowPhaseTree(buildWorkflowPhaseModel(run("running", [agent("left", "completed", "right"), agent("right", "completed", "left")], [{ phase: "review", afterAgent: 0 }]), ["review"]));
+  assert.equal(cycle.nodes.filter((node) => node.kind === "agent").length, 2);
+});
+
+void test("phase tree navigation collapses, expands, and moves through visible rows", () => {
+  const current = run("running", [{ ...agent("api"), structuralPath: ["reviewers", "api"] }], [{ phase: "review", afterAgent: 0 }]);
+  const tree = buildWorkflowPhaseTree(buildWorkflowPhaseModel(current, ["review"]));
+  const phase = tree.nodes.find((node) => node.kind === "phase");
+  const operation = tree.nodes.find((node) => node.kind === "operation");
+  assert.ok(phase && operation);
+  const collapsed = navigateWorkflowPhaseTree(tree, phase.id, new Set(), "right");
+  assert.deepEqual(collapsed, { nodeId: phase.id, expandedNodeIds: new Set([phase.id]) });
+  const child = navigateWorkflowPhaseTree(tree, phase.id, collapsed.expandedNodeIds, "right");
+  assert.equal(child.nodeId, operation.id);
+  const opened = navigateWorkflowPhaseTree(tree, operation.id, child.expandedNodeIds, "right");
+  const folded = navigateWorkflowPhaseTree(tree, operation.id, opened.expandedNodeIds, "left");
+  assert.equal(folded.nodeId, operation.id);
+  assert.equal(folded.expandedNodeIds.has(operation.id), false);
 });
