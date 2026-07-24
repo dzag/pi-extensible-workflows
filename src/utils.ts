@@ -106,13 +106,14 @@ export function aliasDrift(previous: Readonly<Record<string, string>>, current: 
 }
 const RESOURCE_PATTERN_OPTIONS = { dot: true, nonegate: true, nocomment: true } as const;
 function resourcePatternBody(pattern: string): string { return pattern.startsWith("!") ? pattern.slice(1) : pattern; }
+function resourcePatternPath(value: string): string { return value.replaceAll("\\", "/"); }
 export function validateResourcePattern(pattern: string): void {
   const body = resourcePatternBody(pattern);
   if (!body) throw new Error(`Empty minimatch pattern ${JSON.stringify(pattern)}`);
-  const matcher = new Minimatch(body, RESOURCE_PATTERN_OPTIONS);
+  const matcher = new Minimatch(resourcePatternPath(body), RESOURCE_PATTERN_OPTIONS);
   if (matcher.makeRe() === false) throw new Error(`Invalid minimatch pattern ${JSON.stringify(pattern)}`);
 }
-export function resourcePatternMatches(resource: string, pattern: string): boolean { return new Minimatch(resourcePatternBody(pattern), RESOURCE_PATTERN_OPTIONS).match(resource); }
+export function resourcePatternMatches(resource: string, pattern: string): boolean { return new Minimatch(resourcePatternPath(resourcePatternBody(pattern)), RESOURCE_PATTERN_OPTIONS).match(resourcePatternPath(resource)); }
 export function disabledResources(patterns: readonly string[], resources: readonly string[]): string[] {
   const disabled = new Set<string>();
   for (const resource of resources) {

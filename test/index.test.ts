@@ -2242,6 +2242,24 @@ void test("validates minimatch resource selectors and resolves extension globs",
   writeFileSync(path, JSON.stringify({ disabledAgentResources: { skills: [""] } }));
   assert.throws(() => loadSettings(path), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_SETTINGS" && error.message.includes(`${path}.disabledAgentResources.skills[0]`));
 });
+void test("preserves rooted extension glob selectors", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-rooted-globs-"));
+  const path = join(root, "settings.json");
+  const cases = [["/*.ts", "/extension.ts"], ["/?mp/**", "/tmp/extension.ts"], ["/[tv]mp/**", "/tmp/extension.ts"], ["/**/*.ts", "/tmp/extension.ts"]] as const;
+  for (const [selector, resource] of cases) {
+    writeFileSync(path, JSON.stringify({ disabledAgentResources: { extensions: [selector] } }));
+    const normalized = loadSettings(path).disabledAgentResources?.extensions[0] ?? "";
+    assert.equal(normalized, selector);
+    assert.equal(resourcePatternMatches(resource, normalized), true);
+  }
+});
+void test("matches Windows extension paths using portable glob separators", () => {
+  const disabled = "C:\\agent\\extensions\\disabled.ts";
+  const allowed = "C:\\agent\\extensions\\allowed.ts";
+  assert.equal(resourcePatternMatches(disabled, "C:\\agent\\extensions\\*.ts"), true);
+  assert.equal(resourcePatternMatches(disabled, disabled), true);
+  assert.deepEqual(disabledResources(["C:\\agent\\extensions\\**\\*.ts", `!${allowed}`], [disabled, allowed]), [disabled]);
+});
 void test("canonicalizes symlinked extension glob prefixes", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-symlink-globs-"));
   const path = join(root, "settings.json");

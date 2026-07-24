@@ -34,8 +34,9 @@ function normalizedResourcePath(value: string, settingsPath: string): string {
   if (resourcePatternHasMagic(expanded)) {
     const magicIndex = resolved.search(/[*?\x5b\x5d{}()]/);
     const separatorIndex = Math.max(resolved.lastIndexOf("/", magicIndex), resolved.lastIndexOf("\\", magicIndex));
-    const prefix = separatorIndex >= 0 ? resolved.slice(0, separatorIndex) : resolved;
-    const suffix = separatorIndex >= 0 ? resolved.slice(separatorIndex) : "";
+    const rootBoundary = separatorIndex === 0 || (separatorIndex === 2 && /^[A-Za-z]:[\\/]/.test(resolved));
+    const prefix = rootBoundary ? resolved.slice(0, separatorIndex + 1) : separatorIndex >= 0 ? resolved.slice(0, separatorIndex) : resolved;
+    const suffix = rootBoundary ? resolved.slice(separatorIndex + 1) : separatorIndex >= 0 ? resolved.slice(separatorIndex) : "";
     try { return `${realpathSync(prefix)}${suffix}`; } catch { return resolved; }
   }
   try { return realpathSync(resolved); } catch { return resolved; }
