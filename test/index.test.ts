@@ -320,7 +320,8 @@ void test("registers workflow_catalog only for active non-empty registries", asy
   assert.equal(inactiveTools.some(({ name }) => name === "workflow_catalog"), false);
   await inactiveShutdown();
   const activeHome = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-catalog-active-"));
-  const activeTools: Array<{ name: string; execute?: (...args: never[]) => Promise<{ content: Array<{ text: string }> }> }> = [];
+   type CatalogTool = { name: string; execute?: (...args: never[]) => Promise<{ content: Array<{ text: string }> }>; renderResult?: (...args: never[]) => { render(width: number): string[] } };
+   const activeTools: CatalogTool[] = [];
   let activeStart: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let activeShutdown: (() => Promise<void>) | undefined;
   workflowExtension({ registerTool(tool: (typeof activeTools)[number]) { activeTools.push(tool); }, registerCommand() {}, getActiveTools: () => ["workflow"], on(name: string, handler: unknown) { if (name === "session_start") activeStart = handler as typeof activeStart; if (name === "session_shutdown") activeShutdown = handler as typeof activeShutdown; } } as never, activeHome);
@@ -348,6 +349,26 @@ void test("registers workflow_catalog only for active non-empty registries", asy
   assert.deepEqual(variableDetail.schema, { type: "string" });
   const missing = JSON.parse((await catalogTool.execute("id" as never, { name: "missing" } as never)).content[0]?.text ?? "null") as { error: { code: string; name: string; message: string } };
   assert.deepEqual(missing.error, { code: "NOT_FOUND", name: "missing", message: "No registered workflow function or variable is available: missing" });
+  const theme = { fg: (color: string, text: string) => `[${color}]${text}[/${color}]`, bold: (text: string) => `<bold>${text}</bold>` };
+  const renderCatalog = (value: unknown, expanded: boolean, name?: string) => {
+    const renderResult = catalogTool.renderResult;
+    assert.ok(renderResult);
+    const component = renderResult({ content: [{ type: "text", text: JSON.stringify(value) }], details: value } as never, { expanded, isPartial: false } as never, theme as never, { args: name ? { name } : {}, expanded } as never);
+    return component.render(120).join("\n");
+  };
+  const indexView = renderCatalog(catalog, false);
+  assert.match(indexView, /\[accent\].*Functions \(2\)/);
+  assert.match(indexView, /hello.*Say hello/);
+  assert.match(indexView, /Variables \(1\)/);
+  assert.doesNotMatch(indexView, /"properties"/);
+  const compactDetail = renderCatalog(functionDetail, false, "hello");
+  assert.match(compactDetail, /Function/);
+  assert.match(compactDetail, /hello.*Say hello/);
+  assert.doesNotMatch(compactDetail, /"properties"/);
+  const expandedDetail = renderCatalog(functionDetail, true, "hello");
+  assert.match(expandedDetail, /Reusable test workflows/);
+  assert.match(expandedDetail, /"properties"/);
+  assert.match(expandedDetail, /Output schema/);
   await activeShutdown();
 });
 
