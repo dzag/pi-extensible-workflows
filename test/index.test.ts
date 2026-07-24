@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import type { AgentSessionEvent, InlineExtension, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDiagnostics, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resolveAgentResourcePolicy, resolveModelReference, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
@@ -2233,6 +2233,14 @@ void test("merges trusted agent resource exclusions and ignores untrusted projec
   } finally {
     if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
   }
+});
+void test("validates minimatch resource selectors and resolves extension globs", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-globs-"));
+  const path = join(root, "settings.json");
+  writeFileSync(path, JSON.stringify({ disabledAgentResources: { skills: ["*", "!my-project-*", "{one,two}"], extensions: ["**/*", "!../../extensions/**"] } }));
+  assert.deepEqual(loadSettings(path).disabledAgentResources, { skills: ["*", "!my-project-*", "{one,two}"], extensions: ["**/*", `!${resolve(root, "../../extensions/**")}`] });
+  writeFileSync(path, JSON.stringify({ disabledAgentResources: { skills: ["["] } }));
+  assert.throws(() => loadSettings(path), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_SETTINGS" && error.message.includes(`${path}.disabledAgentResources.skills[0]`));
 });
 void test("reports resource exclusion validation at the selector path", () => {
   const path = join(mkdtempSync(join(tmpdir(), "pi-extensible-workflows-resources-invalid-")), "settings.json");

@@ -61,10 +61,10 @@ export interface ModelSpec { provider: string; model: string; thinking?: "off" |
 export interface WorkflowMetadata { name: string; description?: string }
 export interface WorkflowSettings { concurrency: number; modelAliases?: Readonly<Record<string, string>>; disabledAgentResources?: Readonly<AgentResourceExclusions> }
 export interface AgentResourceExclusions { skills: readonly string[]; extensions: readonly string[] }
-export interface AgentResourcePolicy { globalSettingsPath: string; projectSettingsPath: string; projectTrusted: boolean; global: AgentResourceExclusions; project: AgentResourceExclusions; effective: AgentResourceExclusions; unmatchedSkills: string[]; unmatchedExtensions: string[] }
+export interface AgentResourcePolicy { globalSettingsPath: string; projectSettingsPath: string; projectTrusted: boolean; global: AgentResourceExclusions; project: AgentResourceExclusions; effective: AgentResourceExclusions; unmatchedSkills: string[]; unmatchedExtensions: string[]; excludedSkills?: string[]; excludedExtensions?: string[] }
 export interface AgentActivity { kind: "reasoning" | "tool" | "text"; text: string }
 export interface AgentAccounting { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }
-export interface AgentSetupSummary { hookNames: readonly string[]; model: ModelSpec; tools: readonly string[]; cwd: string; disabledAgentResources?: { skills: readonly string[]; extensions: readonly string[]; unmatchedSkills: readonly string[]; unmatchedExtensions: readonly string[] } }
+export interface AgentSetupSummary { hookNames: readonly string[]; model: ModelSpec; tools: readonly string[]; cwd: string; disabledAgentResources?: { skills: readonly string[]; extensions: readonly string[]; excludedSkills?: readonly string[]; excludedExtensions?: readonly string[]; unmatchedSkills: readonly string[]; unmatchedExtensions: readonly string[] } }
 export interface AgentAttemptSummary { attempt: number; sessionId: string; sessionFile: string; error?: { code: string; message: string }; accounting: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }; setup?: AgentSetupSummary }
 export interface WorkflowWorktreeCreatedEvent extends WorkflowEventBase { owner: string; branch: string; path: string; base: string }
 export interface WorkflowWorktreeReference { readonly path: string; readonly branch: string }

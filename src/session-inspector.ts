@@ -286,8 +286,10 @@ function detailLines(workflow: WorkflowReport): string[] {
         `Hooks: ${attempt.setup.hookNames.join(", ") || "(none)"}`,
         `Effective: model=${attempt.setup.model.provider}/${attempt.setup.model.model}${attempt.setup.model.thinking ? `:${attempt.setup.model.thinking}` : ""} tools=${attempt.setup.tools.join(",") || "(none)"} cwd=${attempt.setup.cwd}`,
         ...(attempt.setup.disabledAgentResources ? [
-          `Disabled skills: ${attempt.setup.disabledAgentResources.skills.join(", ") || "(none)"}`,
-          `Disabled extensions: ${attempt.setup.disabledAgentResources.extensions.join(", ") || "(none)"}`,
+          `Configured skill patterns: ${attempt.setup.disabledAgentResources.skills.join(", ") || "(none)"}`,
+          `Excluded skills: ${attempt.setup.disabledAgentResources.excludedSkills?.join(", ") || "(none)"}`,
+          `Configured extension patterns: ${attempt.setup.disabledAgentResources.extensions.join(", ") || "(none)"}`,
+          `Excluded extensions: ${attempt.setup.disabledAgentResources.excludedExtensions?.join(", ") || "(none)"}`,
           `Unmatched skills: ${attempt.setup.disabledAgentResources.unmatchedSkills.join(", ") || "(none)"}`,
           `Unmatched extensions: ${attempt.setup.disabledAgentResources.unmatchedExtensions.join(", ") || "(none)"}`,
         ] : []),
