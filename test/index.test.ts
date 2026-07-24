@@ -320,7 +320,7 @@ void test("registers workflow_catalog only for active non-empty registries", asy
   assert.equal(inactiveTools.some(({ name }) => name === "workflow_catalog"), false);
   await inactiveShutdown();
   const activeHome = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-catalog-active-"));
-   type CatalogTool = { name: string; execute?: (...args: never[]) => Promise<{ content: Array<{ text: string }> }>; renderResult?: (...args: never[]) => { render(width: number): string[] } };
+   type CatalogTool = { name: string; execute?: (...args: never[]) => Promise<{ content: Array<{ text: string }> }>; renderCall?: (...args: never[]) => { render(width: number): string[] }; renderResult?: (...args: never[]) => { render(width: number): string[] } };
    const activeTools: CatalogTool[] = [];
   let activeStart: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let activeShutdown: (() => Promise<void>) | undefined;
@@ -406,6 +406,16 @@ void test("registers workflow_catalog only for active non-empty registries", asy
   assert.match(narrowVisible, /AN_EXTENSION_DESCRIPTION_THAT_MUST_REMAIN_VISIBLE/);
   assert.match(narrowVisible, /OUTPUT_DESCRIPTION_MUST_REMAIN_VISIBLE/);
   for (const line of narrowExpanded.split("\n")) assert.ok(stripAnsi(line).length <= 24, `rendered line exceeds width: ${line}`);
+  const renderCall = catalogTool.renderCall;
+  assert.ok(renderCall);
+  const narrowCall = renderCall({ name: "hello" } as never, {
+    fg: (color: string, text: string) => `\u001b[38;2;21;${color === "accent" ? "101" : "201"};${color === "toolTitle" ? "201" : "101"}m${text}\u001b[0m`,
+    bold: (text: string) => `\u001b[1m${text}\u001b[0m`,
+  } as never).render(10);
+  assert.equal(narrowCall.length, 1);
+  assert.ok(narrowCall[0]);
+  assert.doesNotMatch(narrowCall[0], new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[^0-9;m]`));
+  assert.ok(stripAnsi(narrowCall[0]).length <= 10);
   await activeShutdown();
 });
 

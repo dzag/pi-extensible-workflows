@@ -242,6 +242,14 @@ function textBlock(text: string) {
     invalidate() {},
   };
 }
+function styledTextBlock(text: string) {
+  return {
+    render(width: number) {
+      return truncateWorkflowProgress(text, width);
+    },
+    invalidate() {},
+  };
+}
 function workflowCatalogBlock(text: string, expanded: boolean) {
   return {
     render(width: number) {
@@ -1366,7 +1374,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       },
       renderCall(args, theme) {
         const title = theme.fg("toolTitle", theme.bold("workflow_catalog"));
-        return textBlock(args.name === undefined ? title : `${title} ${theme.fg("accent", args.name)}`);
+        return styledTextBlock(args.name === undefined ? title : `${title} ${theme.fg("accent", args.name)}`);
       },
       renderResult(result, options, theme) {
         return workflowCatalogBlock(formatWorkflowCatalog(catalogResultValue(result), options.expanded, theme), options.expanded);
