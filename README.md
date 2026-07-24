@@ -60,7 +60,7 @@ Learn more about roles, workflow contracts, and extension APIs in the documentat
 
 ## Configuration
 
-Global workflow settings live at `~/.pi/agent/pi-extensible-workflows/settings.json` by default and configure concurrency, model aliases, and workflow-agent skill or extension exclusions. Trusted projects can add resource exclusions at `<project>/.pi/pi-extensible-workflows/settings.json`; they cannot override global aliases or concurrency. See [global and project settings](https://vekexasia.github.io/pi-extensible-workflows/developers.html#settings) for the schema and merge rules.
+Global workflow settings live at `~/.pi/agent/pi-extensible-workflows/settings.json` by default. Trusted projects can add partial overrides at `<project>/.pi/pi-extensible-workflows/settings.json`; precedence is defaults < global < trusted project < per-run options. Project collections replace global collections, so `{}` and empty arrays clear inherited aliases or resource exclusions. Untrusted project settings are ignored. See [global and project settings](https://vekexasia.github.io/pi-extensible-workflows/developers.html#settings) for the schema, trust gate, source reporting, and merge rules.
 
 ## CLI
 

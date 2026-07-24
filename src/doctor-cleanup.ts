@@ -101,6 +101,7 @@ function validateSnapshot(snapshot: unknown): void {
   if (snapshot.launchKind === "function" && (typeof snapshot.functionName !== "string" || !snapshot.functionName)) throw new Error("Persisted snapshot function name is invalid");
   optionalString(snapshot.functionName, "Persisted snapshot function name");
   optionalString(snapshot.settingsPath, "Persisted snapshot settings path");
+  if (snapshot.settingsSources !== undefined) { if (!object(snapshot.settingsSources) || typeof snapshot.settingsSources.concurrency !== "string" || typeof snapshot.settingsSources.modelAliases !== "string" || typeof snapshot.settingsSources.disabledAgentResources !== "string") throw new Error("Persisted snapshot settings sources are invalid"); }
   validateBudget(snapshot.budget);
   if (snapshot.modelAliases !== undefined) validateModelAliases(snapshot.modelAliases);
   if (snapshot.settings.modelAliases !== undefined) validateModelAliases(snapshot.settings.modelAliases);

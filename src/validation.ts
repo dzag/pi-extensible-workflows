@@ -8,9 +8,9 @@ import { Script } from "node:vm";
 import { Value } from "typebox/value";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { WorkflowError } from "./types.js";
-import type { AgentDefinition, AgentResourceExclusions, AgentResourcePolicy, CheckpointInput, JsonSchema, JsonValue, LaunchSnapshot, PreflightCapabilities, PreflightResult, ShellOptions, StaticWorkflowCall, StaticWorkflowExecution, StaticWorkflowScope, ValidatedWorkflowLaunch, WorkflowCallKind, WorkflowErrorCode, WorkflowMetadata, WorkflowSettings, WorkflowValidationContext, WorkflowValidationParameters } from "./types.js";
+import type { AgentDefinition, AgentResourceExclusions, AgentResourcePolicy, CheckpointInput, JsonSchema, JsonValue, LaunchSnapshot, PreflightCapabilities, PreflightResult, ShellOptions, StaticWorkflowCall, StaticWorkflowExecution, StaticWorkflowScope, ValidatedWorkflowLaunch, WorkflowCallKind, WorkflowErrorCode, WorkflowMetadata, WorkflowSettings, WorkflowSettingsOverrides, WorkflowSettingsResolution, WorkflowSettingsSources, WorkflowValidationContext, WorkflowValidationParameters } from "./types.js";
 import type { WorkflowRegistryApi } from "./registry.js";
-import { deepFreeze, errorText, fail, jsonValue, mergeAgentResourceExclusions, modelAliasName, modelCapability, object, parseThinking, positiveInteger, resolveModelReference, unknownModel, validateModelAliases } from "./utils.js";
+import { deepFreeze, errorText, fail, jsonValue, modelAliasName, modelCapability, object, parseThinking, positiveInteger, resolveModelReference, unknownModel, validateModelAliases } from "./utils.js";
 import { WORKFLOW_CALL_KINDS } from "./types.js";
 
 export const DEFAULT_SETTINGS: Readonly<WorkflowSettings> = Object.freeze({ concurrency: 8 });
@@ -53,29 +53,51 @@ function validateAgentResourceExclusions(value: unknown, settingsPath: string, e
   }
   return Object.freeze({ skills: Object.freeze(normalized.skills), extensions: Object.freeze(normalized.extensions) });
 }
-export function loadSettings(path = workflowSettingsPath()): Readonly<WorkflowSettings> {
+function parseSettings(path: string, partial: false): Readonly<WorkflowSettings>;
+function parseSettings(path: string, partial: true): Readonly<WorkflowSettingsOverrides>;
+function parseSettings(path: string, partial: boolean): Readonly<WorkflowSettings | WorkflowSettingsOverrides> {
   let parsed: unknown;
   try { parsed = JSON.parse(readFileSync(path, "utf8")); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return DEFAULT_SETTINGS;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return partial ? Object.freeze({}) : DEFAULT_SETTINGS;
     fail("CONFIG_ERROR", `Invalid workflow settings JSON at ${path}: ${errorText(error)}`);
   }
   if (!object(parsed)) fail("INVALID_SETTINGS", `Workflow settings at ${path} must be an object`);
   const allowed = new Set(["concurrency", "modelAliases", "disabledAgentResources"]);
   const unknown = Object.keys(parsed).find((key) => !allowed.has(key));
   if (unknown) fail("INVALID_SETTINGS", `Unknown workflow setting at ${path}: ${unknown}`);
-  const concurrency = parsed.concurrency === undefined ? DEFAULT_SETTINGS.concurrency : parsed.concurrency;
-  if (!positiveInteger(concurrency) || concurrency > 16) fail("INVALID_SETTINGS", `${path}.concurrency must be an integer from 1 to 16`);
+  const concurrency = parsed.concurrency === undefined ? (partial ? undefined : DEFAULT_SETTINGS.concurrency) : parsed.concurrency;
+  if (concurrency !== undefined && (!positiveInteger(concurrency) || concurrency > 16)) fail("INVALID_SETTINGS", `${path}.concurrency must be an integer from 1 to 16`);
   const modelAliases = parsed.modelAliases === undefined ? undefined : validateModelAliases(parsed.modelAliases, path);
   const disabledAgentResources = validateAgentResourceExclusions(parsed.disabledAgentResources, path);
-  return Object.freeze({ concurrency, ...(modelAliases ? { modelAliases } : {}), ...(disabledAgentResources ? { disabledAgentResources } : {}) });
+  return Object.freeze({ ...(concurrency === undefined ? {} : { concurrency }), ...(modelAliases === undefined ? {} : { modelAliases }), ...(disabledAgentResources === undefined ? {} : { disabledAgentResources }) });
+}
+export function loadSettings(path = workflowSettingsPath()): Readonly<WorkflowSettings> { return parseSettings(path, false); }
+export function loadSettingsOverrides(path: string): Readonly<WorkflowSettingsOverrides> { return parseSettings(path, true); }
+export function resolveWorkflowSettings(cwd: string, projectTrusted: boolean, globalSettingsPath = workflowSettingsPath()): WorkflowSettingsResolution {
+  const projectSettingsPath = workflowProjectSettingsPath(cwd);
+  const global = loadSettings(globalSettingsPath);
+  const project: Readonly<WorkflowSettingsOverrides> = projectTrusted ? loadSettingsOverrides(projectSettingsPath) : Object.freeze({});
+  const projectHas = (key: keyof WorkflowSettingsOverrides): boolean => Object.prototype.hasOwnProperty.call(project, key);
+  const sources: WorkflowSettingsSources = {
+    concurrency: projectHas("concurrency") ? projectSettingsPath : globalSettingsPath,
+    modelAliases: projectHas("modelAliases") ? projectSettingsPath : globalSettingsPath,
+    disabledAgentResources: projectHas("disabledAgentResources") ? projectSettingsPath : globalSettingsPath,
+  };
+  const effective = Object.freeze({
+    concurrency: project.concurrency ?? global.concurrency,
+    ...(projectHas("modelAliases") ? { modelAliases: project.modelAliases } : global.modelAliases === undefined ? {} : { modelAliases: global.modelAliases }),
+    ...(projectHas("disabledAgentResources") ? { disabledAgentResources: project.disabledAgentResources } : global.disabledAgentResources === undefined ? {} : { disabledAgentResources: global.disabledAgentResources }),
+  });
+  return { globalSettingsPath, projectSettingsPath, projectTrusted, global, project, effective, sources };
 }
 export function resolveAgentResourcePolicy(cwd: string, projectTrusted: boolean, globalSettingsPath = workflowSettingsPath()): AgentResourcePolicy {
-  const projectSettingsPath = workflowProjectSettingsPath(cwd);
-  const global = loadSettings(globalSettingsPath).disabledAgentResources ?? EMPTY_AGENT_RESOURCE_EXCLUSIONS;
-  const project = projectTrusted ? loadSettings(projectSettingsPath).disabledAgentResources ?? EMPTY_AGENT_RESOURCE_EXCLUSIONS : EMPTY_AGENT_RESOURCE_EXCLUSIONS;
-  const effective = mergeAgentResourceExclusions(global, project);
-  return { globalSettingsPath, projectSettingsPath, projectTrusted, global, project, effective, unmatchedSkills: [], unmatchedExtensions: [] };
+  const resolved = resolveWorkflowSettings(cwd, projectTrusted, globalSettingsPath);
+  const empty = EMPTY_AGENT_RESOURCE_EXCLUSIONS;
+  const global = resolved.global.disabledAgentResources ?? empty;
+  const project = resolved.project.disabledAgentResources ?? empty;
+  const effective = resolved.effective.disabledAgentResources ?? empty;
+  return { globalSettingsPath: resolved.globalSettingsPath, projectSettingsPath: resolved.projectSettingsPath, projectTrusted, global, project, effective, unmatchedSkills: [], unmatchedExtensions: [] };
 }
 export function saveModelAliases(path = workflowSettingsPath(), aliases: Readonly<Record<string, string>> = {}): void {
   const normalized = validateModelAliases(aliases, path);

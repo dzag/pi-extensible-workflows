@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 import test from "node:test";
 import type { AgentSessionEvent, InlineExtension, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDiagnostics, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resolveAgentResourcePolicy, resolveModelReference, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
+import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDiagnostics, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resolveAgentResourcePolicy, resolveModelReference, resolveWorkflowSettings, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
 import type { NativeSession, SessionInput } from "../src/agent-execution.js";
 import { listRunIds } from "../src/persistence.js";
 
@@ -694,6 +694,54 @@ void test("session recovery emits interruption as state change only", async () =
   } finally {
     await shutdown?.();
   }
+});
+void test("resuming a launched trusted-project run keeps per-run concurrency and clears removed exclusions", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-project-resume-settings-"));
+  const home = join(root, "home");
+  const cwd = join(root, "project");
+  const agentDir = join(root, "agent");
+  const globalSettings = join(agentDir, "pi-extensible-workflows", "settings.json");
+  const projectSettings = join(cwd, ".pi", "pi-extensible-workflows", "settings.json");
+  mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
+  mkdirSync(join(cwd, ".pi", "pi-extensible-workflows"), { recursive: true });
+  writeFileSync(globalSettings, JSON.stringify({ concurrency: 1 }));
+  writeFileSync(projectSettings, JSON.stringify({ concurrency: 2, disabledAgentResources: { skills: ["project-old"], extensions: [] } }));
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
+  const inputs: SessionInput[] = [];
+  let releaseAgent: (() => void) | undefined;
+  const agentReady = new Promise<void>((resolve) => { releaseAgent = resolve; });
+  let resolvePause!: (runId: string) => void;
+  const pauseReady = new Promise<string>((resolve) => { resolvePause = resolve; });
+  const context = { cwd, hasUI: false, isProjectTrusted: () => true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
+  const createSession = async (input: SessionInput): Promise<NativeSession> => {
+    inputs.push(input);
+    return { sessionId: `project-resume-${String(inputs.length)}`, sessionFile: `/sessions/project-resume-${String(inputs.length)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { await agentReady; }, steer: async () => {}, dispose() {} };
+  };
+  let shutdown: (() => Promise<void>) | undefined;
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { if (channel !== WORKFLOW_PHASE_CHANGED_EVENT || (data as { phase?: string }).phase !== "pause") return; const event = data as { runId: string }; const action = commands[0]?.handler(`pause ${event.runId}`, context); if (action) void action.then(() => setImmediate(() => { resolvePause(event.runId); })); } } } as never, home, async () => {}, createSession, agentDir);
+  const workflow = tools.find(({ name }) => name === "workflow");
+  assert.ok(workflow);
+  const run = workflow.execute("id", { name: "project-resume-settings", script: "phase('pause'); const value = await agent('work'); phase('after'); return value;", concurrency: 4, foreground: true }, new AbortController().signal, undefined, context);
+  const runId = await pauseReady;
+  const store = new RunStore(cwd, "session", runId, home);
+  releaseAgent?.();
+  for (let attempt = 0; attempt < 1000 && (await store.load()).run.state !== "paused"; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+  const paused = await store.load();
+  assert.equal(paused.run.state, "paused");
+  assert.equal(paused.snapshot.settings.concurrency, 4);
+  assert.equal(paused.snapshot.settingsSources?.concurrency, "per-run options");
+  assert.deepEqual(paused.snapshot.settings.disabledAgentResources?.skills, ["project-old"]);
+  writeFileSync(globalSettings, JSON.stringify({ concurrency: 1 }));
+  writeFileSync(projectSettings, JSON.stringify({ concurrency: 2 }));
+  await commands[0]?.handler(`resume ${runId}`, context);
+  await run;
+  const resumed = await store.load();
+  assert.equal(resumed.run.state, "completed");
+  assert.equal(resumed.snapshot.settings.concurrency, 4);
+  assert.equal(resumed.snapshot.settingsSources?.concurrency, "per-run options");
+  assert.equal(resumed.snapshot.settings.disabledAgentResources, undefined);
+  await shutdown?.();
 });
 
 void test("/workflow doctor formats the shared doctor report with active session tools", async () => {
@@ -2277,7 +2325,7 @@ void test("strict settings use defaults and reject unknown or unsafe values", ()
   writeFileSync(path, JSON.stringify({ surprise: true }));
   assert.throws(() => loadSettings(path), /Unknown workflow setting/);
 });
-void test("merges trusted agent resource exclusions and ignores untrusted project selectors", () => {
+void test("replaces trusted agent resource exclusions and ignores untrusted project selectors", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-resources-"));
   const home = join(root, "home");
   const cwd = join(root, "project");
@@ -2292,7 +2340,7 @@ void test("merges trusted agent resource exclusions and ignores untrusted projec
   process.env.HOME = home;
   try {
     const trusted = resolveAgentResourcePolicy(cwd, true, globalPath);
-    assert.deepEqual(trusted.effective.skills, ["learning-opportunities", "project-only"]);
+    assert.deepEqual(trusted.effective.skills, ["project-only", "learning-opportunities"]);
     assert.deepEqual(trusted.effective.extensions, [extension, join(cwd, ".pi", "project-only.ts")]);
     assert.equal(loadSettings(globalPath).modelAliases?.reviewer, "openai/gpt");
     const untrusted = resolveAgentResourcePolicy(cwd, false, globalPath);
@@ -2419,7 +2467,7 @@ void test("resume reloads aliases for pending and retried calls while replaying 
   await store.complete(replayPaths[0] as string, "replayed");
   const previous = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = agentDir;
-  writeFileSync(settingsPath, JSON.stringify({ concurrency: 2, modelAliases: newAliases, disabledAgentResources: { skills: ["new-skill"], extensions: [join(agentDir, "new.ts")] } }));
+  writeFileSync(settingsPath, JSON.stringify({ concurrency: 6, modelAliases: newAliases, disabledAgentResources: { skills: ["new-skill"], extensions: [join(agentDir, "new.ts")] } }));
   const inputs: SessionInput[] = [];
   let failedPending = false;
   const createSession = async (input: SessionInput): Promise<NativeSession> => {
@@ -2447,6 +2495,8 @@ void test("resume reloads aliases for pending and retried calls while replaying 
     for (let attempt = 0; attempt < 1000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
     const loaded = await store.load();
     assert.equal(loaded.run.state, "completed");
+    assert.equal(loaded.snapshot.settings.concurrency, 2);
+    assert.equal(loaded.snapshot.settingsSources, undefined);
     assert.equal(inputs.length, 3);
     assert.deepEqual(inputs.map(({ model }) => ({ provider: model.provider, model: model.model })), [{ provider: "new", model: "model" }, { provider: "new", model: "model" }, { provider: "new", model: "model" }]);
     assert.deepEqual(inputs.map(({ resourcePolicy }) => resourcePolicy?.effective), [{ skills: ["new-skill"], extensions: [join(agentDir, "new.ts")] }, { skills: ["new-skill"], extensions: [join(agentDir, "new.ts")] }, { skills: ["new-skill"], extensions: [join(agentDir, "new.ts")] }]);
@@ -3744,4 +3794,58 @@ void test("workflow_resume persists exact proposals and approval or rejection co
   assert.equal(events.filter(({ channel }) => channel === WORKFLOW_RUN_RESUMED_EVENT).length, 1);
   assert.deepEqual(events.filter(({ channel }) => channel === WORKFLOW_BUDGET_EVENT).map(({ data }) => (data as { type: string }).type), ["adjustment_requested", "adjustment_rejected", "adjustment_requested", "adjustment_approved", "soft_crossed"]);
   assert.ok(events.some(({ channel, data }) => channel === WORKFLOW_RUN_STATE_CHANGED_EVENT && (data as { state: string }).state === "running"));
+});
+
+void test("resolves trusted project settings with replacement and inheritance semantics", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-project-settings-"));
+  const home = join(root, "home");
+  const cwd = join(root, "project");
+  const globalPath = join(home, "agent", "pi-extensible-workflows", "settings.json");
+  const projectPath = join(cwd, ".pi", "pi-extensible-workflows", "settings.json");
+  mkdirSync(join(home, "agent", "pi-extensible-workflows"), { recursive: true });
+  mkdirSync(join(cwd, ".pi", "pi-extensible-workflows"), { recursive: true });
+  writeFileSync(globalPath, JSON.stringify({ concurrency: 6, modelAliases: { reviewer: "openai/gpt" }, disabledAgentResources: { skills: ["global"], extensions: ["/global.ts"] } }));
+  writeFileSync(projectPath, JSON.stringify({ concurrency: 2, modelAliases: {}, disabledAgentResources: { skills: [], extensions: [] } }));
+  const trusted = resolveWorkflowSettings(cwd, true, globalPath);
+  assert.equal(trusted.effective.concurrency, 2);
+  assert.deepEqual(trusted.effective.modelAliases, {});
+  assert.deepEqual(trusted.effective.disabledAgentResources, { skills: [], extensions: [] });
+  assert.equal(trusted.sources.modelAliases, projectPath);
+  writeFileSync(projectPath, JSON.stringify({ concurrency: 3 }));
+  const partial = resolveWorkflowSettings(cwd, true, globalPath);
+  assert.equal(partial.effective.concurrency, 3);
+  assert.deepEqual(partial.effective.modelAliases, { reviewer: "openai/gpt" });
+  assert.deepEqual(partial.effective.disabledAgentResources, { skills: ["global"], extensions: ["/global.ts"] });
+  writeFileSync(projectPath, "{ malformed");
+  assert.doesNotThrow(() => resolveWorkflowSettings(cwd, false, globalPath));
+  assert.throws(() => resolveWorkflowSettings(cwd, true, globalPath), /Invalid workflow settings JSON/);
+});
+void test("workflow_catalog reports effective project settings without registered functions", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-project-catalog-"));
+  const cwd = join(root, "project");
+  const agentDir = join(root, "agent");
+  const globalPath = join(agentDir, "pi-extensible-workflows", "settings.json");
+  const projectPath = join(cwd, ".pi", "pi-extensible-workflows", "settings.json");
+  mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
+  mkdirSync(join(cwd, ".pi", "pi-extensible-workflows"), { recursive: true });
+  writeFileSync(globalPath, JSON.stringify({ concurrency: 6 }));
+  writeFileSync(projectPath, JSON.stringify({ concurrency: 2 }));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const tools: Array<{ name: string; execute?: (...args: never[]) => Promise<{ content: Array<{ text: string }> }> }> = [];
+  let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let shutdown: (() => Promise<void>) | undefined;
+  try {
+    workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getActiveTools: () => ["workflow"], on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; } } as never, root);
+    assert.ok(start && shutdown);
+    await start({}, { cwd, isProjectTrusted: () => true, sessionManager: { getSessionId: () => "catalog" } });
+    const catalogTool = tools.find(({ name }) => name === "workflow_catalog");
+    assert.ok(catalogTool?.execute);
+    const catalog = JSON.parse((await catalogTool.execute()).content[0]?.text ?? "null") as { settings: { concurrency: number; sources: { concurrency: string } } };
+    assert.equal(catalog.settings.concurrency, 2);
+    assert.equal(catalog.settings.sources.concurrency, projectPath);
+  } finally {
+    await shutdown?.();
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+  }
 });

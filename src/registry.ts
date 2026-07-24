@@ -1,7 +1,7 @@
 import { Value } from "typebox/value";
-import type { JsonValue, RegisteredAgentSetupHook, WorkflowCatalog, WorkflowCatalogError, WorkflowCatalogFunction, WorkflowCatalogIndex, WorkflowCatalogVariable, WorkflowExtension, WorkflowFunction, WorkflowFunctionContext, WorkflowJournal, WorkflowVariable } from "./types.js";
+import type { JsonValue, RegisteredAgentSetupHook, WorkflowCatalog, WorkflowCatalogContext, WorkflowCatalogError, WorkflowCatalogFunction, WorkflowCatalogIndex, WorkflowCatalogVariable, WorkflowExtension, WorkflowFunction, WorkflowFunctionContext, WorkflowJournal, WorkflowVariable } from "./types.js";
 import { deepFreeze, fail, jsonValue, object } from "./utils.js";
-import { loadSettings, validateSchema } from "./validation.js";
+import { loadSettings, resolveWorkflowSettings, validateSchema } from "./validation.js";
 
 const RESERVED_GLOBALS = new Set(["agent", "shell", "prompt", "checkpoint", "parallel", "pipeline", "phase", "withWorktree", "log", "args", "Promise", "JSON", "Math", "Date", "eval", "Function", "WebAssembly", "process", "require", "module", "exports", "console", "fetch", "XMLHttpRequest", "WebSocket", "performance", "crypto", "setTimeout", "setInterval", "setImmediate", "queueMicrotask", "Intl", "SharedArrayBuffer", "Atomics", "globalThis", "global", "undefined", "NaN", "Infinity", "extensions", "workflow_catalog"]);
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
@@ -62,7 +62,7 @@ export class WorkflowRegistry {
     return Object.freeze(Object.fromEntries([...this.#extensions].flatMap((extension) => Object.entries(extension.functions ?? {}))));
   }
 
-  catalog(): WorkflowCatalog {
+  catalog(context?: WorkflowCatalogContext): WorkflowCatalog {
     const functions: WorkflowCatalogFunction[] = [];
     const variables: WorkflowCatalogVariable[] = [];
     for (const extension of this.#extensions) {
@@ -70,26 +70,31 @@ export class WorkflowRegistry {
       for (const [name, variable] of Object.entries(extension.variables ?? {})) variables.push({ name, version: extension.version, headline: extension.headline, extensionDescription: extension.description, description: variable.description, schema: structuredClone(variable.schema) });
     }
     let aliases: Readonly<Record<string, string>> | undefined;
-    try { aliases = loadSettings().modelAliases; } catch { aliases = undefined; }
+    let settings: WorkflowCatalog["settings"];
+    try {
+      const resolved = context ? resolveWorkflowSettings(context.cwd, context.projectTrusted, context.globalSettingsPath) : undefined;
+      aliases = resolved?.effective.modelAliases ?? loadSettings().modelAliases;
+      if (resolved) settings = { concurrency: resolved.effective.concurrency, modelAliases: resolved.effective.modelAliases ?? {}, disabledAgentResources: resolved.effective.disabledAgentResources ?? { skills: [], extensions: [] }, globalSettingsPath: resolved.globalSettingsPath, projectSettingsPath: resolved.projectSettingsPath, projectTrusted: resolved.projectTrusted, sources: resolved.sources };
+    } catch { aliases = undefined; }
     const sort = (left: { name: string }, right: { name: string }) => left.name.localeCompare(right.name);
-    return deepFreeze({ functions: functions.sort(sort), variables: variables.sort(sort), ...(aliases ? { modelAliases: structuredClone(aliases) } : {}) });
+    return deepFreeze({ functions: functions.sort(sort), variables: variables.sort(sort), ...(aliases ? { modelAliases: structuredClone(aliases) } : {}), ...(settings ? { settings } : {}) });
   }
-
-  catalogIndex(): WorkflowCatalogIndex {
-    const catalog = this.catalog();
+  catalogIndex(context?: WorkflowCatalogContext): WorkflowCatalogIndex {
+    const catalog = this.catalog(context);
     return deepFreeze({
       functions: catalog.functions.map(({ name, description, input }) => ({ name, description, input: structuredClone(input) })),
       variables: catalog.variables.map(({ name, description, schema }) => ({ name, description, schema: structuredClone(schema) })),
       ...(catalog.modelAliases ? { modelAliases: structuredClone(catalog.modelAliases) } : {}),
+      ...(catalog.settings ? { settings: structuredClone(catalog.settings) } : {}),
     });
   }
-
-  catalogDetail(name: string): WorkflowCatalogFunction | WorkflowCatalogVariable | WorkflowCatalogError {
-    const catalog = this.catalog();
+  catalogDetail(name: string, context?: WorkflowCatalogContext): WorkflowCatalogFunction | WorkflowCatalogVariable | WorkflowCatalogError {
+    const catalog = this.catalog(context);
     const entry = catalog.functions.find((candidate) => candidate.name === name) ?? catalog.variables.find((candidate) => candidate.name === name);
     if (entry) return entry;
     return deepFreeze({ error: { code: "NOT_FOUND", name, message: `No registered workflow function or variable is available: ${name}` } });
   }
+
 
   globals(): Readonly<Record<string, { name: string }>> {
     return Object.freeze(Object.fromEntries([...this.#extensions].flatMap((extension) => Object.keys(extension.functions ?? {}).map((name) => [name, { name }]))));
@@ -128,9 +133,9 @@ function createWorkflowRegistryApi(registry: WorkflowRegistry): WorkflowRegistry
     register: (extension) => { registry.register(extension); },
     function: (name) => registry.function(name),
     functions: () => registry.functions(),
-    catalog: () => registry.catalog(),
-    catalogIndex: () => registry.catalogIndex(),
-    catalogDetail: (name) => registry.catalogDetail(name),
+    catalog: (context) => registry.catalog(context),
+    catalogIndex: (context) => registry.catalogIndex(context),
+    catalogDetail: (name, context) => registry.catalogDetail(name, context),
     globals: () => registry.globals(),
     invokeFunction: (...args) => registry.invokeFunction(...args),
     variables: () => registry.variables(),
@@ -149,9 +154,8 @@ export function beginWorkflowExtensionLoading(): void {
 export function loadingRegistry(): WorkflowRegistryApi { return workflowRegistryHost().api; }
 beginWorkflowExtensionLoading();
 export function registerWorkflowExtension(extension: WorkflowExtension): void { loadingRegistry().register(extension); }
-export function workflowCatalog(): WorkflowCatalog { return loadingRegistry().catalog(); }
-export function workflowCatalogIndex(): WorkflowCatalogIndex { return loadingRegistry().catalogIndex(); }
-export function workflowCatalogDetail(name: string): WorkflowCatalogFunction | WorkflowCatalogVariable | WorkflowCatalogError { return loadingRegistry().catalogDetail(name); }
+export function workflowCatalog(context?: WorkflowCatalogContext): WorkflowCatalog { return loadingRegistry().catalog(context); }
+export function workflowCatalogIndex(context?: WorkflowCatalogContext): WorkflowCatalogIndex { return loadingRegistry().catalogIndex(context); }
+export function workflowCatalogDetail(name: string, context?: WorkflowCatalogContext): WorkflowCatalogFunction | WorkflowCatalogVariable | WorkflowCatalogError { return loadingRegistry().catalogDetail(name, context); }
 export function registeredWorkflowFunctions(): Readonly<Record<string, WorkflowFunction>> { return loadingRegistry().functions(); }
-
-export type { WorkflowCatalog, WorkflowCatalogError, WorkflowCatalogFunction, WorkflowCatalogIndex, WorkflowCatalogIndexFunction, WorkflowCatalogIndexVariable, WorkflowCatalogVariable } from "./types.js";
+export type { WorkflowCatalog, WorkflowCatalogContext, WorkflowCatalogError, WorkflowCatalogFunction, WorkflowCatalogIndex, WorkflowCatalogIndexFunction, WorkflowCatalogIndexVariable, WorkflowCatalogSettings, WorkflowCatalogVariable } from "./types.js";
