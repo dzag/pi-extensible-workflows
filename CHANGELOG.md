@@ -1,7 +1,10 @@
 # Changelog
-## Unreleased
+## [3.1.0] - 2026-07-24
+
+### Highlights
 
 - Added explicit dry-run-first `doctor cleanup` with age-gated, lease-aware, dependency-safe deletion of old terminal workflow runs.
+- Added dynamic workflow model aliases and phase-aware workflow navigator views.
 
 ## [3.0.0] - 2026-07-23
 
@@ -53,5 +56,6 @@
 - Runtime acceptance suite: 24 tests passing.
 - Build, lint, documentation checks, and package dry-run passing.
 
+[3.1.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v1.0.1...v2.0.0
