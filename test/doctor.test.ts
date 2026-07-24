@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { doctor, doctorExitCode, formatDoctorReport, type DoctorPiState } from "../src/doctor.js";
 import { formatWorkflowCliHelp, parseDoctorCleanupArgs, parseWorkflowCliArgs, runCli } from "../src/cli.js";
-import { registerWorkflowExtension, type JsonValue, type WorkflowExtension } from "../src/index.js";
+import { registerWorkflowExtension, WorkflowRegistry, type JsonValue, type WorkflowExtension } from "../src/index.js";
 
 function pi(overrides: Partial<DoctorPiState> = {}): DoctorPiState {
   return {
@@ -122,6 +122,37 @@ void test("doctor reports every registered function", async () => {
     ["missingTool", true],
   ]);
   assert.equal(report.diagnostics.some(({ code }) => code.startsWith("FUNCTION_")), false);
+});
+void test("doctor reports dynamic model alias provenance", async () => {
+  const paths = fixture();
+  const registry = new WorkflowRegistry();
+  registry.register({ version: "1.0.0", headline: "Model policy", description: "Selects models", modelAliases: { reviewer: { resolve: () => "openai/gpt" } } });
+  const report = await withHome(paths.root, () => doctor({ ...paths, registry, discoverPi: async () => pi() }));
+  assert.deepEqual(report.modelAliases, [{ name: "reviewer", kind: "dynamic", provenance: "extension: Model policy", version: "1.0.0", headline: "Model policy", extensionDescription: "Selects models" }]);
+  assert.match(formatDoctorReport(report), /\[dynamic\] `reviewer` \(extension: Model policy\)/);
+});
+void test("doctor accepts role files using unshadowed dynamic model aliases without resolving them", async () => {
+  const paths = fixture();
+  writeFileSync(join(paths.agentDir, "pi-extensible-workflows", "roles", "reviewer.md"), "---\nmodel: policy-model\n---\nReview");
+  const registry = new WorkflowRegistry();
+  let calls = 0;
+  registry.register({ version: "1.0.0", headline: "Model policy", description: "Selects models", modelAliases: { "policy-model": { resolve: () => { calls += 1; return "openai/gpt"; } } } });
+  const report = await withHome(paths.root, () => doctor({ ...paths, registry, discoverPi: async () => pi() }));
+  assert.equal(calls, 0);
+  assert.equal(report.diagnostics.some(({ code }) => code === "MODEL_INVALID" || code === "MODEL_UNAVAILABLE"), false);
+  assert.equal(doctorExitCode(report), 0);
+});
+void test("doctor leaves static settings aliases shadowing dynamic aliases", async () => {
+  const paths = fixture();
+  writeFileSync(paths.settingsPath, JSON.stringify({ modelAliases: { "policy-model": "other/model" } }));
+  writeFileSync(join(paths.agentDir, "pi-extensible-workflows", "roles", "reviewer.md"), "---\nmodel: policy-model\n---\nReview");
+  const registry = new WorkflowRegistry();
+  let calls = 0;
+  registry.register({ version: "1.0.0", headline: "Model policy", description: "Selects models", modelAliases: { "policy-model": { resolve: () => { calls += 1; return "openai/gpt"; } } } });
+  const report = await withHome(paths.root, () => doctor({ ...paths, registry, discoverPi: async () => pi() }));
+  assert.equal(calls, 0);
+  assert.equal(report.diagnostics.some(({ code }) => code === "MODEL_INVALID"), false);
+  assert.ok(report.diagnostics.some(({ code }) => code === "MODEL_UNAVAILABLE"));
 });
 void test("doctor reports registered functions without model availability probes", async () => {
   const paths = fixture();

@@ -58,6 +58,8 @@ export type WorkflowCheckpointState = "awaiting" | "approved" | "rejected";
 export interface WorkflowCheckpointStateChangedEvent extends WorkflowEventBase { name: string; state: WorkflowCheckpointState }
 export interface WorkflowBudgetEvent extends WorkflowEventBase { type: BudgetEventType; budgetVersion: number; dimensions: readonly BudgetDimension[]; usage: WorkflowBudgetUsage; limits: WorkflowBudget; proposalId?: string; previous?: WorkflowBudget; proposed?: WorkflowBudget }
 export interface ModelSpec { provider: string; model: string; thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" }
+export interface WorkflowModelAliasResolverContext { cwd: string; projectTrusted: boolean; rootModel: ModelSpec; knownModels: ReadonlySet<string>; availableModels: ReadonlySet<string>; signal: AbortSignal }
+export interface WorkflowModelAlias { resolve: (context: Readonly<WorkflowModelAliasResolverContext>) => string | Promise<string> }
 export interface WorkflowMetadata { name: string; description?: string }
 export interface WorkflowSettings { concurrency: number; modelAliases?: Readonly<Record<string, string>>; disabledAgentResources?: Readonly<AgentResourceExclusions> }
 export interface WorkflowSettingsOverrides { concurrency?: number; modelAliases?: Readonly<Record<string, string>>; disabledAgentResources?: Readonly<AgentResourceExclusions> }
@@ -127,7 +129,7 @@ export interface AgentSetupHook { priority?: number; setup: (agent: AgentSetup, 
 export interface RegisteredAgentSetupHook { name: string; priority: number; setup: AgentSetupHook["setup"] }
 export interface WorkflowExtensionMetadata { version: string; headline: string; description: string }
 export interface WorkflowRoleDirectoryRegistration { path: string; extension: WorkflowExtensionMetadata }
-export interface WorkflowExtension extends WorkflowExtensionMetadata { functions?: Readonly<Record<string, WorkflowFunction>>; variables?: Readonly<Record<string, WorkflowVariable>>; agentSetupHooks?: Readonly<Record<string, AgentSetupHook>>; roleDirectories?: readonly (string | URL)[] }
+export interface WorkflowExtension extends WorkflowExtensionMetadata { functions?: Readonly<Record<string, WorkflowFunction>>; variables?: Readonly<Record<string, WorkflowVariable>>; modelAliases?: Readonly<Record<string, WorkflowModelAlias>>; agentSetupHooks?: Readonly<Record<string, AgentSetupHook>>; roleDirectories?: readonly (string | URL)[] }
 export interface WorkflowJournal { get(path: string): JsonValue | undefined; put(path: string, value: JsonValue): void }
 export class WorkflowError extends Error { constructor(public readonly code: WorkflowErrorCode, message: string) { super(message); this.name = "WorkflowError"; } }
 export interface WorkflowFailureAgent { id: string; label?: string; role?: string; structuralPath: readonly string[]; attempt: number; sessionId?: string; sessionFile?: string }
@@ -143,12 +145,13 @@ export type StaticWorkflowExecution = "parallel" | "sequential";
 export interface StaticWorkflowCall { kind: WorkflowCallKind; start: number; end: number; name: string | null; prompt: string | null; model: string | null; label?: string | null; role: string | null; retries?: number | null; outputSchema?: JsonSchema | null; options?: Readonly<Record<string, JsonValue>> | null; optionKeys?: readonly string[]; execution?: StaticWorkflowExecution; structure?: readonly StaticWorkflowScope[] }
 export interface WorkflowCatalogFunction { name: string; version: string; headline: string; extensionDescription: string; description: string; input: JsonSchema; output: JsonSchema }
 export interface WorkflowCatalogVariable { name: string; version: string; headline: string; extensionDescription: string; description: string; schema: JsonSchema }
+export interface WorkflowCatalogModelAlias { name: string; kind: "static" | "dynamic"; provenance: string; version?: string; headline?: string; extensionDescription?: string }
 export interface WorkflowCatalogSettings { concurrency: number; modelAliases: Readonly<Record<string, string>>; disabledAgentResources: AgentResourceExclusions; globalSettingsPath: string; projectSettingsPath: string; projectTrusted: boolean; sources: WorkflowSettingsSources }
 export interface WorkflowCatalogContext { cwd: string; projectTrusted: boolean; globalSettingsPath?: string }
-export interface WorkflowCatalog { functions: readonly WorkflowCatalogFunction[]; variables: readonly WorkflowCatalogVariable[]; modelAliases?: Readonly<Record<string, string>>; settings?: WorkflowCatalogSettings }
+export interface WorkflowCatalog { functions: readonly WorkflowCatalogFunction[]; variables: readonly WorkflowCatalogVariable[]; modelAliases?: Readonly<Record<string, string>>; modelAliasEntries?: readonly WorkflowCatalogModelAlias[]; settings?: WorkflowCatalogSettings }
 export interface WorkflowCatalogIndexFunction { name: string; description: string; input: JsonSchema }
 export interface WorkflowCatalogIndexVariable { name: string; description: string; schema: JsonSchema }
-export interface WorkflowCatalogIndex { functions: readonly WorkflowCatalogIndexFunction[]; variables: readonly WorkflowCatalogIndexVariable[]; modelAliases?: Readonly<Record<string, string>>; settings?: WorkflowCatalogSettings }
+export interface WorkflowCatalogIndex { functions: readonly WorkflowCatalogIndexFunction[]; variables: readonly WorkflowCatalogIndexVariable[]; modelAliases?: Readonly<Record<string, string>>; modelAliasEntries?: readonly WorkflowCatalogModelAlias[]; settings?: WorkflowCatalogSettings }
 export interface WorkflowCatalogError { error: { code: "NOT_FOUND"; name: string; message: string } }
 export interface WorkflowValidationParameters { name?: string; description?: string; script?: string; workflow?: string; args?: unknown }
 export interface WorkflowValidationContext { cwd: string; projectTrusted: boolean; availableModels: ReadonlySet<string>; rootTools: ReadonlySet<string>; modelAliases?: Readonly<Record<string, string>>; knownModels?: ReadonlySet<string>; settingsPath?: string; agentDir?: string }

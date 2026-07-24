@@ -11,7 +11,7 @@ import { WorkflowError } from "./types.js";
 import type { AgentDefinition, AgentResourceExclusions, AgentResourcePolicy, CheckpointInput, JsonSchema, JsonValue, LaunchSnapshot, PreflightCapabilities, PreflightResult, ShellOptions, StaticWorkflowCall, StaticWorkflowExecution, StaticWorkflowScope, ValidatedWorkflowLaunch, WorkflowCallKind, WorkflowErrorCode, WorkflowExtensionMetadata, WorkflowMetadata, WorkflowRoleDirectoryRegistration, WorkflowSettings, WorkflowSettingsOverrides, WorkflowSettingsResolution, WorkflowSettingsSources, WorkflowValidationContext, WorkflowValidationParameters } from "./types.js";
 import type { WorkflowRegistryApi } from "./registry.js";
 import { registeredWorkflowRoleDirectoryRegistrations } from "./registry.js";
-import { deepFreeze, errorText, fail, jsonValue, modelAliasName, modelCapability, object, parseThinking, positiveInteger, resolveModelReference, unknownModel, validateModelAliases, validateResourcePattern } from "./utils.js";
+import { annotateModelAliasError, deepFreeze, errorText, fail, jsonValue, modelAliasName, modelCapability, object, parseThinking, positiveInteger, resolveModelReference, unknownModel, validateModelAliases, validateResourcePattern } from "./utils.js";
 import { WORKFLOW_CALL_KINDS } from "./types.js";
 
 export const DEFAULT_SETTINGS: Readonly<WorkflowSettings> = Object.freeze({ concurrency: 8 });
@@ -104,6 +104,14 @@ export function resolveWorkflowSettings(cwd: string, projectTrusted: boolean, gl
     ...(projectHas("disabledAgentResources") ? { disabledAgentResources: project.disabledAgentResources } : global.disabledAgentResources === undefined ? {} : { disabledAgentResources: global.disabledAgentResources }),
   });
   return { globalSettingsPath, projectSettingsPath, projectTrusted, global, project, effective, sources };
+}
+export function validateModelAliasAvailability(aliases: Readonly<Record<string, string>>, names: readonly string[], availableModels: ReadonlySet<string>, knownModels: ReadonlySet<string>, settingsPath?: string): void {
+  for (const name of names) {
+    try {
+      const target = modelCapability(name, aliases, knownModels, settingsPath);
+      if (!availableModels.has(target)) unknownModel(name, target, settingsPath);
+    } catch (error) { throw annotateModelAliasError(error, name); }
+  }
 }
 export function resolveAgentResourcePolicy(cwd: string, projectTrusted: boolean, globalSettingsPath = workflowSettingsPath()): AgentResourcePolicy {
   const resolved = resolveWorkflowSettings(cwd, projectTrusted, globalSettingsPath);

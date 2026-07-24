@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import type { AgentSessionEvent, InlineExtension, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, disabledResources, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDiagnostics, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeAgentResourceExclusions, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resourcePatternMatches, resolveAgentResourcePolicy, resolveModelReference, resolveWorkflowSettings, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
+import { loadingRegistry } from "../src/registry.js";
 import type { NativeSession, SessionInput } from "../src/agent-execution.js";
 import { listRunIds } from "../src/persistence.js";
 
@@ -58,6 +59,50 @@ const typeCheckWorktreeContext = (context: WorkflowOrchestrationContext): void =
 };
 void typeCheckWorktreeContext;
 
+void test("resolves dynamic model aliases against a launch inventory", async () => {
+  const registry = new WorkflowRegistry();
+  let calls = 0;
+  registry.register({ version: "1.0.0", headline: "Dynamic aliases", description: "Dynamic alias test", modelAliases: { reviewer: { async resolve(context) { calls += 1; assert.equal(context.cwd, "/project"); assert.equal(context.projectTrusted, true); assert.equal(context.rootModel.provider, "openai"); assert.ok(context.availableModels.has("anthropic/opus")); return context.availableModels.has("anthropic/opus") ? "anthropic/opus:high" : "openai/gpt"; } } } });
+  const resolved = await registry.resolveModelAliases({ cwd: "/project", projectTrusted: true, rootModel: { provider: "openai", model: "gpt", thinking: "medium" }, knownModels: new Set(["openai/gpt", "anthropic/opus"]), availableModels: new Set(["openai/gpt", "anthropic/opus"]), signal: new AbortController().signal });
+  assert.deepEqual(resolved, { reviewer: "anthropic/opus:high" });
+  assert.equal(calls, 1);
+});
+void test("accepts dynamic aliases with the static hyphenated alias contract", async () => {
+  const registry = new WorkflowRegistry();
+  registry.register({ version: "1.0.0", headline: "Hyphenated aliases", description: "Dynamic alias test", modelAliases: { "reviewer-model": { resolve: () => "openai/gpt" } } });
+  assert.deepEqual(await registry.resolveModelAliases({ cwd: "/project", projectTrusted: false, rootModel: { provider: "openai", model: "gpt" }, knownModels: new Set(["openai/gpt"]), availableModels: new Set(["openai/gpt"]), signal: new AbortController().signal }), { "reviewer-model": "openai/gpt" });
+});
+void test("catalogs dynamic aliases without executing them and honors settings shadowing", async () => {
+  const registry = new WorkflowRegistry();
+  let calls = 0;
+  registry.register({ version: "1.0.0", headline: "Policy extension", description: "Selects a policy model", modelAliases: { reviewer: { resolve: async () => { calls += 1; return "openai/gpt"; } } } });
+  assert.deepEqual(registry.catalog().modelAliasEntries?.find(({ name, kind }) => name === "reviewer" && kind === "dynamic"), { name: "reviewer", kind: "dynamic", provenance: "extension: Policy extension", version: "1.0.0", headline: "Policy extension", extensionDescription: "Selects a policy model" });
+  const context = { cwd: "/project", projectTrusted: true, rootModel: { provider: "openai", model: "gpt" }, knownModels: new Set(["openai/gpt"]), availableModels: new Set(["openai/gpt"]), signal: new AbortController().signal };
+  assert.deepEqual(await registry.resolveModelAliases(context, new Set(["reviewer"])), {});
+  assert.equal(calls, 0);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(registry.resolveModelAliases({ ...context, signal: controller.signal }), (error: unknown) => error instanceof WorkflowError && error.code === "CANCELLED" && error.message.includes("Policy extension"));
+});
+void test("rejects duplicate and invalid dynamic alias registrations with extension provenance", async () => {
+  const duplicate = new WorkflowRegistry();
+  duplicate.register({ version: "1.0.0", headline: "First policy", description: "First", modelAliases: { reviewer: { resolve: () => "openai/gpt" } } });
+  assert.throws(() => { duplicate.register({ version: "1.0.0", headline: "Second policy", description: "Second", modelAliases: { reviewer: { resolve: () => "openai/gpt" } } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "DUPLICATE_NAME");
+  const invalid = new WorkflowRegistry();
+  invalid.register({ version: "1.0.0", headline: "Invalid policy", description: "Invalid", modelAliases: { reviewer: { resolve: () => "" } } });
+  await assert.rejects(invalid.resolveModelAliases({ cwd: "/project", projectTrusted: false, rootModel: { provider: "openai", model: "gpt" }, knownModels: new Set(["openai/gpt"]), availableModels: new Set(["openai/gpt"]), signal: new AbortController().signal }), (error: unknown) => error instanceof WorkflowError && error.code === "CONFIG_ERROR" && error.message.includes("Invalid policy"));
+});
+void test("attributes dynamic alias cycles to the registering extension", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-alias-cycle-"));
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  registerWorkflowExtension({ version: "1.0.0", headline: "Cycle policy", description: "Cycle", modelAliases: { first: { resolve: () => "second" }, second: { resolve: () => "first" } } });
+  const execute = tools.find(({ name }) => name === "workflow")?.execute;
+  assert.ok(execute);
+  const context = { cwd: home, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }], getAvailable: () => [{ provider: "openai", id: "gpt" }] }, sessionManager: { getSessionId: () => "session" } };
+  await assert.rejects(execute("id", { name: "cycle", script: "return true;", foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "CONFIG_ERROR" && error.message.includes("Cycle policy"));
+  loadingRegistry().freeze();
+});
 void test("validates aggregate budgets and patches", () => {
   const budget = validateBudget({ tokens: { soft: 5, hard: 10 }, costUsd: { soft: 1, hard: 2.5 }, durationMs: { hard: 100 }, agentLaunches: { soft: 0, hard: 1 } });
   assert.deepEqual(budget, { tokens: { soft: 5, hard: 10 }, costUsd: { soft: 1, hard: 2.5 }, durationMs: { hard: 100 }, agentLaunches: { soft: 0, hard: 1 } });
@@ -264,6 +309,64 @@ void test("workflow_retry rejects concurrent children for one mutable retry line
   }
   throw new Error("Timed out waiting for the retry child to complete");
 });
+void test("workflow_retry cleans up child startup when dynamic alias resolution fails", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-retry-alias-failure-"));
+  let resolverCalls = 0;
+  let sessions = 0;
+  const createSession = async (): Promise<NativeSession> => ({
+    sessionId: `retry-alias-${String(++sessions)}`, sessionFile: `/sessions/retry-alias-${String(sessions)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { if (sessions === 1) throw new Error("source failure"); }, steer: async () => {}, dispose() {},
+  });
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
+  registerWorkflowExtension({ version: "1.0.0", headline: "Retry policy", description: "Retry alias policy", modelAliases: { "retry-model": { resolve: () => { resolverCalls += 1; if (resolverCalls === 2) throw new Error("retry resolver failure"); return "openai/gpt"; } } } });
+  const workflow = tools.find(({ name }) => name === "workflow");
+  const retry = tools.find(({ name }) => name === "workflow_retry");
+  assert.ok(workflow && retry);
+  const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
+  await assert.rejects(workflow.execute("source", { name: "retry-alias-source", script: `return agent("work", { model: "retry-model" });`, foreground: true }, new AbortController().signal, undefined, context), WorkflowError);
+  const sourceId = (await listRunIds(home, "session", home))[0];
+  assert.ok(sourceId);
+  await assert.rejects(retry.execute("retry-fails", { runId: sourceId }, undefined, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "CONFIG_ERROR");
+  assert.equal(resolverCalls, 2);
+  assert.deepEqual(await listRunIds(home, "session", home), [sourceId]);
+  const started = await retry.execute("retry-succeeds", { runId: sourceId }, undefined, undefined, context) as { content: Array<{ text: string }> };
+  const childId = (JSON.parse(started.content[0]?.text ?? "null") as { runId: string }).runId;
+  assert.equal(resolverCalls, 3);
+  assert.notEqual(childId, sourceId);
+  loadingRegistry().freeze();
+});
+void test("workflow_retry blocks removed dynamic aliases from native bare-model fallback", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-retry-removed-alias-"));
+  const script = `return await agent("retry", { model: "gpt" });`;
+  const aliases = { gpt: "openai/gpt" };
+  const snapshot = createLaunchSnapshot({ script, args: null, metadata: { name: "removed-alias" }, settings: { concurrency: 1, modelAliases: aliases }, modelAliases: aliases, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] });
+  const source = new RunStore(home, "session", "source", home);
+  await source.create({ id: "source", workflowName: "removed-alias", cwd: home, sessionId: "session", state: "failed", agents: [], nativeSessions: [], error: { code: "AGENT_FAILED", message: "source failure" } }, snapshot);
+  let sessions = 0;
+  const createSession = async (): Promise<NativeSession> => {
+    sessions += 1;
+    return { sessionId: `retry-removed-${String(sessions)}`, sessionFile: `/sessions/retry-removed-${String(sessions)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
+  };
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, undefined, createSession);
+  const retry = tools.find(({ name }) => name === "workflow_retry");
+  assert.ok(retry);
+  const context = { cwd: home, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }], getAvailable: () => [{ provider: "openai", id: "gpt" }] }, sessionManager: { getSessionId: () => "session" } };
+  const started = await retry.execute("retry", { runId: "source" }, new AbortController().signal, undefined, context) as { content: Array<{ text: string }> };
+  const childId = (JSON.parse(started.content[0]?.text ?? "null") as { runId: string }).runId;
+  let child: PersistedRun | undefined;
+  for (let attempt = 0; attempt < 1000; attempt += 1) {
+    child = (await new RunStore(home, "session", childId, home).load()).run;
+    if (child.state === "failed" && child.error) break;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  assert.ok(child);
+  assert.ok(child.error);
+  assert.equal(child.state, "failed");
+  assert.equal(child.error.code, "UNKNOWN_MODEL");
+  assert.match(child.error.message, /Unknown model alias gpt resolved to openai\/gpt/);
+  loadingRegistry().freeze();
+});
 void test("workflow_retry rejects unsupported states, foreign sources, and incompatible snapshots", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-retry-compatibility-"));
   const launch = createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "retry-compatibility" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] });
@@ -320,8 +423,10 @@ void test("registers workflow_catalog only for active non-empty registries", asy
   assert.equal(inactiveTools.some(({ name }) => name === "workflow_catalog"), false);
   await inactiveShutdown();
   const activeHome = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-catalog-active-"));
-   type CatalogTool = { name: string; execute?: (...args: never[]) => Promise<{ content: Array<{ text: string }> }>; renderCall?: (...args: never[]) => { render(width: number): string[] }; renderResult?: (...args: never[]) => { render(width: number): string[] } };
-   const activeTools: CatalogTool[] = [];
+  mkdirSync(join(activeHome, ".pi", "pi-extensible-workflows"), { recursive: true });
+  writeFileSync(join(activeHome, ".pi", "pi-extensible-workflows", "settings.json"), JSON.stringify({ modelAliases: { "project-only": "openai/gpt" } }));
+  type CatalogTool = { name: string; execute?: (...args: never[]) => Promise<{ content: Array<{ text: string }> }>; renderCall?: (...args: never[]) => { render(width: number): string[] }; renderResult?: (...args: never[]) => { render(width: number): string[] } };
+  const activeTools: CatalogTool[] = [];
   let activeStart: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let activeShutdown: (() => Promise<void>) | undefined;
   workflowExtension({ registerTool(tool: (typeof activeTools)[number]) { activeTools.push(tool); }, registerCommand() {}, getActiveTools: () => ["workflow"], on(name: string, handler: unknown) { if (name === "session_start") activeStart = handler as typeof activeStart; if (name === "session_shutdown") activeShutdown = handler as typeof activeShutdown; } } as never, activeHome);
@@ -335,9 +440,11 @@ void test("registers workflow_catalog only for active non-empty registries", asy
   assert.throws(() => { registerWorkflowExtension({ version: "1.0.0", headline: "Late", description: "Late", functions: { x: { description: "x", input: { type: "object" }, output: { type: "string" }, run: () => "x" } } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "REGISTRY_FROZEN");
   const catalogTool = activeTools.find(({ name }) => name === "workflow_catalog");
   assert.ok(catalogTool?.execute);
-  const catalog = JSON.parse((await catalogTool.execute()).content[0]?.text ?? "null") as { functions: Array<Record<string, unknown>>; variables: Array<Record<string, unknown>>; modelAliases?: Record<string, string> };
+  const catalog = JSON.parse((await catalogTool.execute()).content[0]?.text ?? "null") as { functions: Array<Record<string, unknown>>; variables: Array<Record<string, unknown>>; modelAliases?: Record<string, string>; modelAliasEntries?: Array<Record<string, unknown>> };
   assert.deepEqual(catalog.functions.map(({ name }) => ({ name })), [{ name: "hello" }, { name: "inspect" }]);
   assert.deepEqual(catalog.variables.map(({ name }) => ({ name })), [{ name: "branch" }]);
+  assert.deepEqual(catalog.modelAliasEntries?.find(({ name }) => name === "project-only"), { name: "project-only", kind: "static", provenance: "trusted project settings" });
+  assert.doesNotMatch(JSON.stringify(catalog), /openai\/gpt/);
   assert.deepEqual(Object.keys(catalog.functions[0] ?? {}).sort(), ["description", "input", "name"]);
   assert.deepEqual(Object.keys(catalog.variables[0] ?? {}).sort(), ["description", "name", "schema"]);
   assert.doesNotMatch(JSON.stringify(catalog), /"output"|"extensionDescription"|"headline"|"version"|"script"|"run"|"resolve"|"source"|"main"|"ok"/);
@@ -347,6 +454,8 @@ void test("registers workflow_catalog only for active non-empty registries", asy
   const variableDetail = JSON.parse((await catalogTool.execute("id" as never, { name: "branch" } as never)).content[0]?.text ?? "null") as Record<string, unknown>;
   assert.deepEqual(Object.keys(variableDetail).sort(), ["description", "extensionDescription", "headline", "name", "schema", "version"]);
   assert.deepEqual(variableDetail.schema, { type: "string" });
+  const aliasDetail = JSON.parse((await catalogTool.execute("id" as never, { name: "project-only" } as never)).content[0]?.text ?? "null") as Record<string, unknown>;
+  assert.deepEqual(aliasDetail, { name: "project-only", kind: "static", provenance: "trusted project settings" });
   const missing = JSON.parse((await catalogTool.execute("id" as never, { name: "missing" } as never)).content[0]?.text ?? "null") as { error: { code: string; name: string; message: string } };
   assert.deepEqual(missing.error, { code: "NOT_FOUND", name: "missing", message: "No registered workflow function or variable is available: missing" });
   const theme = { fg: (color: string, text: string) => `[${color}]${text}[/${color}]`, bold: (text: string) => `<bold>${text}</bold>` };
@@ -366,9 +475,9 @@ void test("registers workflow_catalog only for active non-empty registries", asy
   assert.match(indexView, /hello.*Say hello/);
   assert.match(indexView, /Variables \(1\)/);
   assert.doesNotMatch(indexView, /"properties"/);
-  const aliasIndexView = renderCatalog({ ...catalog, modelAliases: { "developer-model": "openai/gpt" } }, false);
+  const aliasIndexView = renderCatalog({ ...catalog, modelAliasEntries: [{ name: "developer-model", kind: "static", provenance: "settings" }] }, false);
   assert.match(aliasIndexView, /Model aliases \(1\)/);
-  assert.match(aliasIndexView, /developer-model.*openai\/gpt/);
+  assert.match(aliasIndexView, /developer-model.*static · settings/);
   const compactDetail = renderCatalog(functionDetail, false, "hello");
   assert.match(compactDetail, /Function/);
   assert.match(compactDetail, /hello.*Say hello/);
@@ -774,6 +883,147 @@ void test("direct function launches enforce input and output schemas", async () 
   await assert.rejects(execute("id", { name: " ", workflow: "needsValue", args: { value: "ok" }, foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   await assert.rejects(execute("id", { name: "needs-value", workflow: "needsValue", args: { value: "ok" }, foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   await assert.rejects(execute("id", { workflow: "badResult", args: {}, foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESULT_INVALID");
+});
+void test("attributes dynamic alias availability failures to the exact extension", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-alias-provenance-"));
+  const agentDir = join(home, "agent");
+  mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
+    const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+    workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never, home, undefined, undefined, agentDir);
+    registerWorkflowExtension({ version: "1.0.0", headline: "Review extension", description: "Review policy", modelAliases: { review: { resolve: () => "openai/gpt" } } });
+    registerWorkflowExtension({ version: "1.0.0", headline: "Reviewer extension", description: "Reviewer policy", modelAliases: { reviewer: { resolve: () => "missing/model" } } });
+    const execute = tools.find(({ name }) => name === "workflow")?.execute;
+    assert.ok(execute);
+    const context = { cwd: join(home, "project"), model: { provider: "openai", id: "gpt" }, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }], getAvailable: () => [{ provider: "openai", id: "gpt" }] }, sessionManager: { getSessionId: () => "session" } };
+    await assert.rejects(execute("id", { name: "provenance", script: "return true;", foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "UNKNOWN_MODEL" && error.message.includes("Reviewer extension") && !error.message.includes("Review extension"));
+    loadingRegistry().freeze();
+});
+void test("production launch cancellation aborts a dynamic alias resolver", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-dynamic-launch-cancel-"));
+  const agentDir = join(home, "agent");
+  const cwd = join(home, "project");
+  mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+    workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never, home, undefined, undefined, agentDir);
+    registerWorkflowExtension({ version: "1.0.0", headline: "Cancellation policy", description: "Cancellation policy", modelAliases: { "cancel-model": { resolve: ({ signal }) => new Promise<string>((_resolve, reject) => { markStarted(); signal.addEventListener("abort", () => { reject(new WorkflowError("CANCELLED", "cancelled")); }, { once: true }); }) } } });
+    const execute = tools.find(({ name }) => name === "workflow")?.execute;
+    assert.ok(execute);
+    const controller = new AbortController();
+    const context = { cwd, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }], getAvailable: () => [{ provider: "openai", id: "gpt" }] }, sessionManager: { getSessionId: () => "session" } };
+    const pending = execute("id", { name: "cancel-launch", script: "return true;", foreground: true }, controller.signal, undefined, context);
+    await started;
+    controller.abort();
+    await assert.rejects(pending, (error: unknown) => error instanceof WorkflowError && error.code === "CANCELLED");
+    loadingRegistry().freeze();
+});
+void test("attributes colliding dynamic alias availability failures to the validating extension", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-alias-collision-provenance-"));
+  const agentDir = join(home, "agent");
+  mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never, home, undefined, undefined, agentDir);
+  registerWorkflowExtension({ version: "1.0.0", headline: "Target extension", description: "Target policy", modelAliases: { target: { resolve: () => "openai/gpt" } } });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Missing target extension", description: "Missing target policy", modelAliases: { x: { resolve: () => "missing/target" } } });
+  const execute = tools.find(({ name }) => name === "workflow")?.execute;
+  assert.ok(execute);
+  const context = { cwd: join(home, "project"), model: { provider: "openai", id: "gpt" }, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }], getAvailable: () => [{ provider: "openai", id: "gpt" }] }, sessionManager: { getSessionId: () => "session" } };
+  await assert.rejects(execute("id", { name: "collision-provenance", script: "return true;", foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "UNKNOWN_MODEL" && error.message.includes("Missing target extension") && !error.message.includes("Target extension"));
+  loadingRegistry().freeze();
+});
+void test("production launches dynamic aliases through role files with precedence and thinking overrides", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-dynamic-production-"));
+  const agentDir = join(home, "agent");
+  const cwd = join(home, "project");
+  mkdirSync(join(agentDir, "pi-extensible-workflows", "roles"), { recursive: true });
+  mkdirSync(cwd, { recursive: true });
+  writeFileSync(join(agentDir, "pi-extensible-workflows", "settings.json"), JSON.stringify({ modelAliases: { "policy-model": "openai/gpt:low" } }));
+  writeFileSync(join(agentDir, "pi-extensible-workflows", "roles", "reviewer.md"), "---\nmodel: policy-chain\nthinking: xhigh\n---\nReview the change.");
+  const inputs: SessionInput[] = [];
+  let shadowedCalls = 0;
+  let shutdown: (() => Promise<void>) | undefined;
+  try {
+    const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+    const createSession = async (input: SessionInput): Promise<NativeSession> => {
+      inputs.push(input);
+      return { sessionId: `dynamic-${String(inputs.length)}`, sessionFile: `/sessions/dynamic-${String(inputs.length)}`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
+    };
+    workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; } } as never, home, async () => {}, createSession, agentDir);
+    registerWorkflowExtension({ version: "1.0.0", headline: "Production policy", description: "Production dynamic aliases", modelAliases: { "policy-model": { resolve: () => { shadowedCalls += 1; return "anthropic/opus:high"; } }, "policy-chain": { resolve: () => "policy-model" }, "direct-model": { resolve: () => "anthropic/opus:high" } } });
+    const execute = tools.find(({ name }) => name === "workflow")?.execute;
+    assert.ok(execute);
+    const context = { cwd, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }, { provider: "anthropic", id: "opus" }], getAvailable: () => [{ provider: "openai", id: "gpt" }, { provider: "anthropic", id: "opus" }] }, sessionManager: { getSessionId: () => "session" } };
+    await execute("id", { name: "dynamic-production", script: "return { role: await agent(\"role\", { role: \"reviewer\" }), direct: await agent(\"direct\", { model: \"direct-model:low\", thinking: \"medium\" }) };", foreground: true }, new AbortController().signal, undefined, context);
+    assert.equal(shadowedCalls, 0);
+    assert.deepEqual(inputs.map(({ model }) => model), [{ provider: "openai", model: "gpt", thinking: "low" }, { provider: "anthropic", model: "opus", thinking: "medium" }]);
+    loadingRegistry().freeze();
+  } finally {
+    await shutdown?.();
+  }
+});
+void test("production resume reruns dynamic aliases, replays completed work, and records drift", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-dynamic-resume-"));
+  const agentDir = join(home, "agent");
+  const cwd = join(home, "project");
+  mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
+  const script = "const replayed = await agent(\"replayed\", { model: \"dynamic-model\" }); const fresh = await agent(\"fresh\", { model: \"dynamic-model\" }); return { replayed, fresh };";
+  let replayPath = "";
+  await runWorkflow(script, null, { agent: async (_prompt, _options, _signal, identity) => { replayPath = structuralPath("agent", ...identity.structuralPath, `callsite:${identity.callSite}`, `occurrence:${String(identity.occurrence)}`); return "historical"; } }).result;
+  const store = new RunStore(cwd, "session", "run", home);
+  await store.create({ id: "run", workflowName: "dynamic-resume", cwd, sessionId: "session", state: "interrupted", agents: [], nativeSessions: [] }, createLaunchSnapshot({ script, args: null, metadata: { name: "dynamic-resume" }, settings: { concurrency: 1, modelAliases: { "dynamic-model": "old/model" } }, modelAliases: { "dynamic-model": "old/model" }, models: ["root/model", "old/model"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+  await store.complete(replayPath, "historical");
+  const inputs: SessionInput[] = [];
+  let resolverCalls = 0;
+  let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+    const createSession = async (input: SessionInput): Promise<NativeSession> => {
+      inputs.push(input);
+      return { sessionId: `resume-${String(inputs.length)}`, sessionFile: `/sessions/resume-${String(inputs.length)}`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
+    };
+    workflowExtension({ registerTool() {}, registerCommand(_name: string, value: { handler: (args: string, ctx: unknown) => Promise<void> }) { command = value.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], ui: {} } as never, home, async () => {}, createSession, agentDir);
+    registerWorkflowExtension({ version: "1.0.0", headline: "Resume policy", description: "Resume dynamic aliases", modelAliases: { "dynamic-model": { resolve: () => { resolverCalls += 1; return "new/model"; } } } });
+    const context = { cwd, hasUI: false, model: { provider: "root", id: "model" }, modelRegistry: { getAll: () => [{ provider: "root", id: "model" }, { provider: "old", id: "model" }, { provider: "new", id: "model" }], getAvailable: () => [{ provider: "root", id: "model" }, { provider: "new", id: "model" }] }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
+    assert.ok(start && command);
+    await start({}, context);
+    await command("resume run", context);
+    for (let attempt = 0; attempt < 1000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+    const loaded = await store.load();
+    assert.equal(loaded.run.state, "completed");
+    assert.equal(resolverCalls, 1);
+    assert.deepEqual(inputs.map(({ model }) => ({ provider: model.provider, model: model.model })), [{ provider: "new", model: "model" }]);
+    assert.deepEqual(loaded.snapshot.modelAliases, { "dynamic-model": "new/model" });
+    assert.deepEqual(loaded.run.events, [{ type: "warning", message: "Model alias mappings changed on resume: dynamic-model: old/model -> new/model" }]);
+    loadingRegistry().freeze();
+});
+void test("production budget resume cancellation aborts a dynamic alias resolver", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-dynamic-resume-cancel-"));
+  const agentDir = join(home, "agent");
+  const cwd = join(home, "project");
+  mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
+  const store = new RunStore(cwd, "session", "run", home);
+  await store.create({ id: "run", workflowName: "cancel-resume", cwd, sessionId: "session", state: "budget_exhausted", agents: [], nativeSessions: [] }, createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "cancel-resume" }, settings: { concurrency: 1, modelAliases: { "cancel-model": "root/model" } }, modelAliases: { "cancel-model": "root/model" }, models: ["root/model"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let shutdown: (() => Promise<void>) | undefined;
+  try {
+    const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+    workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, undefined, undefined, agentDir);
+    registerWorkflowExtension({ version: "1.0.0", headline: "Resume cancellation policy", description: "Resume cancellation policy", modelAliases: { "cancel-model": { resolve: ({ signal }) => new Promise<string>((_resolve, reject) => { markStarted(); signal.addEventListener("abort", () => { reject(new WorkflowError("CANCELLED", "cancelled")); }, { once: true }); }) } } });
+    const resume = tools.find(({ name }) => name === "workflow_resume")?.execute;
+    assert.ok(resume);
+    const context = { cwd, model: { provider: "root", id: "model" }, modelRegistry: { getAll: () => [{ provider: "root", id: "model" }], getAvailable: () => [{ provider: "root", id: "model" }] }, sessionManager: { getSessionId: () => "session" } };
+    await start?.({}, context);
+    const controller = new AbortController();
+    const pending = resume("id", { runId: "run" }, controller.signal, undefined, context);
+    await started;
+    controller.abort();
+    await assert.rejects(pending, (error: unknown) => error instanceof WorkflowError && error.code === "CANCELLED");
+    loadingRegistry().freeze();
+  } finally {
+    await shutdown?.();
+  }
 });
 void test("inline workflow args cross the production tool boundary and omitted args become null", async () => {
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> }> = [];
@@ -3774,7 +4024,39 @@ void test("budget validation covers zero, all dimensions, and invalid patches", 
   assert.throws(() => validateBudgetPatch({ tokens: { soft: 2, hard: 2 } }), /less than hard/);
   assert.throws(() => validateBudgetPatch({ tokens: { hard: "later" } }), /integer/);
 });
-
+void test("navigator budget resume and approval use the live trust context", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-navigator-budget-aliases-"));
+  const cwd = join(home, "project");
+  const agentDir = join(home, "agent");
+  mkdirSync(join(cwd, ".pi", "pi-extensible-workflows"), { recursive: true });
+  mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
+  writeFileSync(join(cwd, ".pi", "pi-extensible-workflows", "settings.json"), JSON.stringify({ modelAliases: { "reviewer-model": "project/model" } }));
+  const runId = "navigator-budget-run";
+  const budget = { tokens: { hard: 4 } };
+  const usage = { tokens: 4, costUsd: 0, durationMs: 0, agentLaunches: 1 };
+  const store = new RunStore(cwd, "session", runId, home);
+  await store.create({ id: runId, workflowName: "navigator-budget", cwd, sessionId: "session", state: "budget_exhausted", agents: [], nativeSessions: [], budget, budgetVersion: 1, usage }, createLaunchSnapshot({ script: "return await agent('work', { model: 'reviewer-model' });", args: null, metadata: { name: "navigator-budget" }, settings: { concurrency: 1, modelAliases: { "reviewer-model": "old/model" } }, modelAliases: { "reviewer-model": "old/model" }, models: ["openai/gpt", "old/model"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+  let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let resolverCalls = 0;
+  const createSession = async (): Promise<NativeSession> => ({ sessionId: "navigator-budget-session", sessionFile: "/sessions/navigator-budget.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} });
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) { command = options.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], ui: {} } as never, home, undefined, createSession, agentDir);
+  registerWorkflowExtension({ version: "1.0.0", headline: "Navigator policy", description: "Navigator alias policy", modelAliases: { "reviewer-model": { resolve(context) { resolverCalls += 1; assert.equal(context.projectTrusted, false); assert.ok(context.availableModels.has("new/model")); return "new/model"; } } } });
+  const context = { cwd, hasUI: false, isProjectTrusted: () => false, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }, { provider: "new", id: "model" }], getAvailable: () => [{ provider: "openai", id: "gpt" }, { provider: "new", id: "model" }] }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
+  assert.ok(start && command);
+  await start({}, context);
+  await command(`resume ${runId} {"tokens":{"hard":10}}`, context);
+  const proposal = (await store.pendingWorkflowDecisions())[0];
+  assert.ok(proposal);
+  await command(`budget-approve ${runId} ${proposal.proposalId}`, context);
+  for (let attempt = 0; attempt < 1000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  const loaded = await store.load();
+  assert.equal(loaded.run.state, "completed", JSON.stringify(loaded.run.error));
+  assert.equal(resolverCalls, 1);
+  assert.deepEqual(loaded.snapshot.modelAliases, { "reviewer-model": "new/model" });
+  loadingRegistry().freeze();
+});
 void test("budget runtime aggregates nested attempts, retries, cache exclusion, and versioned soft events", () => {
   let now = 0;
   const limits = { tokens: { soft: 3, hard: 100 }, costUsd: { soft: 0.5, hard: 100 }, durationMs: { soft: 4, hard: 100 }, agentLaunches: { soft: 1, hard: 10 } };
@@ -3891,11 +4173,15 @@ void test("workflow_resume persists exact proposals and approval or rejection co
   const exhausted = { type: "hard_exhausted" as const, budgetVersion: 1, dimensions: ["tokens"] as const, usage, limits: budget, at: 0 };
   const store = new RunStore(cwd, "session", runId, home);
   await store.create({ id: runId, workflowName: "resume-budget", cwd, sessionId: "session", state: "budget_exhausted", agents: [], nativeSessions: [], budget, budgetVersion: 1, usage, budgetEvents: [exhausted] }, createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "resume-budget" }, settings: { concurrency: 1 }, budget, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+  const agentDir = join(home, "agent");
+  mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   const events: Array<{ channel: string; data: unknown }> = [];
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "workflow_respond"], events: { emit(channel: string, data: unknown) { events.push({ channel, data }); } } } as never, home);
-  const context = { cwd, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "workflow_respond"], events: { emit(channel: string, data: unknown) { events.push({ channel, data }); } } } as never, home, undefined, undefined, agentDir);
+  let resolverCalls = 0;
+  registerWorkflowExtension({ version: "1.0.0", headline: "Budget model policy", description: "Budget model policy", modelAliases: { "reviewer-model": { resolve(context) { resolverCalls += 1; assert.equal(context.projectTrusted, false); assert.ok(context.availableModels.has("new/model")); return "new/model"; } } } });
+  const context = { cwd, model: { provider: "openai", id: "gpt" }, isProjectTrusted: () => false, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }, { provider: "new", id: "model" }], getAvailable: () => [{ provider: "openai", id: "gpt" }, { provider: "new", id: "model" }] }, sessionManager: { getSessionId: () => "session" } };
   assert.ok(start);
   await start({}, context);
   const resume = tools.find(({ name }) => name === "workflow_resume");
@@ -3917,17 +4203,20 @@ void test("workflow_resume persists exact proposals and approval or rejection co
   const secondProposal = (await store.pendingWorkflowDecisions())[0];
   assert.ok(secondProposal);
   assert.deepEqual(approvedResume.details, { state: "awaiting_approval", proposalId: secondProposal.proposalId });
-  const approved = await respond.execute("id", { runId, proposalId: secondProposal.proposalId, approved: true });
+  const approved = await respond.execute("id", { runId, proposalId: secondProposal.proposalId, approved: true }, new AbortController().signal, undefined, context);
   assert.deepEqual((approved as { details: unknown }).details, { state: "running", approved: true, reason: "approved" });
   for (let attempt = 0; attempt < 1000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
   const loaded = await store.load();
   assert.equal(loaded.run.state, "completed");
   assert.equal(loaded.run.budgetVersion, 2);
   assert.deepEqual(loaded.run.budget, { tokens: { soft: 2, hard: 10 } });
+  assert.deepEqual(loaded.snapshot.modelAliases, { "reviewer-model": "new/model" });
+  assert.equal(resolverCalls, 1);
   assert.equal(events.filter(({ channel }) => channel === WORKFLOW_RUN_STARTED_EVENT).length, 0);
   assert.equal(events.filter(({ channel }) => channel === WORKFLOW_RUN_RESUMED_EVENT).length, 1);
   assert.deepEqual(events.filter(({ channel }) => channel === WORKFLOW_BUDGET_EVENT).map(({ data }) => (data as { type: string }).type), ["adjustment_requested", "adjustment_rejected", "adjustment_requested", "adjustment_approved", "soft_crossed"]);
   assert.ok(events.some(({ channel, data }) => channel === WORKFLOW_RUN_STATE_CHANGED_EVENT && (data as { state: string }).state === "running"));
+  loadingRegistry().freeze();
 });
 
 void test("resolves trusted project settings with replacement and inheritance semantics", () => {

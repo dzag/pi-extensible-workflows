@@ -53,7 +53,20 @@ export function parseModelReference(value: string): ModelSpec {
   if (thinking && !THINKING_LEVELS.includes(thinking as (typeof THINKING_LEVELS)[number])) fail("UNKNOWN_MODEL", `Invalid thinking level: ${thinking}`);
   return { provider: match[1], model: match[2], ...(thinking ? { thinking: thinking as NonNullable<ModelSpec["thinking"]> } : {}) };
 }
-function aliasError(message: string, settingsPath: string): never { fail("CONFIG_ERROR", `${message} (settings: ${settingsPath})`); }
+const MODEL_ALIAS_ERROR_NAME = Symbol("modelAliasErrorName");
+type ModelAliasError = WorkflowError & { [MODEL_ALIAS_ERROR_NAME]?: string };
+function aliasError(message: string, settingsPath: string, name?: string): never {
+  const error = new WorkflowError("CONFIG_ERROR", `${message} (settings: ${settingsPath})`);
+  if (name) Object.defineProperty(error, MODEL_ALIAS_ERROR_NAME, { value: name, configurable: true });
+  throw error;
+}
+export function annotateModelAliasError(error: unknown, name: string): unknown {
+  if (error instanceof WorkflowError) Object.defineProperty(error, MODEL_ALIAS_ERROR_NAME, { value: name, configurable: true });
+  return error;
+}
+export function modelAliasErrorName(error: unknown): string | undefined {
+  return error instanceof WorkflowError ? (error as ModelAliasError)[MODEL_ALIAS_ERROR_NAME] : undefined;
+}
 export function modelAliasName(value: string, aliases: Readonly<Record<string, string>>): string | undefined {
   const name = /^([^/:\s]+)(?::[^:\s]+)?$/.exec(value)?.[1];
   return name && Object.prototype.hasOwnProperty.call(aliases, name) ? name : undefined;
@@ -62,12 +75,12 @@ export function validateModelAliases(value: unknown, settingsPath = "workflow se
   if (!object(value)) aliasError("modelAliases must be an object", settingsPath);
   const aliases: Record<string, string> = {};
   for (const [name, target] of Object.entries(value)) {
-    if (!MODEL_ALIAS_NAME.test(name)) aliasError(`Invalid model alias name: ${name}`, settingsPath);
-    if (typeof target !== "string" || !target.trim()) aliasError(`Invalid model alias target for ${name}`, settingsPath);
+    if (!MODEL_ALIAS_NAME.test(name)) aliasError(`Invalid model alias name: ${name}`, settingsPath, name);
+    if (typeof target !== "string" || !target.trim()) aliasError(`Invalid model alias target for ${name}`, settingsPath, name);
     aliases[name] = target;
   }
   for (const name of Object.keys(aliases)) {
-    try { resolveModelReference(name, aliases); } catch (error) { aliasError(`Invalid model alias target for ${name}: ${errorText(error)}`, settingsPath); }
+    try { resolveModelReference(name, aliases); } catch (error) { aliasError(`Invalid model alias target for ${name}: ${errorText(error)}`, settingsPath, name); }
   }
   return Object.freeze(aliases);
 }

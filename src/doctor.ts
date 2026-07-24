@@ -16,6 +16,7 @@ import {
   resolveAgentResourcePolicy,
   resolveWorkflowSettings,
   resolveModelReference,
+  parseThinking,
   parseRoleMarkdown,
   registeredWorkflowFunctions,
   registeredWorkflowRoleDirectoryRegistrations,
@@ -24,6 +25,7 @@ import {
   workflowSettingsPath,
   type AgentResourceExclusions,
   type AgentResourcePolicy,
+  type WorkflowCatalogModelAlias,
   type WorkflowExtensionMetadata,
   type WorkflowFunction,
   type WorkflowRoleDirectoryRegistration,
@@ -31,6 +33,7 @@ import {
   type WorkflowSettingsSources,
 } from "./index.js";
 import type { AgentDefinition } from "./agent-execution.js";
+import { loadingRegistry, type WorkflowRegistryApi } from "./registry.js";
 import { disabledResources, unmatchedResourcePatterns } from "./utils.js";
 
 export type DoctorSeverity = "error" | "warning";
@@ -59,6 +62,7 @@ export interface DoctorReport {
   roles: readonly DoctorRole[];
   functions: readonly DoctorFunction[];
   resourcePolicy: AgentResourcePolicy;
+  modelAliases: readonly WorkflowCatalogModelAlias[];
   diagnostics: readonly DoctorDiagnostic[];
 }
 export interface DoctorOptions {
@@ -67,6 +71,7 @@ export interface DoctorOptions {
   settingsPath?: string;
   discoverPi?: (cwd: string, agentDir: string) => Promise<DoctorPiState>;
   activeTools?: readonly string[];
+  registry?: WorkflowRegistryApi;
 }
 
 const THINKING_HINT = "Use off, minimal, low, medium, high, xhigh, or max.";
@@ -75,7 +80,11 @@ function canonical(path: string): string {
   const absolute = resolve(path);
   try { return realpathSync(absolute); } catch { return absolute; }
 }
-
+function isDynamicModelAlias(value: string, aliases: ReadonlySet<string>): boolean {
+  const match = /^([^/\s:]+)(?::([^\s]+))?$/.exec(value);
+  const name = match?.[1];
+  return Boolean(name && (match[2] === undefined || parseThinking(match[2]) !== undefined) && aliases.has(name));
+}
 async function readCredentials(agentDir: string): Promise<InMemoryCredentialStore> {
   const credentials = new InMemoryCredentialStore();
   try {
@@ -186,7 +195,8 @@ function emptyResourcePolicy(globalSettingsPath: string, cwd: string, projectTru
   const empty: AgentResourceExclusions = { skills: [], extensions: [] };
   return { globalSettingsPath, projectSettingsPath: workflowProjectSettingsPath(cwd), projectTrusted, global: empty, project: empty, effective: empty, unmatchedSkills: [], unmatchedExtensions: [] };
 }
-function validateModel(value: string, known: ReadonlySet<string>, available: ReadonlySet<string>, source: string, diagnostics: DoctorDiagnostic[], aliases: Readonly<Record<string, string>>, settingsPath: string): void {
+function validateModel(value: string, known: ReadonlySet<string>, available: ReadonlySet<string>, source: string, diagnostics: DoctorDiagnostic[], aliases: Readonly<Record<string, string>>, dynamicAliases: ReadonlySet<string>, settingsPath: string): void {
+  if (isDynamicModelAlias(value, dynamicAliases)) return;
   try {
     const parsed = resolveModelReference(value, aliases, known, settingsPath);
     const name = `${parsed.provider}/${parsed.model}`;
@@ -196,7 +206,7 @@ function validateModel(value: string, known: ReadonlySet<string>, available: Rea
   }
 }
 
-function inspectRole(path: string, activeTools: ReadonlySet<string>, knownModels: ReadonlySet<string>, availableModels: ReadonlySet<string>, diagnostics: DoctorDiagnostic[], aliases: Readonly<Record<string, string>>, settingsPath: string, source?: { directory: string; extension: WorkflowExtensionMetadata }): AgentDefinition | undefined {
+function inspectRole(path: string, activeTools: ReadonlySet<string>, knownModels: ReadonlySet<string>, availableModels: ReadonlySet<string>, diagnostics: DoctorDiagnostic[], aliases: Readonly<Record<string, string>>, dynamicAliases: ReadonlySet<string>, settingsPath: string, source?: { directory: string; extension: WorkflowExtensionMetadata }): AgentDefinition | undefined {
   let definition: AgentDefinition;
   try { definition = parseRoleMarkdown(readFileSync(path, "utf8"), true, path); }
   catch (error) {
@@ -208,7 +218,7 @@ function inspectRole(path: string, activeTools: ReadonlySet<string>, knownModels
   if (body.trim() === "") diagnostics.push(diagnostic("warning", "ROLE_BODY_EMPTY", "Role body is empty", path));
   if (Buffer.byteLength(body) > 50 * 1024) diagnostics.push(diagnostic("warning", "ROLE_BODY_LARGE", "Role body exceeds 50KB", path));
   if (/{{\s*[^{}]+\s*}}/.test(body)) diagnostics.push(diagnostic("warning", "ROLE_PLACEHOLDER", "Role body contains an unsupported placeholder-looking token", path));
-  if (definition.model) validateModel(definition.model, knownModels, availableModels, path, diagnostics, aliases, settingsPath);
+  if (definition.model) validateModel(definition.model, knownModels, availableModels, path, diagnostics, aliases, dynamicAliases, settingsPath);
   for (const tool of definition.tools ?? []) if (!activeTools.has(tool)) diagnostics.push(diagnostic("error", "ROLE_TOOL_INACTIVE", `Tool is unknown or inactive: ${tool}`, path, "Use a tool listed under Active tools or enable its Pi extension."));
   return definition;
 }
@@ -264,6 +274,13 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
   const knownModels = new Set(pi.knownModels);
   const availableModels = new Set(pi.availableModels);
   const aliases = settings.modelAliases ?? {};
+  const registry = options.registry ?? loadingRegistry();
+  const registeredModelAliases = registry.modelAliases();
+  const dynamicAliases = new Set(registeredModelAliases.map(({ name }) => name).filter((name) => !Object.prototype.hasOwnProperty.call(aliases, name)));
+  const modelAliases: WorkflowCatalogModelAlias[] = [
+    ...Object.keys(aliases).map((name) => ({ name, kind: "static" as const, provenance: settingsSources.modelAliases })),
+    ...registeredModelAliases.map(({ name, version, headline, extensionDescription }) => ({ name, kind: "dynamic" as const, provenance: `extension: ${headline}`, version, headline, extensionDescription })),
+  ].sort((left, right) => left.name.localeCompare(right.name) || left.kind.localeCompare(right.kind));
   const roles: DoctorRole[] = [];
   const definitions = new Map<string, AgentDefinition>();
   const extensionScan = scanExtensionRoleFiles(registeredWorkflowRoleDirectoryRegistrations());
@@ -282,7 +299,7 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
   const extensionPaths = new Map<string, string>();
   for (const file of extensionScan.files) {
     roles.push({ name: file.name, path: file.path, scope: "extension", active: true, extension: file.extension });
-    const definition = inspectRole(file.path, activeTools, knownModels, availableModels, diagnostics, aliases, settingsPath, { directory: file.directory, extension: file.extension });
+    const definition = inspectRole(file.path, activeTools, knownModels, availableModels, diagnostics, aliases, dynamicAliases, settingsPath, { directory: file.directory, extension: file.extension });
     if (duplicateExtensionNames.has(file.name)) continue;
     extensionPaths.set(file.name, file.path);
     if (definition) definitions.set(file.name, definition);
@@ -298,7 +315,7 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
       const extension = roles.find((role) => role.path === extensionPath);
       if (extension) { extension.active = false; extension.overriddenBy = path; }
     }
-    const definition = inspectRole(path, activeTools, knownModels, availableModels, diagnostics, aliases, settingsPath);
+    const definition = inspectRole(path, activeTools, knownModels, availableModels, diagnostics, aliases, dynamicAliases, settingsPath);
     if (definition) definitions.set(name, definition); else definitions.delete(name);
   }
   for (const path of roleFilesFrom([join(cwd, ".pi", "pi-extensible-workflows", "roles")])) {
@@ -316,7 +333,7 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
       const extension = roles.find((role) => role.path === extensionPath);
       if (extension) { extension.active = false; extension.overriddenBy = path; }
     }
-    const definition = inspectRole(path, activeTools, knownModels, availableModels, diagnostics, aliases, settingsPath);
+    const definition = inspectRole(path, activeTools, knownModels, availableModels, diagnostics, aliases, dynamicAliases, settingsPath);
     if (definition) definitions.set(name, definition); else definitions.delete(name);
   }
 
@@ -328,7 +345,7 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
   const severityOrder: Record<DoctorSeverity, number> = { error: 0, warning: 1 };
   diagnostics.sort((left, right) => severityOrder[left.severity] - severityOrder[right.severity] || (left.source ?? "").localeCompare(right.source ?? "") || left.code.localeCompare(right.code) || left.message.localeCompare(right.message));
   roles.sort((left, right) => left.name.localeCompare(right.name) || left.scope.localeCompare(right.scope));
-  return { cwd, agentDir, settingsPath, settings, settingsSources, trust: pi.trust, activeTools: [...activeTools].sort(), roles, functions, resourcePolicy, diagnostics };
+  return { cwd, agentDir, settingsPath, settings, settingsSources, trust: pi.trust, activeTools: [...activeTools].sort(), roles, functions, modelAliases, resourcePolicy, diagnostics };
 }
 
 function count(report: DoctorReport, severity: DoctorSeverity): number { return report.diagnostics.filter((item) => item.severity === severity).length; }
@@ -369,6 +386,9 @@ export function formatDoctorReport(report: DoctorReport): string {
     "",
     "## Roles",
     ...(report.roles.length ? report.roles.map((role) => `- \`${role.name}\` (${role.scope}, ${role.active ? "active" : role.overriddenBy ? `overridden by ${role.overriddenBy}` : "inactive: project untrusted"}) - \`${role.path}\`${role.extension ? `; ${extensionLabel(role.extension)} role directory "${dirname(role.path)}"` : ""}${role.overrides ? `; overrides \`${role.overrides}\`` : ""}`) : ["- None found"]),
+    "",
+    "## Model aliases",
+    ...(report.modelAliases.length ? report.modelAliases.map((alias) => `- [${alias.kind}] \`${alias.name}\`${alias.kind === "static" ? ` -> ${report.settings.modelAliases?.[alias.name] ?? "(unresolved)"}` : ""} (${alias.provenance})`) : ["- None registered"]),
     "",
     "## Reusable functions",
     ...(report.functions.length ? report.functions.map((fn) => `- [${fn.valid ? "ok" : "error"}] \`${fn.name}\` - ${fn.description}`) : ["- None registered"]),

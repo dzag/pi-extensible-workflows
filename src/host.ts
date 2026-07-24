@@ -11,11 +11,11 @@ import { herdrPaneId, openHerdrPane } from "./herdr.js";
 import { acquireSessionLease, listRunIds, RunStore, SessionLease, structuralPath as operationPath } from "./persistence.js";
 import type { AwaitingCheckpoint, PersistedRun, WorktreeReference } from "./persistence.js";
 import { budgetRelaxed, budgetUsage, mergeBudget, resumeBudgetAllowed, validateBudget, validateBudgetPatch, WorkflowBudgetRuntime } from "./budget.js";
-import { asWorkflowError, aliasDrift, createLaunchSnapshot, deepFreeze, errorCode, errorText, fail, isWorkflowAuthored, jsonValue, modelCapability, object, parseModelReference, parseThinking, positiveInteger, resolveModelReference, validateModelAliases } from "./utils.js";
-import { launchScriptForSnapshot, loadAgentDefinitions, preflight, resolveAgentResourcePolicy, resolveWorkflowSettings, saveModelAliases, validateAgentOptions, validateCheckpoint, validateShellOptions, validateWorkflowLaunchWithRegistry, workflowProjectSettingsPath, workflowPrompt, workflowSettingsPath } from "./validation.js";
+import { asWorkflowError, aliasDrift, createLaunchSnapshot, deepFreeze, errorCode, errorText, fail, isWorkflowAuthored, jsonValue, modelAliasErrorName, modelCapability, object, parseModelReference, parseThinking, positiveInteger, resolveModelReference, validateModelAliases } from "./utils.js";
+import { launchScriptForSnapshot, loadAgentDefinitions, preflight, resolveAgentResourcePolicy, resolveWorkflowSettings, saveModelAliases, validateAgentOptions, validateCheckpoint, validateModelAliasAvailability, validateShellOptions, validateWorkflowLaunchWithRegistry, workflowProjectSettingsPath, workflowPrompt, workflowSettingsPath } from "./validation.js";
 import { beginWorkflowExtensionLoading, loadingRegistry, resetWorkflowRegistry, type WorkflowRegistryApi } from "./registry.js";
 import { agentIdentityPath, agentWorktree, encoded, executeShellCommand, persistActiveAgentAttempt, persistAgentAttempts, readShellResult, runWorkflow, shellIdentityPath } from "./execution.js";
-import { ERROR_CODES, LAUNCH_SNAPSHOT_IDENTITY_VERSION, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentAttemptSummary, type AgentOptions, type AgentRecord, type AgentResourcePolicy, type BudgetApprovalRequest, type BudgetEvent, type JsonValue, type LaunchSnapshot, type ModelSpec, type RunState, type ShellIdentity, type ShellOptions, type ShellResult, type WorkflowBridge, type WorkflowCatalogFunction, type WorkflowCatalogIndex, type WorkflowCatalogVariable, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowFailureAgent, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowExecution, type WorkflowMetadata, type WorkflowRetryProvenance, type WorkflowRunContext, type WorkflowSettings, type WorkflowSettingsResolution, type WorkflowSiblingAgent, type WorkflowWorktreeReference } from "./types.js";
+import { ERROR_CODES, LAUNCH_SNAPSHOT_IDENTITY_VERSION, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentAttemptSummary, type AgentOptions, type AgentRecord, type AgentResourcePolicy, type BudgetApprovalRequest, type BudgetEvent, type JsonValue, type LaunchSnapshot, type ModelSpec, type RunState, type ShellIdentity, type ShellOptions, type ShellResult, type WorkflowBridge, type WorkflowCatalogFunction, type WorkflowCatalogIndex, type WorkflowCatalogVariable, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowFailureAgent, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowExecution, type WorkflowMetadata, type WorkflowModelAliasResolverContext, type WorkflowRetryProvenance, type WorkflowRunContext, type WorkflowSettings, type WorkflowSettingsResolution, type WorkflowSiblingAgent, type WorkflowWorktreeReference } from "./types.js";
 const SETTLED_AGENT_STATES: ReadonlySet<import("./types.js").AgentState> = new Set(["completed", "failed", "cancelled"]);
 export interface WorkflowProgressStyles {
   accent(text: string): string;
@@ -316,9 +316,9 @@ function catalogIndexEntries(entries: readonly { name: string; description: stri
 }
 
 function formatCatalogIndex(catalog: WorkflowCatalogIndex, theme: Theme): string {
-  const aliases = Object.entries(catalog.modelAliases ?? {}).sort(([left], [right]) => left.localeCompare(right));
-  const aliasWidth = Math.max(0, ...aliases.map(([name]) => name.length));
-  const aliasLines = aliases.map(([name, model]) => `  ${theme.fg("accent", name.padEnd(aliasWidth))}  ${theme.fg("toolOutput", model)}`);
+  const aliases = Object.prototype.propertyIsEnumerable.call(catalog, "modelAliases") ? Object.keys(catalog.modelAliases ?? {}).sort().map((name) => ({ name, kind: "static" as const, provenance: "settings" })) : catalog.modelAliasEntries ?? Object.keys(catalog.modelAliases ?? {}).sort().map((name) => ({ name, kind: "static" as const, provenance: "settings" }));
+  const aliasWidth = Math.max(0, ...aliases.map(({ name }) => name.length));
+  const aliasLines = aliases.map(({ name, kind, provenance }) => `  ${theme.fg("accent", name.padEnd(aliasWidth))}  ${theme.fg("toolOutput", `${kind} · ${provenance}`)}`);
   return [
     catalogSectionTitle("Functions", catalog.functions.length, theme),
     ...catalogIndexEntries(catalog.functions, theme),
@@ -336,31 +336,20 @@ function catalogSchemaLines(schema: unknown, theme: Theme): string[] {
   return json.split("\n").map((line) => `  ${theme.fg("toolOutput", line)}`);
 }
 
-function formatCatalogDetail(value: WorkflowCatalogFunction | WorkflowCatalogVariable, expanded: boolean, theme: Theme): string {
+function formatCatalogDetail(value: WorkflowCatalogFunction | WorkflowCatalogVariable | import("./types.js").WorkflowCatalogModelAlias, expanded: boolean, theme: Theme): string {
+  if ("kind" in value) return [theme.fg("accent", theme.bold("Model alias")), `  ${theme.fg("accent", value.name)}  ${theme.fg("toolOutput", `${value.kind} · ${value.provenance}`)}`].join("\n");
   const kind = "input" in value ? "Function" : "Variable";
   if (!expanded) return [theme.fg("accent", theme.bold(kind)), `  ${theme.fg("accent", value.name)}  ${theme.fg("toolOutput", catalogText(value.description))}`, `  ${theme.fg("muted", "version")}: ${theme.fg("toolOutput", value.version)}  ${theme.fg("muted", "headline")}: ${theme.fg("toolOutput", catalogText(value.headline))}`].join("\n");
-  const lines = [
-    theme.fg("accent", theme.bold(`${kind}: ${value.name}`)),
-    `${theme.fg("muted", "description")}: ${theme.fg("toolOutput", value.description)}`,
-    "",
-    theme.fg("accent", theme.bold("Extension")),
-    `  ${theme.fg("muted", "version")}: ${theme.fg("toolOutput", value.version)}`,
-    `  ${theme.fg("muted", "headline")}: ${theme.fg("toolOutput", value.headline)}`,
-    `  ${theme.fg("muted", "description")}: ${theme.fg("toolOutput", value.extensionDescription)}`,
-    "",
-    theme.fg("accent", theme.bold("Schema")),
-  ];
-  if ("input" in value) {
-    lines.push(theme.fg("muted", "Input schema"), ...catalogSchemaLines(value.input, theme), "", theme.fg("muted", "Output schema"), ...catalogSchemaLines(value.output, theme));
-  } else {
-    lines.push(theme.fg("muted", "Variable schema"), ...catalogSchemaLines(value.schema, theme));
-  }
+  const lines = [theme.fg("accent", theme.bold(`${kind}: ${value.name}`)), `${theme.fg("muted", "description")}: ${theme.fg("toolOutput", value.description)}`, "", theme.fg("accent", theme.bold("Extension")), `  ${theme.fg("muted", "version")}: ${theme.fg("toolOutput", value.version)}`, `  ${theme.fg("muted", "headline")}: ${theme.fg("toolOutput", value.headline)}`, `  ${theme.fg("muted", "description")}: ${theme.fg("toolOutput", value.extensionDescription)}`, "", theme.fg("accent", theme.bold("Schema"))];
+  if ("input" in value) lines.push(theme.fg("muted", "Input schema"), ...catalogSchemaLines(value.input, theme), "", theme.fg("muted", "Output schema"), ...catalogSchemaLines(value.output, theme));
+  else lines.push(theme.fg("muted", "Variable schema"), ...catalogSchemaLines(value.schema, theme));
   return lines.join("\n");
 }
 
 function formatWorkflowCatalog(value: unknown, expanded: boolean, theme: Theme): string {
   if (isCatalogIndex(value)) return formatCatalogIndex(value, theme);
   if (isCatalogFunction(value) || isCatalogVariable(value)) return formatCatalogDetail(value, expanded, theme);
+  if (object(value) && typeof value.name === "string" && (value.kind === "static" || value.kind === "dynamic")) return formatCatalogDetail(value as unknown as import("./types.js").WorkflowCatalogModelAlias, expanded, theme);
   if (isCatalogError(value)) return theme.fg("error", value.error.message);
   return theme.fg("error", "The workflow catalog returned an invalid result.");
 }
@@ -986,6 +975,33 @@ function contextHostCapabilities(ctx: unknown): ContextHostCapabilities {
   const getAvailable = registry.getAvailable;
   return { modelRegistry: { ...(isModelRegistryGetter(getAll) ? { getAll: () => getAll.call(registry) } : {}), ...(isModelRegistryGetter(getAvailable) ? { getAvailable: () => getAvailable.call(registry) } : {}) } };
 }
+function modelInventory(root: ModelSpec | undefined, registry: ModelRegistryCapability | undefined): { knownModels: ReadonlySet<string>; availableModels: ReadonlySet<string> } {
+  const all = registry?.getAll?.() ?? registry?.getAvailable?.() ?? [];
+  const available = registry?.getAvailable?.() ?? registry?.getAll?.() ?? [];
+  const knownModels = new Set(all.map((model) => `${model.provider}/${model.id}`));
+  const availableModels = new Set(available.map((model) => `${model.provider}/${model.id}`));
+  const rootName = root?.provider && root.model ? `${root.provider}/${root.model}` : undefined;
+  if (rootName) { knownModels.add(rootName); availableModels.add(rootName); }
+  return { knownModels, availableModels };
+}
+function resumeHostContext(ctx: unknown): { model: { provider: string; id: string } | undefined; modelRegistry: ModelRegistryCapability | undefined } {
+  const model = object(ctx) && object(ctx.model) && typeof ctx.model.provider === "string" && typeof ctx.model.id === "string" ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
+  return { model, modelRegistry: contextHostCapabilities(ctx).modelRegistry };
+}
+async function resolveLaunchAliases(registry: WorkflowRegistryApi, staticAliases: Readonly<Record<string, string>>, context: Readonly<WorkflowModelAliasResolverContext>, availableModels: ReadonlySet<string>, knownModels: ReadonlySet<string>, settingsPath: string): Promise<{ aliases: Readonly<Record<string, string>>; dynamicNames: readonly string[] }> {
+  const dynamic = typeof registry.resolveModelAliases === "function" ? await registry.resolveModelAliases(context, new Set(Object.keys(staticAliases))) : {};
+  const dynamicNames = Object.keys(dynamic);
+  try {
+    const aliases = validateModelAliases({ ...dynamic, ...staticAliases }, settingsPath);
+    validateModelAliasAvailability(aliases, dynamicNames, availableModels, knownModels, settingsPath);
+    return { aliases, dynamicNames };
+  } catch (error) {
+    const name = modelAliasErrorName(error);
+    const descriptor = name && typeof registry.modelAliases === "function" ? registry.modelAliases().find((candidate) => candidate.name === name) : undefined;
+    if (descriptor && errorCode(error) !== "CANCELLED") throw new WorkflowError(errorCode(error) ?? "CONFIG_ERROR", `${errorText(error)} (extension: ${descriptor.headline})`);
+    throw error;
+  }
+}
 type UiSelect = (title: string, options: string[]) => Promise<string | undefined>;
 type UiInput = (title: string, placeholder?: string) => Promise<string | undefined>;
 type UiSetStatus = (key: string, text?: string) => void;
@@ -1291,13 +1307,13 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     run.budget.recordEvent({ type, budgetVersion: request.budgetVersion, dimensions: [], usage: structuredClone(request.consumed), limits: structuredClone(request.proposed), at: Date.now(), proposalId: request.proposalId, previous: structuredClone(request.previous), proposed: structuredClone(request.proposed) });
     await persistRunState(run.store, run.metadata, (current) => ({ ...current, ...run.budget.snapshot() }));
   };
-  const answerBudgetDecision = async (runId: string, proposalId: string, approved: boolean, silent = false): Promise<BudgetDecisionResult | undefined> => {
+  const answerBudgetDecision = async (runId: string, proposalId: string, approved: boolean, silent = false, context?: unknown, signal?: AbortSignal): Promise<BudgetDecisionResult | undefined> => {
     const run = runs.get(runId);
     if (!run) return undefined;
     const request = await run.store.answerWorkflowDecision(proposalId, approved);
     if (!request) return undefined;
     await appendBudgetDecisionEvent(run, request, approved ? "adjustment_approved" : "adjustment_rejected");
-    const result = await applyBudgetDecision(request, approved);
+    const result = await applyBudgetDecision(request, approved, context, signal);
     if (!silent) deliver(pi, `Workflow ${run.metadata.name} budget adjustment ${proposalId}: ${approved ? "Approved" : "Rejected"}.`);
     return result;
   };
@@ -1347,16 +1363,16 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     label: "Workflow Respond",
     description: "Approve or reject one pending workflow checkpoint or budget decision",
     parameters: Type.Object({ runId: Type.String(), name: Type.Optional(Type.String()), proposalId: Type.Optional(Type.String()), approved: Type.Boolean() }, { additionalProperties: false }),
-    async execute(_id, params) {
+    async execute(_id, params, signal, _onUpdate, ctx) {
       try {
         if (params.proposalId) {
-          const result = await answerBudgetDecision(params.runId, params.proposalId, params.approved);
+          const result = await answerBudgetDecision(params.runId, params.proposalId, params.approved, false, ctx, signal);
           if (!result) { const denied = { state: "budget_exhausted" as const, approved: false, reason: "proposal_not_pending" }; return { content: [{ type: "text" as const, text: JSON.stringify(denied) }], details: denied }; }
           return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: { ...result, reason: params.approved ? "approved" : "rejected" } };
         }
         if (!params.name) throw new WorkflowError("INVALID_METADATA", "workflow_respond requires name or proposalId");
         const accepted = await answerCheckpoint(params.runId, params.name, params.approved);
-        return { content: [{ type: "text" as const, text: accepted ? "Checkpoint response accepted." : "Checkpoint is not awaiting a response." }], details: { accepted, state: accepted ? "checkpoint_answered" : "not_pending", approved: params.approved, reason: "checkpoint" } as never };
+        return { content: [{ type: "text" as const, text: accepted ? "Checkpoint response accepted." : "Checkpoint is not awaiting a response." }], details: { accepted, state: accepted ? "checkpoint_answered" : "not_pending", approved: params.approved, reason: "checkpoint" } };
       } catch (error) {
         throw mainAgentError(error);
       }
@@ -1381,14 +1397,14 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
   const registerCatalog = (cwd: string, trustedProject: boolean) => {
     if (catalogRegistered || !pi.getActiveTools().includes("workflow")) return;
     const catalog = registry.catalog({ cwd, projectTrusted: trustedProject, globalSettingsPath: workflowSettingsPath(extensionAgentDir) });
-    const hasAliases = Object.keys(catalog.modelAliases ?? {}).length > 0;
+    const hasAliases = Object.keys(catalog.modelAliases ?? {}).length > 0 || Boolean(catalog.modelAliasEntries?.length);
     const hasSettings = catalog.settings !== undefined && [catalog.settings.globalSettingsPath, catalog.settings.projectSettingsPath].some((path) => existsSync(path));
     if (!catalog.functions.length && !catalog.variables.length && !hasAliases && !hasSettings) return;
     pi.registerTool({
       name: "workflow_catalog",
       label: "Workflow Catalog",
       description: "List reusable workflow functions, variables, and model aliases, or load one entry in full",
-      parameters: Type.Object({ name: Type.Optional(Type.String({ description: "Registered function or variable name for full detail" })) }, { additionalProperties: false }),
+      parameters: Type.Object({ name: Type.Optional(Type.String({ description: "Registered function, variable, or model alias name for full detail" })) }, { additionalProperties: false }),
       async execute(_id, params = {}) {
         const context = { cwd, projectTrusted: trustedProject, globalSettingsPath: workflowSettingsPath(extensionAgentDir) };
         const result = params.name === undefined ? registry.catalogIndex(context) : registry.catalogDetail(params.name, context);
@@ -1404,32 +1420,34 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     });
     catalogRegistered = true;
   };
-  const refreshPausedRunAliases = async (run: NonNullable<ReturnType<typeof runs.get>>, context?: { model: { provider: string; id: string } | undefined; modelRegistry: { getAll?: () => Array<{ provider: string; id: string }>; getAvailable?: () => Array<{ provider: string; id: string }> } | undefined }) => {
+  const refreshPausedRunAliases = async (run: NonNullable<ReturnType<typeof runs.get>>, context?: { model: { provider: string; id: string } | undefined; modelRegistry: ModelRegistryCapability | undefined; projectTrusted?: boolean }) => {
     const loaded = await run.store.load();
     const active = new Set(pi.getActiveTools().filter((tool) => !["workflow", "workflow_respond", "workflow_stop", "workflow_resume", "workflow_retry", "workflow_catalog"].includes(tool)));
     const missing = loaded.snapshot.tools.filter((tool) => tool !== "workflow_catalog").find((tool) => !active.has(tool));
     if (missing) throw new WorkflowError("RESUME_INCOMPATIBLE", `Required tool is unavailable: ${missing}`);
     const settingsPath = workflowSettingsPath(extensionAgentDir);
-    const resolution = resolveWorkflowSettings(run.store.cwd, run.projectTrusted(), settingsPath);
-    const currentPolicy = resolveAgentResourcePolicy(run.store.cwd, run.projectTrusted(), settingsPath);
-    const currentAliases = resolution.effective.modelAliases ?? {};
+    const trustedProject = context?.projectTrusted ?? run.projectTrusted();
+    const resolution = resolveWorkflowSettings(run.store.cwd, trustedProject, settingsPath);
+    const currentPolicy = resolveAgentResourcePolicy(run.store.cwd, trustedProject, settingsPath);
+    const staticAliases = resolution.effective.modelAliases ?? {};
     const previousAliases = loaded.snapshot.modelAliases ?? loaded.snapshot.settings.modelAliases ?? {};
-    const modelRegistry = context?.modelRegistry;
-    const knownModels = new Set((modelRegistry?.getAll?.() ?? modelRegistry?.getAvailable?.() ?? []).map((model) => `${model.provider}/${model.id}`));
-    if (context?.model) knownModels.add(`${context.model.provider}/${context.model.id}`);
-    const resumeModels = modelRegistry ? knownModels : new Set([...loaded.snapshot.models, ...knownModels]);
+    const rootModel = context?.model ? { ...run.model, provider: context.model.provider, model: context.model.id } : run.model;
+    const inventory = modelInventory(rootModel, context?.modelRegistry);
+    const knownModels = context?.modelRegistry ? inventory.knownModels : new Set([...loaded.snapshot.models, ...inventory.knownModels]);
+    const availableModels = context?.modelRegistry ? inventory.availableModels : new Set([...loaded.snapshot.models, ...inventory.availableModels]);
+    const currentAliases = (await resolveLaunchAliases(registry, staticAliases, { cwd: run.store.cwd, projectTrusted: trustedProject, rootModel, knownModels, availableModels, signal: run.abortController.signal }, availableModels, knownModels, settingsPath)).aliases;
     const blockedAliases = new Set(Object.keys(previousAliases).filter((name) => !Object.prototype.hasOwnProperty.call(currentAliases, name)));
     const blockedAliasTargets = Object.fromEntries(Object.entries(previousAliases).filter(([name]) => !Object.prototype.hasOwnProperty.call(currentAliases, name)));
     const refreshed = resumedSnapshotSettings(loaded.snapshot, resolution, currentAliases);
     const snapshot = createLaunchSnapshot({ ...loaded.snapshot, settingsPath, ...refreshed, modelAliases: currentAliases });
     await run.store.saveSnapshot(snapshot);
     scheduler.updateRunLimit(run.store.runId, snapshot.settings.concurrency);
-    run.executor = new WorkflowAgentExecutor({ cwd: run.store.cwd, agentDir: extensionAgentDir, model: run.model, tools: new Set(snapshot.tools.filter((tool) => pi.getActiveTools().includes(tool) && tool !== "workflow_catalog")), availableModels: resumeModels, knownModels: resumeModels, modelAliases: currentAliases, blockedAliases, blockedAliasTargets, settingsPath: resolution.sources.modelAliases, agentDefinitions: snapshot.roles ?? {}, runStore: run.store, providerPause: async () => { deliver(pi, `Workflow ${snapshot.metadata.name} paused: provider limit.`); await run.lifecycle.providerPause(); }, agentSetupHooks: registry.agentSetupHooks(), agentResourcePolicy: frozenResourcePolicy(currentPolicy) }, createSession);
+    run.executor = new WorkflowAgentExecutor({ cwd: run.store.cwd, agentDir: extensionAgentDir, model: run.model, tools: new Set(snapshot.tools.filter((tool) => pi.getActiveTools().includes(tool) && tool !== "workflow_catalog")), availableModels, knownModels, modelAliases: currentAliases, blockedAliases, blockedAliasTargets, settingsPath, agentDefinitions: snapshot.roles ?? {}, runStore: run.store, providerPause: async () => { deliver(pi, `Workflow ${snapshot.metadata.name} paused: provider limit.`); await run.lifecycle.providerPause(); }, agentSetupHooks: registry.agentSetupHooks(), agentResourcePolicy: frozenResourcePolicy(currentPolicy) }, createSession);
     run.executor.setRunContext(workflowRunContext(run.store.cwd, run.store.sessionId, run.store.runId, loaded.snapshot.metadata, loaded.snapshot.args, run.abortController.signal));
     const drift = aliasDrift(previousAliases, currentAliases);
     if (drift.length) await run.store.appendEvent({ type: "warning", message: `Model alias mappings changed on resume: ${drift.join("; ")}` });
   };
-  const coldResumeRun = async (run: NonNullable<ReturnType<typeof runs.get>>, hasUI: boolean, ui: { select?: (prompt: string, options: string[]) => Promise<string | undefined> }, trustedProject: boolean, context?: { model: { provider: string; id: string } | undefined; modelRegistry: { getAll?: () => Array<{ provider: string; id: string }>; getAvailable?: () => Array<{ provider: string; id: string }> } | undefined }) => {
+  const coldResumeRun = async (run: NonNullable<ReturnType<typeof runs.get>>, hasUI: boolean, ui: { select?: (prompt: string, options: string[]) => Promise<string | undefined> }, trustedProject: boolean, context?: { model: { provider: string; id: string } | undefined; modelRegistry: ModelRegistryCapability | undefined; signal?: AbortSignal | undefined; resolvedAliases?: Readonly<Record<string, string>>; blockedAliases?: ReadonlySet<string>; blockedAliasTargets?: Readonly<Record<string, string>> }) => {
     const loaded = await run.store.load();
     await run.store.validateRetrySource();
     await run.store.validateBorrowedWorktrees();
@@ -1444,26 +1462,28 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const settingsPath = workflowSettingsPath(extensionAgentDir);
     const resolution = resolveWorkflowSettings(run.store.cwd, trustedProject, settingsPath);
     const currentPolicy = resolveAgentResourcePolicy(run.store.cwd, trustedProject, settingsPath);
-    const currentAliases = resolution.effective.modelAliases ?? {};
+    const staticAliases = resolution.effective.modelAliases ?? {};
     const previousAliases = loaded.snapshot.modelAliases ?? loaded.snapshot.settings.modelAliases ?? {};
-    const modelRegistry = context?.modelRegistry;
-    const knownModels = new Set((modelRegistry?.getAll?.() ?? modelRegistry?.getAvailable?.() ?? []).map((model) => `${model.provider}/${model.id}`));
-    if (context?.model) knownModels.add(`${context.model.provider}/${context.model.id}`);
-    const resumeModels = modelRegistry ? knownModels : new Set([...loaded.snapshot.models, ...knownModels]);
+    const rootModel = context?.model ? { ...run.model, provider: context.model.provider, model: context.model.id } : run.model;
+    const inventory = modelInventory(rootModel, context?.modelRegistry);
+    const knownModels = context?.modelRegistry ? inventory.knownModels : new Set([...loaded.snapshot.models, ...inventory.knownModels]);
+    const availableModels = context?.modelRegistry ? inventory.availableModels : new Set([...loaded.snapshot.models, ...inventory.availableModels]);
+    const controller = new AbortController();
+    if (context?.signal?.aborted) controller.abort(); else { context?.signal?.addEventListener("abort", () => { controller.abort(); }, { once: true }); }
+    run.abortController = controller;
+    const currentAliases = context?.resolvedAliases ?? (await resolveLaunchAliases(registry, staticAliases, { cwd: run.store.cwd, projectTrusted: trustedProject, rootModel, knownModels, availableModels, signal: controller.signal }, availableModels, knownModels, settingsPath)).aliases;
     const resumeAliases = { ...previousAliases, ...currentAliases };
-    const blockedAliases = new Set(Object.keys(previousAliases).filter((name) => !Object.prototype.hasOwnProperty.call(currentAliases, name)));
-    const blockedAliasTargets = Object.fromEntries(Object.entries(previousAliases).filter(([name]) => !Object.prototype.hasOwnProperty.call(currentAliases, name)));
+    const blockedAliases = context?.blockedAliases ?? new Set(Object.keys(previousAliases).filter((name) => !Object.prototype.hasOwnProperty.call(currentAliases, name)));
+    const blockedAliasTargets = context?.blockedAliasTargets ?? Object.fromEntries(Object.entries(previousAliases).filter(([name]) => !Object.prototype.hasOwnProperty.call(currentAliases, name)));
     const script = launchScriptForSnapshot(loaded.snapshot, registry);
-    preflight(script, { models: resumeModels, tools: active, agentTypes: new Set(loaded.snapshot.agentTypes), modelAliases: resumeAliases, knownModels: resumeModels, settingsPath: resolution.sources.modelAliases, skipModelAvailability: true }, loaded.snapshot.schemas, loaded.snapshot.metadata, true);
+    preflight(script, { models: availableModels, tools: active, agentTypes: new Set(loaded.snapshot.agentTypes), modelAliases: resumeAliases, knownModels, settingsPath, skipModelAvailability: true }, loaded.snapshot.schemas, loaded.snapshot.metadata, true);
     const refreshed = resumedSnapshotSettings(loaded.snapshot, resolution, currentAliases);
     const snapshot = createLaunchSnapshot({ ...loaded.snapshot, settingsPath, ...refreshed, modelAliases: currentAliases });
     await run.store.saveSnapshot(snapshot);
     scheduler.updateRunLimit(run.store.runId, snapshot.settings.concurrency);
-    run.executor = new WorkflowAgentExecutor({ cwd: run.store.cwd, agentDir: extensionAgentDir, model: run.model, tools: new Set(snapshot.tools.filter((tool) => pi.getActiveTools().includes(tool) && tool !== "workflow_catalog")), availableModels: resumeModels, knownModels: resumeModels, modelAliases: currentAliases, blockedAliases, blockedAliasTargets, settingsPath: resolution.sources.modelAliases, agentDefinitions: snapshot.roles ?? {}, runStore: run.store, providerPause: async () => { deliver(pi, `Workflow ${snapshot.metadata.name} paused: provider limit.`); await run.lifecycle.providerPause(); }, agentSetupHooks: registry.agentSetupHooks(), agentResourcePolicy: frozenResourcePolicy(currentPolicy) }, createSession);
+    run.executor = new WorkflowAgentExecutor({ cwd: run.store.cwd, agentDir: extensionAgentDir, model: rootModel, tools: new Set(snapshot.tools.filter((tool) => pi.getActiveTools().includes(tool) && tool !== "workflow_catalog")), availableModels, knownModels, modelAliases: currentAliases, blockedAliases, blockedAliasTargets, settingsPath, agentDefinitions: snapshot.roles ?? {}, runStore: run.store, providerPause: async () => { deliver(pi, `Workflow ${snapshot.metadata.name} paused: provider limit.`); await run.lifecycle.providerPause(); }, agentSetupHooks: registry.agentSetupHooks(), agentResourcePolicy: frozenResourcePolicy(currentPolicy) }, createSession);
     const drift = aliasDrift(previousAliases, currentAliases);
     if (drift.length) await run.store.appendEvent({ type: "warning", message: `Model alias mappings changed on resume: ${drift.join("; ")}` });
-    const controller = new AbortController();
-    run.abortController = controller;
     const runContext = workflowRunContext(run.store.cwd, run.store.sessionId, run.store.runId, loaded.snapshot.metadata, loaded.snapshot.args, controller.signal);
     run.executor.setRunContext(runContext);
     let variables: Readonly<Record<string, JsonValue>>;
@@ -1525,7 +1545,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     run.completion = completion;
     void completion;
   };
-  const applyBudgetDecision = async (request: BudgetApprovalRequest, approved: boolean): Promise<BudgetDecisionResult> => {
+  const applyBudgetDecision = async (request: BudgetApprovalRequest, approved: boolean, context?: unknown, signal?: AbortSignal): Promise<BudgetDecisionResult> => {
     const run = runs.get(request.runId);
     if (!run) throw new WorkflowError("RESUME_INCOMPATIBLE", `Unknown workflow run: ${request.runId}`);
     if (!approved) return { state: "budget_exhausted", approved: false };
@@ -1534,10 +1554,10 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const runtime = new WorkflowBudgetRuntime(nextBudget, nextVersion, request.consumed, run.budget.events, { active: false });
     run.budget = runtime;
     await persistRunState(run.store, run.metadata, (current) => { const next = { ...current, ...runtime.snapshot(), budgetVersion: nextVersion }; if (nextBudget) next.budget = nextBudget; else delete next.budget; return next; });
-    await coldResumeRun(run, false, {}, run.projectTrusted());
+    await coldResumeRun(run, false, {}, projectTrusted(context), { ...resumeHostContext(context), ...(signal ? { signal } : {}) });
     return { state: "running", approved: true };
   };
-  const resumeWorkflowRun = async (runId: string, rawPatch?: unknown): Promise<Record<string, JsonValue>> => {
+  const resumeWorkflowRun = async (runId: string, rawPatch?: unknown, context?: unknown, signal?: AbortSignal): Promise<Record<string, JsonValue>> => {
     const run = runs.get(runId);
     if (!run) throw new WorkflowError("RESUME_INCOMPATIBLE", `Unknown workflow run: ${runId}`);
     const loaded = await run.store.load();
@@ -1562,11 +1582,11 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       run.budget = runtime;
       await persistRunState(run.store, run.metadata, (current) => { const next = { ...current, ...runtime.snapshot(), budgetVersion: nextVersion }; if (nextBudget) next.budget = nextBudget; else delete next.budget; return next; });
     }
-    await coldResumeRun(run, false, {}, run.projectTrusted());
+    await coldResumeRun(run, false, {}, projectTrusted(context), { ...resumeHostContext(context), ...(signal ? { signal } : {}) });
     return { state: "running" };
   };
   const retryReservations = new Set<string>();
-  const retryWorkflowRun = async (runId: string, context: unknown): Promise<{ runId: string; parentRunId: string; state: "running" }> => {
+  const retryWorkflowRun = async (runId: string, context: unknown, signal?: AbortSignal): Promise<{ runId: string; parentRunId: string; state: "running" }> => {
     if (typeof runId !== "string" || !runId.trim()) throw new WorkflowError("RESUME_INCOMPATIBLE", "workflow_retry requires an explicit run ID");
     const host = object(context) ? context : {};
     const cwd = typeof host.cwd === "string" ? host.cwd : undefined;
@@ -1609,16 +1629,21 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const settingsPath = workflowSettingsPath(extensionAgentDir);
       const resolution = resolveWorkflowSettings(cwd, trustedProject, settingsPath);
       const currentPolicy = resolveAgentResourcePolicy(cwd, trustedProject, settingsPath);
-      const currentAliases = resolution.effective.modelAliases ?? {};
+      const staticAliases = resolution.effective.modelAliases ?? {};
       const previousAliases = loaded.snapshot.modelAliases ?? loaded.snapshot.settings.modelAliases ?? {};
       const modelRegistry = contextHostCapabilities(context).modelRegistry;
-      const knownModels = new Set((modelRegistry?.getAll?.() ?? modelRegistry?.getAvailable?.() ?? []).map((model) => `${model.provider}/${model.id}`));
       const hostModel = object(host.model) && typeof host.model.provider === "string" && typeof host.model.id === "string" ? { provider: host.model.provider, id: host.model.id } : { provider: "", id: "" };
-      if (hostModel.provider && hostModel.id) knownModels.add(`${hostModel.provider}/${hostModel.id}`);
-      const resumeModels = modelRegistry ? knownModels : new Set([...loaded.snapshot.models, ...knownModels]);
+      const rootModel: ModelSpec = { provider: hostModel.provider, model: hostModel.id, thinking: pi.getThinkingLevel() };
+      const inventory = modelInventory(rootModel, modelRegistry);
+      const knownModels = modelRegistry ? inventory.knownModels : new Set([...loaded.snapshot.models, ...inventory.knownModels]);
+      const availableModels = modelRegistry ? inventory.availableModels : new Set([...loaded.snapshot.models, ...inventory.availableModels]);
+      const resolvedAliases = await resolveLaunchAliases(registry, staticAliases, { cwd, projectTrusted: trustedProject, rootModel, knownModels, availableModels, signal: signal ?? new AbortController().signal }, availableModels, knownModels, settingsPath);
+      const currentAliases = resolvedAliases.aliases;
       const resumeAliases = { ...previousAliases, ...currentAliases };
+      const blockedAliases = new Set(Object.keys(previousAliases).filter((name) => !Object.prototype.hasOwnProperty.call(currentAliases, name)));
+      const blockedAliasTargets = Object.fromEntries(Object.entries(previousAliases).filter(([name]) => !Object.prototype.hasOwnProperty.call(currentAliases, name)));
       const script = launchScriptForSnapshot(loaded.snapshot, registry);
-      preflight(script, { models: resumeModels, tools: active, agentTypes: new Set(loaded.snapshot.agentTypes), modelAliases: resumeAliases, knownModels: resumeModels, settingsPath: resolution.sources.modelAliases, skipModelAvailability: true }, loaded.snapshot.schemas, loaded.snapshot.metadata, true);
+      preflight(script, { models: availableModels, tools: active, agentTypes: new Set(loaded.snapshot.agentTypes), modelAliases: resumeAliases, knownModels, settingsPath, skipModelAvailability: true }, loaded.snapshot.schemas, loaded.snapshot.metadata, true);
       await sourceStore.validateNamedWorktrees();
       for (const name of loaded.run.retry?.namedWorktrees ?? []) await sourceStore.resolveNamedWorktree(name);
       const completedPaths = (await sourceStore.replayableOperations()).map(({ path }) => path);
@@ -1627,7 +1652,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const budget = validateBudget(loaded.run.budget ?? loaded.snapshot.budget);
       const childRunId = randomUUID();
       const childStore = new RunStore(cwd, sessionId, childRunId, home);
-      const childSnapshot = createLaunchSnapshot(loaded.snapshot);
+      const refreshed = resumedSnapshotSettings(loaded.snapshot, resolution, currentAliases);
+      const childSnapshot = createLaunchSnapshot({ ...loaded.snapshot, settingsPath, ...refreshed, modelAliases: currentAliases });
       const childBudget = new WorkflowBudgetRuntime(budget, loaded.run.budgetVersion ?? 1, loaded.run.usage, loaded.run.budgetEvents);
       const childInitialBudget = childBudget.snapshot();
       const retry: WorkflowRetryProvenance = { sourceRunId: loaded.run.id, lineageRootRunId, completedPaths, incompletePaths, namedWorktrees };
@@ -1636,13 +1662,13 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const model = modelSpec(loaded.snapshot.models[0] ?? "", fallbackModel);
       const lifecycle = lifecycleFor(childStore, "interrupted", childBudget, loaded.snapshot.metadata);
       const abortController = new AbortController();
-      const providerErrorRecovery = createProviderErrorRecovery(context, resumeModels, () => { abortController.abort(); });
+      const providerErrorRecovery = createProviderErrorRecovery(context, availableModels, () => { abortController.abort(); });
       const providerPause = async () => { deliver(pi, `Workflow ${loaded.snapshot.metadata.name} paused: provider limit.`); await lifecycle.providerPause(); };
-      const childRun = { executor: new WorkflowAgentExecutor({ cwd, agentDir: extensionAgentDir, model, tools: new Set(loaded.snapshot.tools.filter((tool) => active.has(tool) || tool === "workflow_catalog")), availableModels: resumeModels, knownModels: resumeModels, modelAliases: currentAliases, settingsPath: resolution.sources.modelAliases, agentDefinitions: loaded.snapshot.roles ?? {}, runStore: childStore, providerPause, agentSetupHooks: registry.agentSetupHooks(), agentResourcePolicy: frozenResourcePolicy(currentPolicy) }, createSession), store: childStore, metadata: loaded.snapshot.metadata, model, lifecycle, budget: childBudget, abortController, projectTrusted: () => projectTrusted(context), checkpointResolvers: new Map(), ...(providerErrorRecovery ? { providerErrorRecovery } : {}) };
+      const childRun = { executor: new WorkflowAgentExecutor({ cwd, agentDir: extensionAgentDir, model, tools: new Set(loaded.snapshot.tools.filter((tool) => active.has(tool) || tool === "workflow_catalog")), availableModels, knownModels, modelAliases: currentAliases, blockedAliases, blockedAliasTargets, settingsPath, agentDefinitions: loaded.snapshot.roles ?? {}, runStore: childStore, providerPause, agentSetupHooks: registry.agentSetupHooks(), agentResourcePolicy: frozenResourcePolicy(currentPolicy) }, createSession), store: childStore, metadata: loaded.snapshot.metadata, model, lifecycle, budget: childBudget, abortController, projectTrusted: () => projectTrusted(context), checkpointResolvers: new Map(), ...(providerErrorRecovery ? { providerErrorRecovery } : {}) };
       runs.set(childRunId, childRun);
       scheduler.addRun(childRunId, loaded.snapshot.settings.concurrency, () => { childBudget.checkAgentLaunch(); });
       await eventPublisher.runStarted(childStore, loaded.snapshot.metadata);
-      await coldResumeRun(childRun, false, {}, trustedProject, { model: hostModel, modelRegistry: modelRegistry ? { getAll: () => [...(modelRegistry.getAll?.() ?? [])], getAvailable: () => [...(modelRegistry.getAvailable?.() ?? [])] } : undefined });
+      await coldResumeRun(childRun, false, {}, trustedProject, { model: hostModel, modelRegistry, resolvedAliases: currentAliases, blockedAliases, blockedAliasTargets, ...(signal ? { signal } : {}) });
       const completion = runs.get(childRunId)?.completion;
       if (completion) {
         childStarted = true;
@@ -1658,8 +1684,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     label: "Workflow Retry",
     description: "Retry a failed workflow run by replaying its completed structural operations",
     parameters: WORKFLOW_RETRY_PARAMETERS,
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      try { const result = await retryWorkflowRun(params.runId, ctx); return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result }; }
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      try { const result = await retryWorkflowRun(params.runId, ctx, signal); return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result }; }
       catch (error) { throw mainAgentError(error); }
     },
   });
@@ -1668,8 +1694,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     label: "Workflow Resume",
     description: "Resume an exhausted workflow with unchanged or patched aggregate budgets",
     parameters: Type.Object({ runId: Type.String(), budget: Type.Optional(Type.Unknown()) }, { additionalProperties: false }),
-    async execute(_id, params) {
-      try { const result = await resumeWorkflowRun(params.runId, params.budget); return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result }; }
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      try { const result = await resumeWorkflowRun(params.runId, params.budget, ctx, signal); return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result }; }
       catch (error) { throw mainAgentError(error); }
     },
   });
@@ -1747,22 +1773,24 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const rootModel: ModelSpec = { provider: ctx.model.provider, model: ctx.model.id, thinking: pi.getThinkingLevel() };
       const rootModelName = `${rootModel.provider}/${rootModel.model}`;
       const modelRegistry = contextHostCapabilities(ctx).modelRegistry;
-      const knownModels = new Set((modelRegistry?.getAll?.() ?? modelRegistry?.getAvailable?.() ?? [ctx.model]).map((model) => `${model.provider}/${model.id}`));
-      knownModels.add(rootModelName);
-      const availableModels = knownModels;
+      const inventory = modelInventory(rootModel, modelRegistry);
+      const knownModels = inventory.knownModels;
+      const availableModels = inventory.availableModels;
       const rootTools = pi.getActiveTools().filter((name) => !["workflow", "workflow_respond", "workflow_stop", "workflow_resume", "workflow_retry", "workflow_catalog"].includes(name));
       const trustedProject = projectTrusted(ctx);
       const launchCwd = typeof ctx.cwd === "string" ? ctx.cwd : process.cwd();
       const launch = workflowLaunchSettings(launchCwd, trustedProject, settingsPath, params.concurrency);
-      const settings = launch.settings;
-      const validated = validateWorkflowLaunchWithRegistry({ ...params, args: params.args }, { cwd: ctx.cwd, agentDir: extensionAgentDir, projectTrusted: trustedProject, availableModels, rootTools: new Set(rootTools), modelAliases: settings.modelAliases ?? {}, knownModels, settingsPath: launch.modelSettingsPath }, registry);
+      const runController = new AbortController();
+      if (signal?.aborted) runController.abort(); else signal?.addEventListener("abort", () => { runController.abort(); }, { once: true });
+      const resolvedAliases = await resolveLaunchAliases(registry, launch.settings.modelAliases ?? {}, { cwd: launchCwd, projectTrusted: trustedProject, rootModel, knownModels, availableModels, signal: runController.signal }, availableModels, knownModels, settingsPath);
+      const modelAliases = resolvedAliases.aliases;
+      const settings = Object.freeze({ ...launch.settings, ...(Object.keys(modelAliases).length ? { modelAliases } : {}) });
+      const validated = validateWorkflowLaunchWithRegistry({ ...params, args: params.args }, { cwd: ctx.cwd, agentDir: extensionAgentDir, projectTrusted: trustedProject, availableModels, rootTools: new Set(rootTools), modelAliases, knownModels, settingsPath }, registry);
       const { script, checked, agentDefinitions, projectAgentDefinitions, roleNames, functionName } = validated;
       await ensureSessionLease(ctx.cwd, ctx.sessionManager.getSessionId());
       const runId = randomUUID();
       const args = (params.args ?? null) as JsonValue;
       encoded(args);
-      const runController = new AbortController();
-      if (signal?.aborted) runController.abort(); else signal?.addEventListener("abort", () => { runController.abort(); }, { once: true });
       const runContext = workflowRunContext(ctx.cwd, ctx.sessionManager.getSessionId(), runId, checked.metadata, args, runController.signal);
       const variables = await resolveWorkflowVariables(runContext, runController, registry);
       const store = new RunStore(ctx.cwd, ctx.sessionManager.getSessionId(), runId, home);
@@ -1770,9 +1798,9 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       if (parentRunId !== undefined) await store.validateParentRun(parentRunId);
       const roles = Object.fromEntries(roleNames.map((role) => [role, agentDefinitions[role]])) as Record<string, AgentDefinition>;
       const projectRoles = roleNames.filter((role) => projectAgentDefinitions[role] !== undefined);
-      const roleModels = roleNames.flatMap((role) => { const model = agentDefinitions[role]?.model; return model ? [modelCapability(model, settings.modelAliases, knownModels, launch.modelSettingsPath)] : []; });
+      const roleModels = roleNames.flatMap((role) => { const model = agentDefinitions[role]?.model; return model ? [modelCapability(model, modelAliases, knownModels, settingsPath)] : []; });
       const snapshotModels = [...new Set([rootModelName, ...checked.referenced.models, ...roleModels])];
-      const snapshot = createLaunchSnapshot({ script, args, metadata: checked.metadata, settings, settingsPath, settingsSources: { ...launch.resolution.sources, concurrency: params.concurrency === undefined ? launch.resolution.sources.concurrency : "per-run options" }, ...(functionName ? { launchKind: "function" as const, functionName } : {}), ...(settings.modelAliases ? { modelAliases: settings.modelAliases } : {}), ...(budget ? { budget } : {}), models: snapshotModels, tools: rootTools, agentTypes: checked.referenced.agentTypes, roles, projectRoles, schemas: checked.schemas });
+      const snapshot = createLaunchSnapshot({ script, args, metadata: checked.metadata, settings, settingsPath, settingsSources: { ...launch.resolution.sources, concurrency: params.concurrency === undefined ? launch.resolution.sources.concurrency : "per-run options" }, ...(functionName ? { launchKind: "function" as const, functionName } : {}), ...(Object.keys(modelAliases).length ? { modelAliases } : {}), ...(budget ? { budget } : {}), models: snapshotModels, tools: rootTools, agentTypes: checked.referenced.agentTypes, roles, projectRoles, schemas: checked.schemas });
       const budgetRuntime = new WorkflowBudgetRuntime(budget);
       const initialBudget = budgetRuntime.snapshot();
       await store.create({ id: runId, workflowName: checked.metadata.name, cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId(), state: "running", ...(parentRunId !== undefined ? { parentRunId } : {}), agents: [], nativeSessions: [], ...(budget ? { budget } : {}), budgetVersion: 1, ...initialBudget }, snapshot);
@@ -1780,7 +1808,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const background = !params.foreground;
       const providerPause = async () => { if (background) deliver(pi, `Workflow ${checked.metadata.name} paused: provider limit.`); await lifecycle.providerPause(); };
       const providerErrorRecovery = createProviderErrorRecovery(ctx, availableModels, () => { runController.abort(); });
-      const executor = new WorkflowAgentExecutor({ cwd: ctx.cwd, agentDir: extensionAgentDir, model: rootModel, tools: new Set(rootTools), availableModels, knownModels, modelAliases: settings.modelAliases ?? {}, settingsPath: launch.modelSettingsPath, agentDefinitions, runStore: store, providerPause, agentSetupHooks: registry.agentSetupHooks(), agentResourcePolicy: frozenResourcePolicy(launch.resourcePolicy), runContext }, createSession);
+      const executor = new WorkflowAgentExecutor({ cwd: ctx.cwd, agentDir: extensionAgentDir, model: rootModel, tools: new Set(rootTools), availableModels, knownModels, modelAliases, settingsPath, agentDefinitions, runStore: store, providerPause, agentSetupHooks: registry.agentSetupHooks(), agentResourcePolicy: frozenResourcePolicy(launch.resourcePolicy), runContext }, createSession);
       runs.set(runId, { executor, store, metadata: checked.metadata, model: rootModel, lifecycle, budget: budgetRuntime, abortController: runController, projectTrusted: () => projectTrusted(ctx), checkpointResolvers: new Map(), ...(providerErrorRecovery ? { providerErrorRecovery } : {}), ...(params.foreground && onUpdate ? { update: onUpdate } : {}) });
       if (params.foreground && onUpdate) onUpdate(workflowToolUpdate((await store.load()).run));
       scheduler.addRun(runId, settings.concurrency, () => runs.get(runId)?.budget.checkAgentLaunch());
@@ -1908,7 +1936,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             return keepContext ? "dashboard" : "done";
           }
           if ((action === "budget-approve" || action === "budget-reject") && runId && rest[0]) {
-            const result = await answerBudgetDecision(runId, rest[0], action === "budget-approve", true);
+            const result = await answerBudgetDecision(runId, rest[0], action === "budget-approve", true, ctx);
             ctx.ui.notify(result ? `Budget adjustment ${rest[0]} ${result.approved ? "approved" : "rejected"}.` : "Budget proposal is not pending.", result ? "info" : "warning");
             return keepContext ? "dashboard" : "done";
           }
@@ -1921,12 +1949,12 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           if (action === "resume" && run) {
             if (run.lifecycle.state === "budget_exhausted") {
               const patch: unknown = rest.length ? JSON.parse(rest.join(" ")) as unknown : undefined;
-              const result = await resumeWorkflowRun(run.store.runId, patch);
+              const result = await resumeWorkflowRun(run.store.runId, patch, ctx);
               ctx.ui.notify(result.state === "running" ? `Resumed workflow ${run.store.runId}.` : `Budget adjustment for ${run.store.runId} is awaiting approval.`, result.state === "running" ? "info" : "warning");
             } else {
               if (run.lifecycle.state === "interrupted") await coldResumeRun(run, ctx.hasUI, ctx.ui, projectTrusted(ctx), ctx);
               else {
-                if (run.lifecycle.state === "paused") await refreshPausedRunAliases(run, ctx);
+                if (run.lifecycle.state === "paused") await refreshPausedRunAliases(run, { ...resumeHostContext(ctx), projectTrusted: projectTrusted(ctx) });
                 await run.lifecycle.resume();
               }
               ctx.ui.notify(`Resumed workflow ${run.store.runId}.`, "info");
@@ -1936,7 +1964,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           if (action === "adjust" && run?.lifecycle.state === "budget_exhausted") {
             const input = await uiHostCapabilities(ctx.ui)?.input?.call(ctx.ui, "Budget patch (JSON)", "{\"tokens\":{\"hard\":null}}" );
             if (input === undefined) return keepContext ? "dashboard" : "done";
-            const result = await resumeWorkflowRun(run.store.runId, JSON.parse(input));
+            const result = await resumeWorkflowRun(run.store.runId, JSON.parse(input), ctx);
             ctx.ui.notify(result.state === "running" ? `Resumed workflow ${run.store.runId}.` : `Budget adjustment for ${run.store.runId} is awaiting approval.`, result.state === "running" ? "info" : "warning");
             return keepContext ? "dashboard" : "done";
           }

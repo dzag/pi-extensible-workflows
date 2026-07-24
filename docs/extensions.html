@@ -27,6 +27,7 @@
       <a href="#functions">Registered functions</a>
       <a href="#variables">Run-scoped variables</a>
       <a href="#hooks">Agent setup hooks</a>
+      <a href="#model-aliases">Dynamic model aliases</a>
       <a href="#resources">Other resources</a>
       <a href="#catalog">Catalog and host integration</a>
       <a href="#errors">Validation and troubleshooting</a>
@@ -35,7 +36,7 @@
     <article class="prose">
       <p class="eyebrow">Extension author path</p>
       <h1>Build trusted workflow extensions</h1>
-      <p class="lead">Use this page to register reusable workflow functions, run-scoped variables, and trusted per-agent setup hooks. It is the canonical authoring reference for the shipped extension API.</p>
+      <p class="lead">Use this page to register reusable workflow functions, run-scoped variables, dynamic model aliases, and trusted per-agent setup hooks. It is the canonical authoring reference for the shipped extension API.</p>
       <section id="start-here">
         <h2>Start here</h2>
         <p>A workflow extension is trusted TypeScript or JavaScript loaded by Pi. Use one when a workflow capability should be named, discoverable, schema-validated, and reusable across launches. Put the file in a Pi extension location such as <code>~/.pi/agent/extensions/review-loop.ts</code>, then load it through Pi. The package import is <code>pi-extensible-workflows</code>.</p>
@@ -61,7 +62,7 @@
       </section>
       <section id="registration">
         <h2>Registration contract</h2>
-        <p><code>WorkflowExtension</code> is the only top-level registration object. Its own keys are strict, and at least one of <code>functions</code>, <code>variables</code>, or <code>agentSetupHooks</code> must contain an entry. The accepted fields are:</p>
+        <p><code>WorkflowExtension</code> is the only top-level registration object. Its own keys are strict, and at least one of <code>functions</code>, <code>variables</code>, <code>modelAliases</code>, or <code>agentSetupHooks</code> must contain an entry. The accepted fields are:</p>
         <div class="table-wrap"><table>
           <thead><tr><th>Field</th><th>Type</th><th>Contract</th></tr></thead>
           <tbody>
@@ -70,11 +71,12 @@
             <tr><td><code>description</code></td><td>string</td><td>Required non-empty extension description. Keep it safe for catalog metadata.</td></tr>
             <tr><td><code>functions</code></td><td>record of <code>WorkflowFunction</code></td><td>Optional named reusable functions. Names must be identifier-shaped and globally unique.</td></tr>
             <tr><td><code>variables</code></td><td>record of <code>WorkflowVariable</code></td><td>Optional named launch-scoped globals. Names share the function namespace.</td></tr>
+            <tr><td><code>modelAliases</code></td><td>record of <code>WorkflowModelAlias</code></td><td>Optional named dynamic model resolvers. Alias names are case-sensitive and must match <code>[A-Za-z][A-Za-z0-9_-]*</code>; names are unique across extensions.</td></tr>
             <tr><td><code>agentSetupHooks</code></td><td>record of <code>AgentSetupHook</code></td><td>Optional trusted hooks. Hook names must be identifiers and unique across extensions.</td></tr>
             <tr><td><code>roleDirectories</code></td><td>array of absolute paths or <code>file:</code> URLs</td><td>Optional packaged role directories. They are scanned as extension defaults; standard global and trusted project roles override matching names, while duplicate extension role names are rejected.</td></tr>
           </tbody>
         </table></div>
-        <p>Unknown top-level keys are rejected. The removed <code>workflows</code> format is not accepted. Function and variable names cannot be reserved globals such as <code>agent</code>, <code>args</code>, <code>JSON</code>, <code>extensions</code>, or <code>workflow_catalog</code>, and names beginning with <code>__pi_extensible_workflows_</code> are rejected. A function-variable collision in one extension or across extensions is a <code>GLOBAL_COLLISION</code>; a duplicate hook name is a <code>DUPLICATE_NAME</code>.</p>
+        <p>Unknown top-level keys are rejected. The removed <code>workflows</code> format is not accepted. Function and variable names cannot be reserved globals such as <code>agent</code>, <code>args</code>, <code>JSON</code>, <code>extensions</code>, or <code>workflow_catalog</code>, and names beginning with <code>__pi_extensible_workflows_</code> are rejected. A function-variable collision in one extension or across extensions is a <code>GLOBAL_COLLISION</code>; duplicate hook or model-alias names are <code>DUPLICATE_NAME</code> errors.</p>
         <p>Register from the default Pi extension factory. The package begins a fresh loading registry for a new session-loading cycle, freezes registration during <code>session_start</code>, and resets it during shutdown. Calling <code>registerWorkflowExtension()</code> after the freeze fails with <code>REGISTRY_FROZEN</code>. This lifecycle is why module-top-level registration is not the supported pattern.</p>
       </section>
       <section id="functions">
@@ -200,6 +202,27 @@
         <pre><code class="language-javascript"><span class="tok-keyword">return</span> <span class="tok-punctuation">{</span> <span class="tok-property">label</span><span class="tok-punctuation">:</span> runLabel <span class="tok-punctuation">}</span><span class="tok-punctuation">;</span></code></pre>
         <p>For a launch named <code>reviewTask</code>, a resolver can return a value such as <code>reviewTask:550e8400-e29b-41d4-a716-446655440000</code>. Do not use resolver values as secrets or as a replacement for durable journal state.</p>
       </section>
+      <section id="model-aliases">
+        <h2>Dynamic model aliases</h2>
+        <p><code>modelAliases</code> registers trusted host resolvers for model names. A <code>WorkflowModelAlias</code> has one <code>resolve(context)</code> function, which may be synchronous or asynchronous and returns a target string in the normal <code>provider/model[:thinking]</code> syntax or another alias. The read-only context contains <code>cwd</code>, <code>projectTrusted</code>, the selected <code>rootModel</code>, <code>knownModels</code>, <code>availableModels</code>, and a launch or resume <code>AbortSignal</code>.</p>
+        <pre><code class="language-typescript"><span class="tok-function">registerWorkflowExtension</span>({
+  version: "1.0.0",
+  headline: "Model policy",
+  description: "Selects an available review model",
+  modelAliases: {
+    reviewer: {
+      async resolve({ availableModels }) {
+        return availableModels.has("anthropic/opus") ? "anthropic/opus:high" : "openai/gpt:high";
+      },
+    },
+  },
+});</code></pre>
+        <p>Resolvers run once per launch, before static workflow preflight, availability checks, role validation, and run creation. The resolved concrete map is captured in the launch snapshot and applies everywhere a workflow model is accepted, including role files, direct agent options, thinking suffixes, and chained aliases. An explicit call-level <code>thinking</code> option overrides an alias or target suffix.</p>
+        <p>Dynamic aliases are package defaults. Static aliases from global settings override them, and trusted project settings override the global map; a same-named shadowed resolver is not called. Duplicate registrations fail with <code>DUPLICATE_NAME</code>. Invalid resolver results, cycles, and unavailable targets fail before a run starts with an existing typed error and include the alias and registering extension headline. Resolver cancellation remains <code>CANCELLED</code>.</p>
+        <h3>Launch, resume, and retry</h3>
+        <p>Resume resolves dynamic aliases again against the current inventory and snapshots the new map. Completed journal operations retain their results; pending, retried, and new calls use the newly resolved map. A changed target produces one persisted alias-drift warning. <code>workflow_retry</code> creates a child run with the same rules and snapshot behavior. If an alias present in the prior snapshot is removed, pending or retried references are blocked as <code>UNKNOWN_MODEL</code> instead of falling through to a native model with the same bare ID.</p>
+        <p>Use settings files for static aliases and extension registration for dynamic policy. <code>workflow_catalog</code>, <code>workflowCatalog()</code>, and <code>workflowCatalogIndex()</code> expose alias names, <code>static</code>/<code>dynamic</code> kind, and provenance without executing resolvers or exposing dynamic targets to agents; trusted settings, <code>doctor</code>, snapshots, and the inspector retain concrete static or resolved targets.</p>
+      </section>
       <section id="hooks">
         <h2>Agent setup hooks</h2>
         <p>An <code>AgentSetupHook</code> is trusted code that runs after normal model, tool, cwd, and role resolution but before the native Pi session is created. It has <code>priority?: number</code> and <code>setup(agent, context)</code>. The priority must be finite; it defaults to <code>10</code>. Hooks run in ascending priority order, with the stable hook name breaking ties.</p>
@@ -238,8 +261,8 @@
       </section>
       <section id="resources">
         <h2>Other extension-provided resources</h2>
-        <p>The shipped <code>WorkflowExtension</code> has four capability fields: functions, variables, agent setup hooks, and packaged role directories. Role directories use absolute filesystem paths or <code>file:</code> URLs and provide default role files; standard global and trusted project roles override matching names. Dynamic model aliases remain settings-backed configuration described in <a href="developers.html#model-aliases">model aliases</a>.</p>
-        <p>Do not document proposed or lower-level resources as extension capabilities. A role may restrict workflow-agent skills and extension sources through its <code>disabledAgentResources</code> frontmatter, but that is role policy, not a <code>WorkflowExtension</code> field. The package's catalog may expose configured model aliases alongside extension metadata, but aliases are not supplied by <code>registerWorkflowExtension()</code>.</p>
+        <p>The shipped <code>WorkflowExtension</code> has five capability fields: functions, variables, dynamic model aliases, agent setup hooks, and packaged role directories. Role directories use absolute filesystem paths or <code>file:</code> URLs and provide default role files; standard global and trusted project roles override matching names.</p>
+        <p>Do not document proposed or lower-level resources as extension capabilities. A role may restrict workflow-agent skills and extension sources through its <code>disabledAgentResources</code> frontmatter, but that is role policy, not a <code>WorkflowExtension</code> field.</p>
       </section>
       <section id="catalog">
         <h2>Catalog and host integration</h2>
@@ -248,13 +271,13 @@
         <div class="table-wrap"><table>
           <thead><tr><th>API</th><th>Result</th></tr></thead>
           <tbody>
-            <tr><td><code>workflowCatalog()</code></td><td>Full trusted catalog of function and variable metadata, including extension version, headline, descriptions, input or variable schema, and function output schema. It may include settings-backed model aliases.</td></tr>
-            <tr><td><code>workflowCatalogIndex()</code></td><td>Compact metadata: function names, descriptions, input schemas, variable names, descriptions, schemas, and configured aliases.</td></tr>
-            <tr><td><code>workflowCatalogDetail(name)</code></td><td>One full function or variable definition. Missing names return a <code>NOT_FOUND</code> result object instead of throwing a workflow error.</td></tr>
+            <tr><td><code>workflowCatalog()</code></td><td>Full trusted catalog of function, variable, and alias metadata, including extension provenance and schemas. Trusted callers can inspect effective static targets; dynamic resolver targets are not executed by catalog discovery.</td></tr>
+            <tr><td><code>workflowCatalogIndex()</code></td><td>Compact metadata: function names, descriptions, input schemas, variable names, descriptions, schemas, and static or dynamic alias names with kind and provenance.</td></tr>
+            <tr><td><code>workflowCatalogDetail(name)</code></td><td>One full function, variable, or alias definition. Missing names return a <code>NOT_FOUND</code> result object instead of throwing a workflow error.</td></tr>
             <tr><td><code>registeredWorkflowFunctions()</code></td><td>Trusted host access to registered function implementations keyed by name. This is not agent-facing metadata and must not be exposed to untrusted code.</td></tr>
           </tbody>
         </table></div>
-        <p>The <code>workflow_catalog</code> tool returns the compact index by default. Pass <code>{ "name": "reviewTask" }</code> to request one full detail entry. Agents receive names, descriptions, and schemas, never implementations, source, resolver values, or opaque setup data. The tool is registered only when the active registry has functions, variables, or aliases.</p>
+        <p>The <code>workflow_catalog</code> tool returns the compact index by default. Pass <code>{ "name": "reviewTask" }</code> to request one full detail entry. Agents receive names, descriptions, schemas, and alias provenance, never implementations, source, resolver values, or opaque setup data. The tool is registered only when the active registry has functions, variables, aliases, or effective settings.</p>
         <h3>Trusted host discovery</h3>
         <pre><code class="language-typescript"><span class="tok-keyword">import</span> <span class="tok-punctuation">{</span> workflowCatalog<span class="tok-punctuation">,</span> workflowCatalogIndex<span class="tok-punctuation">,</span> workflowCatalogDetail<span class="tok-punctuation">,</span> registeredWorkflowFunctions <span class="tok-punctuation">}</span> <span class="tok-keyword">from</span> <span class="tok-string">"pi-extensible-workflows"</span><span class="tok-punctuation">;</span>
 <span class="tok-keyword">const</span> index <span class="tok-punctuation">=</span> <span class="tok-function">workflowCatalogIndex</span><span class="tok-punctuation">()</span><span class="tok-punctuation">;</span>
@@ -272,12 +295,13 @@
             <tr><td><code>INVALID_METADATA</code></td><td>Missing or empty extension metadata, unknown keys, malformed capability records, invalid function fields, or an obsolete <code>workflows</code> field. Keep contracts exact.</td></tr>
             <tr><td><code>INVALID_SCHEMA</code></td><td>A schema is not a plain JSON-compatible schema object. Use JSON values only and provide a recognized schema shape.</td></tr>
             <tr><td><code>GLOBAL_COLLISION</code></td><td>A function or variable name is reserved or already registered. Rename it; functions and variables share one namespace.</td></tr>
-            <tr><td><code>DUPLICATE_NAME</code></td><td>An agent setup hook name is already registered. Choose a globally unique hook name.</td></tr>
+            <tr><td><code>DUPLICATE_NAME</code></td><td>An agent setup hook or model alias name is already registered. Choose a globally unique name.</td></tr>
+            <tr><td><code>UNKNOWN_MODEL</code>, <code>CONFIG_ERROR</code></td><td>A model alias target is invalid, cyclic, unavailable, or its resolver failed. The error identifies the alias and registering extension; fix the resolver or inventory-dependent target.</td></tr>
             <tr><td><code>REGISTRY_FROZEN</code></td><td>Registration ran after <code>session_start</code>. Move registration into the extension factory.</td></tr>
             <tr><td><code>MISSING_WORKFLOW</code></td><td>A launch or <code>context.invoke()</code> names a function that is not in the active registry, or uses a qualified name.</td></tr>
             <tr><td><code>RESULT_INVALID</code></td><td>Function input or output, variable output, or a replayed value does not satisfy its schema. Check the schema and return a JSON value.</td></tr>
             <tr><td><code>AGENT_FAILED</code>, <code>AGENT_TIMEOUT</code>, <code>SHELL_FAILED</code>, <code>WORKTREE_FAILED</code></td><td>A context operation failed. Bound side effects, honor cancellation, and use stable named worktree scopes.</td></tr>
-            <tr><td><code>CANCELLED</code></td><td>The workflow or setup signal was aborted. Propagate <code>context.run.signal</code> and stop resolver or hook work promptly.</td></tr>
+            <tr><td><code>CANCELLED</code></td><td>The workflow, alias resolver, or setup signal was aborted. Propagate the signal and stop resolver or hook work promptly.</td></tr>
             <tr><td><code>RESUME_INCOMPATIBLE</code></td><td>A persisted function is no longer registered, the snapshot is obsolete, a required capability is unavailable, or a resume action is not valid for that run state. Restore the extension or relaunch.</td></tr>
             <tr><td>Catalog <code>NOT_FOUND</code></td><td><code>workflowCatalogDetail(name)</code> and <code>workflow_catalog</code> return <code>{ error: { code: "NOT_FOUND", ... } }</code>. It is a discovery result, not a thrown workflow error.</td></tr>
           </tbody>
