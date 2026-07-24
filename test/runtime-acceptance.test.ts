@@ -467,6 +467,16 @@ void test("production worker returns bare combinator values and waits before typ
   controller.abort();
   await assert.rejects(cancelled.result, (error: unknown) => error instanceof WorkflowError && error.code === "CANCELLED");
 });
+void test("worker rejects concurrent same-callsite agents but permits sequential reuse", async () => {
+  const concurrent = runWorkflow(`const launch = () => agent("same"); return Promise.all([launch(), launch()]);`, null, { agent: async () => "done" });
+  await assert.rejects(concurrent.result, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA" && /parallel|pipeline/.test(error.message));
+  const calls: string[] = [];
+  const sequential = await runWorkflow(`const launch = () => agent("same"); return [await launch(), await launch()];`, null, { agent: async (prompt) => { calls.push(prompt); return prompt; } }).result;
+  assert.deepEqual(sequential, ["same", "same"]);
+  assert.deepEqual(calls, ["same", "same"]);
+  const scoped = await runWorkflow(`const launch = () => agent("same"); return parallel("batch", { one: () => launch(), two: () => launch() });`, null, { agent: async (prompt) => prompt }).result;
+  assert.deepEqual(scoped, { one: "same", two: "same" });
+});
 
 void test("terminal failed attempts remain persisted", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-attempts-"));

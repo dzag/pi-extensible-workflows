@@ -324,6 +324,32 @@ function workflowCallsWithStructure(program: acorn.Program): Array<{ call: Workf
   visit(program, { execution: "sequential", structure: [] });
   return calls.sort((left, right) => left.call.start - right.call.start);
 }
+function memberCall(node: acorn.AnyNode | undefined, objectName: string, propertyName: string): boolean {
+  if (node?.type !== "CallExpression" || node.callee.type !== "MemberExpression" || node.callee.computed || node.callee.object.type !== "Identifier" || node.callee.object.name !== objectName || node.callee.property.type !== "Identifier") return false;
+  return node.callee.property.name === propertyName;
+}
+function mapCallback(node: acorn.AnyNode): acorn.AnyNode | undefined {
+  if (!memberCall(node, "Promise", "all") && !memberCall(node, "Promise", "allSettled")) return undefined;
+  if (node.type !== "CallExpression") return undefined;
+  const source = node.arguments[0];
+  if (source?.type !== "CallExpression" || source.callee.type !== "MemberExpression" || source.callee.computed || source.callee.property.type !== "Identifier" || !["map", "flatMap"].includes(source.callee.property.name)) return undefined;
+  const callback = source.arguments[0];
+  return callback?.type === "ArrowFunctionExpression" || callback?.type === "FunctionExpression" ? callback : undefined;
+}
+function hasUnscopedAgent(node: acorn.AnyNode, scoped = false): boolean {
+  const operation = workflowCallKind(node);
+  if (operation === "agent") return !scoped;
+  const nestedScope = scoped || operation === "parallel" || operation === "pipeline";
+  return astChildren(node).some((child) => hasUnscopedAgent(child, nestedScope));
+}
+function validateObviousConcurrentAgentCalls(program: acorn.Program): void {
+  const visit = (node: acorn.AnyNode): void => {
+    const callback = mapCallback(node);
+    if (callback && hasUnscopedAgent(callback)) fail("INVALID_METADATA", "Promise.all/map agent fan-out cannot prove stable call-site identity; use parallel(...) or pipeline(...)");
+    for (const child of astChildren(node)) visit(child);
+  };
+  visit(program);
+}
 function validateDirectPrimitiveReferences(program: acorn.AnyNode, name: string): void {
   const visit = (node: acorn.AnyNode, parent?: acorn.AnyNode): void => {
     if (node.type === "Identifier" && node.name === name) {
@@ -606,6 +632,7 @@ export function preflight(script: string, capabilities: PreflightCapabilities, s
   validateDirectPrimitiveReferences(program, "shell");
   for (const [index, schema] of schemas.entries()) validateSchema(schema, `schema[${String(index)}]`);
   const calls = workflowCalls(program);
+  validateObviousConcurrentAgentCalls(program);
   const phases = calls.filter((call) => call.callee.name === "phase").map((call) => literalString(call.arguments[0])).filter((phase): phase is string => phase !== undefined);
   for (const call of calls) {
     const operation = call.callee.name;

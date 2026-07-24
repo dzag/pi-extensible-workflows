@@ -78,6 +78,7 @@ const named = (value, kind) => { if (typeof value !== "string" || !value.trim())
 const path = (...names) => names.map(encodeURIComponent).join("/");
 const inheritedAgentPath = new AsyncLocalStorage();
 const agentOccurrences = new Map();
+const agentInflight = new Set();
 const shellOccurrences = new Map();
 const worktreeOwners = new AsyncLocalStorage();
 const rejectAgent = () => { throw workError("INVALID_METADATA", "Workflow agent calls must use a direct agent(...) call; aliases and indirect calls are unsupported"); };
@@ -98,14 +99,22 @@ const internalAgent = (...values) => {
   const callSite = values.pop();
   if (typeof callSite !== "string") throw workError("INTERNAL_ERROR", "Missing workflow agent call-site identity");
   const inherited = inheritedAgentPath.getStore() || [];
-  // ponytail: same-callsite races outside parallel/pipeline lack a stable structural scope and are unsupported.
   const occurrenceKey = JSON.stringify([inherited, callSite]);
+  if (agentInflight.has(occurrenceKey)) throw workError("INVALID_METADATA", "Concurrent agent calls from the same source call site are unsupported; use parallel(...) or pipeline(...)");
+  agentInflight.add(occurrenceKey);
   const occurrence = (agentOccurrences.get(occurrenceKey) || 0) + 1;
   agentOccurrences.set(occurrenceKey, occurrence);
   const options = values.length < 2 || values[1] === undefined ? {} : values[1];
   const worktreeOwner = worktreeOwners.getStore();
   const identity = { structuralPath: [...inherited], callSite, occurrence, ...(worktreeOwner ? { worktreeOwner } : {}) };
-  const result = rpc("agent", [values[0], options, identity]).then(unwrap);
+  let result;
+  try {
+    result = rpc("agent", [values[0], options, identity]).then(unwrap);
+  } catch (error) {
+    agentInflight.delete(occurrenceKey);
+    throw error;
+  }
+  void result.then(() => agentInflight.delete(occurrenceKey), () => agentInflight.delete(occurrenceKey));
   Object.defineProperties(result, {
     toJSON: { value() { throw workError("INVALID_METADATA", "Workflow agent result is a Promise; await it before serialization"); } },
     toString: { value() { throw workError("INVALID_METADATA", "Workflow agent result is a Promise; await it before interpolation"); } },

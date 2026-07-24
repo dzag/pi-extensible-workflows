@@ -2928,6 +2928,11 @@ void test("preflight enforces object-key combinators without agent names", () =>
   assert.doesNotThrow(() => preflight(`${base} agent('top-level')`, capabilities));
   preflight(`${base} parallel('batch',{task:()=>agent('inherited')}); pipeline('pipe',{item:1},{stage:value=>agent(String(value))})`, capabilities);
 });
+void test("AST preflight rejects obvious same-callsite Promise.all fan-out", () => {
+  assert.throws(() => preflight("return Promise.all(items.map(() => agent('same')));", capabilities), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA" && /parallel|pipeline/.test(error.message));
+  assert.doesNotThrow(() => preflight("return Promise.all([agent('first'), agent('second')]);", capabilities));
+  assert.doesNotThrow(() => preflight("return Promise.all(items.map(() => parallel('batch', { one: () => agent('same') })));", capabilities));
+});
 
 void test("AST preflight ignores DSL-looking non-executable text and member calls", () => {
   const script = `const text = "agent() checkpoint({}) phase('ghost') name: 'fake' model: 'missing' tools: ['bash'] role: 'writer'";
