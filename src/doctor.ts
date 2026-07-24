@@ -28,6 +28,7 @@ import {
   type WorkflowSettingsSources,
 } from "./index.js";
 import type { AgentDefinition } from "./agent-execution.js";
+import { disabledResources, unmatchedResourcePatterns } from "./utils.js";
 
 export type DoctorSeverity = "error" | "warning";
 export interface DoctorDiagnostic { severity: DoctorSeverity; code: string; message: string; source?: string; hint?: string }
@@ -189,9 +190,9 @@ function inspectRole(path: string, activeTools: ReadonlySet<string>, knownModels
 }
 
 function matchResourcePolicy(policy: AgentResourcePolicy, pi: DoctorPiState): AgentResourcePolicy {
-  const extensions = new Set((pi.extensions ?? []).map(canonical));
-  const skills = new Set(pi.skills ?? []);
-  return { ...policy, unmatchedSkills: policy.effective.skills.filter((name) => !skills.has(name)), unmatchedExtensions: policy.effective.extensions.filter((path) => !extensions.has(canonical(path))) };
+  const extensions = [...new Set((pi.extensions ?? []).map(canonical))];
+  const skills = [...new Set(pi.skills ?? [])];
+  return { ...policy, excludedSkills: disabledResources(policy.effective.skills, skills), excludedExtensions: disabledResources(policy.effective.extensions, extensions), unmatchedSkills: unmatchedResourcePatterns(policy.effective.skills, skills), unmatchedExtensions: unmatchedResourcePatterns(policy.effective.extensions, extensions) };
 }
 function resourcePolicySource(settingsSource: string): string { return settingsSource; }
 export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport> {
@@ -303,6 +304,8 @@ export function formatDoctorReport(report: DoctorReport): string {
     `- Project extensions: ${report.resourcePolicy.project.extensions.join(", ") || "(none)"}`,
     `- Effective skills: ${report.resourcePolicy.effective.skills.join(", ") || "(none)"}`,
     `- Effective extensions: ${report.resourcePolicy.effective.extensions.join(", ") || "(none)"}`,
+    `- Excluded skills: ${report.resourcePolicy.excludedSkills?.join(", ") || "(none)"}`,
+    `- Excluded extensions: ${report.resourcePolicy.excludedExtensions?.join(", ") || "(none)"}`,
     `- Unmatched skills: ${report.resourcePolicy.unmatchedSkills.join(", ") || "(none)"}`,
     `- Unmatched extensions: ${report.resourcePolicy.unmatchedExtensions.join(", ") || "(none)"}`,
     "",

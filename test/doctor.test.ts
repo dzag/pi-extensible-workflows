@@ -169,6 +169,20 @@ void test("doctor attributes unmatched replacement selectors to the project sett
   assert.equal(report.settingsSources.disabledAgentResources, projectSettings);
   assert.deepEqual(report.diagnostics.filter(({ code }) => code === "AGENT_RESOURCE_UNMATCHED").map(({ source }) => source), [`${projectSettings}.disabledAgentResources.skills`]);
 });
+void test("doctor reports matched glob exclusions and unmatched exceptions", async () => {
+  const paths = fixture();
+  const globalSettings = join(paths.agentDir, "pi-extensible-workflows", "settings.json");
+  const globalExtension = join(paths.agentDir, "extensions", "interactive.ts");
+  const projectExtension = join(paths.cwd, ".pi", "project.ts");
+  mkdirSync(join(paths.agentDir, "extensions"), { recursive: true });
+  writeFileSync(globalSettings, JSON.stringify({ disabledAgentResources: { skills: ["*", "!my-project-*", "!missing-*"], extensions: ["**/*", `!${projectExtension}`, `!${join(paths.root, "missing.ts")}`] } }));
+  const report = await withHome(paths.root, () => doctor({ ...paths, settingsPath: globalSettings, discoverPi: async () => pi({ extensions: [globalExtension, projectExtension], skills: ["my-project-skill", "other-skill"] }) }));
+  assert.deepEqual(report.resourcePolicy.excludedSkills, ["other-skill"]);
+  assert.deepEqual(report.resourcePolicy.excludedExtensions, [globalExtension]);
+  assert.deepEqual(report.resourcePolicy.unmatchedSkills, ["!missing-*"]);
+  assert.deepEqual(report.resourcePolicy.unmatchedExtensions, [`!${join(paths.root, "missing.ts")}`]);
+  assert.match(formatDoctorReport(report), /Excluded skills: other-skill/);
+});
 void test("doctor excludes workflow_catalog from active capabilities and output", async () => {
   const paths = fixture();
   const report = await withHome(paths.root, () => doctor({ ...paths, activeTools: ["read", "workflow", "workflow_respond", "workflow_catalog"], discoverPi: async () => pi({ activeTools: ["read", "workflow", "workflow_respond", "workflow_catalog"] }) }));

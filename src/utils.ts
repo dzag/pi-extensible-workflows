@@ -1,4 +1,5 @@
 import { ERROR_CODES, LAUNCH_SNAPSHOT_IDENTITY_VERSION, WorkflowError, type AgentResourceExclusions, type JsonValue, type ModelSpec, type WorkflowErrorCode } from "./types.js";
+import { Minimatch } from "minimatch";
 
 export function object(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 export { object as isObject };
@@ -103,6 +104,26 @@ export function modelCapability(value: string | ModelSpec, aliases?: Readonly<Re
 export function aliasDrift(previous: Readonly<Record<string, string>>, current: Readonly<Record<string, string>>): string[] {
   return [...new Set([...Object.keys(previous), ...Object.keys(current)])].sort().flatMap((name) => previous[name] === current[name] ? [] : [`${name}: ${previous[name] ?? "(missing)"} -> ${current[name] ?? "(missing)"}`]);
 }
-export function mergeAgentResourceExclusions(...values: (AgentResourceExclusions | undefined)[]): AgentResourceExclusions { return { skills: [...new Set(values.flatMap((value) => value?.skills ?? []))], extensions: [...new Set(values.flatMap((value) => value?.extensions ?? []))] }; }
+const RESOURCE_PATTERN_OPTIONS = { dot: true, nonegate: true, nocomment: true } as const;
+function resourcePatternBody(pattern: string): string { return pattern.startsWith("!") ? pattern.slice(1) : pattern; }
+function resourcePatternPath(value: string): string { return value.replaceAll("\\", "/"); }
+export function validateResourcePattern(pattern: string): void {
+  const body = resourcePatternBody(pattern);
+  if (!body) throw new Error(`Empty minimatch pattern ${JSON.stringify(pattern)}`);
+  const matcher = new Minimatch(resourcePatternPath(body), RESOURCE_PATTERN_OPTIONS);
+  if (matcher.makeRe() === false) throw new Error(`Invalid minimatch pattern ${JSON.stringify(pattern)}`);
+}
+export function resourcePatternMatches(resource: string, pattern: string): boolean { return new Minimatch(resourcePatternPath(resourcePatternBody(pattern)), RESOURCE_PATTERN_OPTIONS).match(resourcePatternPath(resource)); }
+export function disabledResources(patterns: readonly string[], resources: readonly string[]): string[] {
+  const disabled = new Set<string>();
+  for (const resource of resources) {
+    let excluded = false;
+    for (const pattern of patterns) if (resourcePatternMatches(resource, pattern)) excluded = !pattern.startsWith("!");
+    if (excluded) disabled.add(resource);
+  }
+  return [...disabled];
+}
+export function unmatchedResourcePatterns(patterns: readonly string[], resources: readonly string[]): string[] { return patterns.filter((pattern) => !resources.some((resource) => resourcePatternMatches(resource, pattern))); }
+export function mergeAgentResourceExclusions(...values: (AgentResourceExclusions | undefined)[]): AgentResourceExclusions { return { skills: values.flatMap((value) => value?.skills ?? []), extensions: values.flatMap((value) => value?.extensions ?? []) }; }
 export function createLaunchSnapshot(input: Omit<import("./types.js").LaunchSnapshot, "identityVersion"> & { identityVersion?: number }): Readonly<import("./types.js").LaunchSnapshot> { return deepFreeze(structuredClone({ ...input, launchKind: input.launchKind ?? (input.functionName ? "function" : "inline"), identityVersion: input.identityVersion ?? LAUNCH_SNAPSHOT_IDENTITY_VERSION })); }
 export function loadLaunchSnapshot(input: import("./types.js").LaunchSnapshot): Readonly<import("./types.js").LaunchSnapshot> { return deepFreeze(structuredClone(input)); }

@@ -6,7 +6,7 @@ import { createAgentSession, DefaultPackageManager, DefaultResourceLoader, getAg
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 type AgentMessage = { role: string; content?: unknown; stopReason?: string; errorMessage?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: { total: number } } };
 import type { AgentIdentity, AgentResourceExclusions, AgentResourcePolicy, AgentSetup, AgentSetupSummary, JsonSchema, JsonValue, ModelSpec, NativeSession, RegisteredAgentSetupHook, SessionFactory, SessionInput, WorkflowRunContext } from "./types.js";
-import { jsonObject, mergeAgentResourceExclusions, modelAliasName, modelCapability, resolveModelReference } from "./utils.js";
+import { jsonObject, disabledResources, mergeAgentResourceExclusions, modelAliasName, modelCapability, resolveModelReference, unmatchedResourcePatterns } from "./utils.js";
 import { WorkflowError } from "./types.js";
 import type { RunStore } from "./persistence.js";
 export type { AgentSetup, AgentSetupContext, AgentSetupHook, NativeSession, RegisteredAgentSetupHook, SessionFactory, SessionInput } from "./types.js";
@@ -129,14 +129,17 @@ export async function createNativeAgentSession(input: SessionInput): Promise<Nat
     settingsManager.setProjectTrusted(policy.projectTrusted);
     const packageManager = new DefaultPackageManager({ cwd: input.cwd, agentDir, settingsManager });
     const resolved = await packageManager.resolve();
-    const disabledExtensions = new Set(policy.effective.extensions);
-    const extensionPaths = [...new Set(resolved.extensions.filter(({ enabled, metadata }) => enabled && (policy.projectTrusted || metadata.scope !== "project")).map(({ path }) => canonicalSourcePath(path)).filter((path) => !disabledExtensions.has(canonicalSourcePath(path))))];
+    const discoveredExtensions = [...new Set(resolved.extensions.filter(({ enabled, metadata }) => enabled && (policy.projectTrusted || metadata.scope !== "project")).map(({ path }) => canonicalSourcePath(path)))];
+    const excludedExtensions = new Set(disabledResources(policy.effective.extensions, discoveredExtensions));
+    const extensionPaths = discoveredExtensions.filter((path) => !excludedExtensions.has(path));
+    Object.assign(policy, { excludedExtensions: [...excludedExtensions], unmatchedExtensions: unmatchedResourcePatterns(policy.effective.extensions, discoveredExtensions) });
     const skillPaths = [...new Set(resolved.skills.filter(({ enabled, metadata }) => enabled && (policy.projectTrusted || metadata.scope !== "project")).map(({ path }) => path))];
-    const updateSkillMatches = (skills: readonly { name: string }[]) => {
-      const names = new Set(skills.map(({ name }) => name));
-      Object.assign(policy, { unmatchedSkills: policy.effective.skills.filter((name) => !names.has(name)) });
+    const updateSkillMatches = (skills: readonly { name: string }[]): Set<string> => {
+      const names = [...new Set(skills.map(({ name }) => name))];
+      const excludedSkills = disabledResources(policy.effective.skills, names);
+      Object.assign(policy, { excludedSkills, unmatchedSkills: unmatchedResourcePatterns(policy.effective.skills, names) });
+      return new Set(excludedSkills);
     };
-    const disabledSkills = new Set(policy.effective.skills);
     resourceLoader = new DefaultResourceLoader({
       cwd: input.cwd,
       agentDir,
@@ -147,14 +150,12 @@ export async function createNativeAgentSession(input: SessionInput): Promise<Nat
       additionalSkillPaths: skillPaths,
       ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}),
       skillsOverride: (base) => {
-        updateSkillMatches(base.skills);
+        const disabledSkills = updateSkillMatches(base.skills);
         return { ...base, skills: base.skills.filter(({ name }) => !disabledSkills.has(name)) };
       },
       ...(input.systemPromptAppend ? { appendSystemPromptOverride: (base) => [...base, input.systemPromptAppend ?? ""] } : {}),
     });
     await resourceLoader.reload();
-    const discoveredExtensions = new Set(resolved.extensions.filter(({ enabled, metadata }) => enabled && (policy.projectTrusted || metadata.scope !== "project")).map(({ path }) => canonicalSourcePath(path)));
-    Object.assign(policy, { unmatchedExtensions: policy.effective.extensions.filter((path) => !discoveredExtensions.has(canonicalSourcePath(path))) });
   } else if (input.systemPromptAppend || input.extensionFactories?.length) {
     resourceLoader = new DefaultResourceLoader({ cwd: input.cwd, agentDir, ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}), ...(input.systemPromptAppend ? { appendSystemPromptOverride: (base) => [...base, input.systemPromptAppend ?? ""] } : {}) });
     await resourceLoader.reload();
@@ -196,7 +197,7 @@ function fallbackSetupContext(root: AgentExecutionRoot, options: AgentExecutionO
   return { run, identity: Object.freeze({ ...identity, structuralPath: Object.freeze([...identity.structuralPath]) }) };
 }
 function resourcePolicySummary(policy: AgentResourcePolicy): NonNullable<AgentSetupSummary["disabledAgentResources"]> {
-  return { skills: [...policy.effective.skills], extensions: [...policy.effective.extensions], unmatchedSkills: [...policy.unmatchedSkills], unmatchedExtensions: [...policy.unmatchedExtensions] };
+  return { skills: [...policy.effective.skills], extensions: [...policy.effective.extensions], excludedSkills: [...(policy.excludedSkills ?? [])], excludedExtensions: [...(policy.excludedExtensions ?? [])], unmatchedSkills: [...policy.unmatchedSkills], unmatchedExtensions: [...policy.unmatchedExtensions] };
 }
 async function prepareAgentSetup(root: AgentExecutionRoot, createSession: SessionFactory, task: string, options: AgentExecutionOptions, resolved: { model: ModelSpec; tools: readonly string[]; systemPromptAppend: string }, cwd: string, attempt: number, signal: AbortSignal | undefined, customTools: readonly ToolDefinition[], resultTool: ToolDefinition | undefined): Promise<{ setup: AgentSetup; summary: AgentSetupSummary }> {
   const setupSignal = signal ?? root.runContext?.signal ?? new AbortController().signal;

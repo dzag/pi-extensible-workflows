@@ -7,6 +7,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { createNativeAgentSession, FairAgentScheduler, WorkflowAgentExecutor, type AgentExecutionRoot, type AgentProgress, type SessionFactory } from "../src/agent-execution.js";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { WorkflowError } from "../src/index.js";
+import type { AgentResourcePolicy } from "../src/types.js";
 import type { RunStore } from "../src/persistence.js";
 
 const root: AgentExecutionRoot = { cwd: "/repo", model: { provider: "openai", model: "gpt", thinking: "medium" }, availableModels: new Set(["openai/gpt", "anthropic/opus", "google/gemini"]), tools: new Set(["read", "grep", "find", "bash"]), agentDefinitions: { reviewer: { prompt: "Review carefully", model: "anthropic/opus", thinking: "high", tools: ["read"] }, scout: { prompt: "Inspect broadly", model: "google/gemini", thinking: "low", tools: ["read", "grep"] } } };
@@ -693,8 +694,8 @@ void test("isolates role resource exclusions and reapplies them on retries", asy
   await executor.execute("other", { label: "other", workflowName: "flow", role: "scout" });
   await executor.execute("plain", { label: "plain", workflowName: "flow" });
   assert.deepEqual(policies.map(({ effective }) => effective), [
-    { skills: ["global", "project", "role"], extensions: ["/global.ts", "/project.ts", roleExtension] },
-    { skills: ["global", "project", "role"], extensions: ["/global.ts", "/project.ts", roleExtension] },
+    { skills: ["global", "project", "role", "global"], extensions: ["/global.ts", "/project.ts", roleExtension, "/global.ts"] },
+    { skills: ["global", "project", "role", "global"], extensions: ["/global.ts", "/project.ts", roleExtension, "/global.ts"] },
     { skills: ["global", "project"], extensions: ["/global.ts", "/project.ts"] },
     { skills: ["global", "project"], extensions: ["/global.ts", "/project.ts"] },
   ]);
@@ -734,7 +735,7 @@ void test("filters disabled native extensions before factories and skills before
   writeFileSync(join(projectSkills, "project-kept-skill", "SKILL.md"), "---\nname: project-kept-skill\ndescription: Kept project skill\n---\nKept");
   writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ extensions: [disabledExtension, allowedExtension], skills: [skillsDir] }));
   writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ extensions: [projectDisabledExtension, projectAllowedExtension], skills: [projectSkills] }));
-  const resourcePolicy = { globalSettingsPath: "/workflow/settings.json", projectSettingsPath: "/project/.pi/pi-extensible-workflows/settings.json", projectTrusted: false, global: { skills: ["disabled-skill"], extensions: [resolve(disabledExtension)] }, project: { skills: [], extensions: [] }, effective: { skills: ["disabled-skill"], extensions: [resolve(disabledExtension)] }, unmatchedSkills: [], unmatchedExtensions: [] };
+  const resourcePolicy: AgentResourcePolicy = { globalSettingsPath: "/workflow/settings.json", projectSettingsPath: "/project/.pi/pi-extensible-workflows/settings.json", projectTrusted: false, global: { skills: ["disabled-skill"], extensions: [resolve(disabledExtension)] }, project: { skills: [], extensions: [] }, effective: { skills: ["disabled-skill"], extensions: [resolve(disabledExtension)] }, unmatchedSkills: [], unmatchedExtensions: [] };
   const session = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-filter", resourcePolicy });
   const loaded = (session as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> }; getExtensions(): { extensions: Array<{ resolvedPath: string }> } } }).resourceLoader;
   assert.equal(existsSync(disabledMarker), false);
@@ -770,4 +771,32 @@ void test("filters disabled native extensions before factories and skills before
   const parent = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-parent" });
   assert.match(parent.systemPrompt ?? "", /disabled-skill/);
   parent.dispose();
+});
+void test("applies ordered minimatch resource exclusions and records concrete matches", async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-resource-globs-"));
+  const agentDir = join(rootDir, "agent");
+  const cwd = join(rootDir, "project");
+  mkdirSync(join(agentDir, "extensions"), { recursive: true });
+  mkdirSync(join(agentDir, "skills", "disabled-skill"), { recursive: true });
+  mkdirSync(join(agentDir, "skills", "kept-skill"), { recursive: true });
+  const disabledExtension = join(agentDir, "extensions", "disabled.ts");
+  const allowedExtension = join(agentDir, "extensions", "allowed.ts");
+  writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: {} }));
+  writeFileSync(join(agentDir, "auth.json"), "{}");
+  writeFileSync(disabledExtension, "export default function() {}");
+  writeFileSync(allowedExtension, "export default function() {}");
+  writeFileSync(join(agentDir, "skills", "disabled-skill", "SKILL.md"), "---\nname: disabled-skill\ndescription: Disabled\n---\nDisabled");
+  writeFileSync(join(agentDir, "skills", "kept-skill", "SKILL.md"), "---\nname: kept-skill\ndescription: Kept\n---\nKept");
+  const resourcePolicy: AgentResourcePolicy = { globalSettingsPath: "/workflow/settings.json", projectSettingsPath: "/project/.pi/pi-extensible-workflows/settings.json", projectTrusted: false, global: { skills: [], extensions: [] }, project: { skills: [], extensions: [] }, effective: { skills: ["disabled-*", "!kept-skill"], extensions: ["**/*", `!${allowedExtension}`] }, unmatchedSkills: [], unmatchedExtensions: [] };
+  const session = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-glob", resourcePolicy });
+  const loaded = (session as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> }; getExtensions(): { extensions: Array<{ resolvedPath: string }> } } }).resourceLoader;
+  const skillNames = loaded.getSkills().skills.map(({ name }) => name);
+  assert.ok(skillNames.includes("kept-skill"));
+  assert.equal(skillNames.includes("disabled-skill"), false);
+  assert.deepEqual(loaded.getExtensions().extensions.map(({ resolvedPath }) => resolve(resolvedPath)), [resolve(allowedExtension)]);
+  assert.deepEqual(resourcePolicy.excludedSkills, ["disabled-skill"]);
+  assert.deepEqual(resourcePolicy.excludedExtensions, [resolve(disabledExtension)]);
+  assert.deepEqual(resourcePolicy.unmatchedSkills, []);
+  assert.deepEqual(resourcePolicy.unmatchedExtensions, []);
+  session.dispose();
 });

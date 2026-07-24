@@ -10,7 +10,7 @@ import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { WorkflowError } from "./types.js";
 import type { AgentDefinition, AgentResourceExclusions, AgentResourcePolicy, CheckpointInput, JsonSchema, JsonValue, LaunchSnapshot, PreflightCapabilities, PreflightResult, ShellOptions, StaticWorkflowCall, StaticWorkflowExecution, StaticWorkflowScope, ValidatedWorkflowLaunch, WorkflowCallKind, WorkflowErrorCode, WorkflowMetadata, WorkflowSettings, WorkflowSettingsOverrides, WorkflowSettingsResolution, WorkflowSettingsSources, WorkflowValidationContext, WorkflowValidationParameters } from "./types.js";
 import type { WorkflowRegistryApi } from "./registry.js";
-import { deepFreeze, errorText, fail, jsonValue, modelAliasName, modelCapability, object, parseThinking, positiveInteger, resolveModelReference, unknownModel, validateModelAliases } from "./utils.js";
+import { deepFreeze, errorText, fail, jsonValue, modelAliasName, modelCapability, object, parseThinking, positiveInteger, resolveModelReference, unknownModel, validateModelAliases, validateResourcePattern } from "./utils.js";
 import { WORKFLOW_CALL_KINDS } from "./types.js";
 
 export const DEFAULT_SETTINGS: Readonly<WorkflowSettings> = Object.freeze({ concurrency: 8 });
@@ -25,10 +25,20 @@ export function validateCheckpoint(value: unknown): CheckpointInput {
 export function workflowSettingsPath(agentDir = getAgentDir()): string { return join(agentDir, ROLE_DIRECTORY, "settings.json"); }
 export function workflowProjectSettingsPath(cwd: string): string { return join(cwd, ".pi", ROLE_DIRECTORY, "settings.json"); }
 const EMPTY_AGENT_RESOURCE_EXCLUSIONS: AgentResourceExclusions = Object.freeze({ skills: [], extensions: [] });
+function resourcePatternHasMagic(value: string): boolean { return /[*?\x5b\x5d{}()]/.test(value); }
 function normalizedResourcePath(value: string, settingsPath: string): string {
   let expanded = value === "~" ? homedir() : value.startsWith("~/") || value.startsWith("~\\") ? join(homedir(), value.slice(2)) : value;
   if (expanded.startsWith("file://")) expanded = fileURLToPath(expanded);
   const resolved = resolve(dirname(settingsPath), expanded);
+  if (expanded === "**" || expanded.startsWith("**/") || expanded.startsWith("**\\")) return expanded;
+  if (resourcePatternHasMagic(expanded)) {
+    const magicIndex = resolved.search(/[*?\x5b\x5d{}()]/);
+    const separatorIndex = Math.max(resolved.lastIndexOf("/", magicIndex), resolved.lastIndexOf("\\", magicIndex));
+    const rootBoundary = separatorIndex === 0 || (separatorIndex === 2 && /^[A-Za-z]:[\\/]/.test(resolved));
+    const prefix = rootBoundary ? resolved.slice(0, separatorIndex + 1) : separatorIndex >= 0 ? resolved.slice(0, separatorIndex) : resolved;
+    const suffix = rootBoundary ? resolved.slice(separatorIndex + 1) : separatorIndex >= 0 ? resolved.slice(separatorIndex) : "";
+    try { return `${realpathSync(prefix)}${suffix}`; } catch { return resolved; }
+  }
   try { return realpathSync(resolved); } catch { return resolved; }
 }
 function validateAgentResourceExclusions(value: unknown, settingsPath: string, errorCode: "INVALID_SETTINGS" | "INVALID_METADATA" = "INVALID_SETTINGS"): AgentResourceExclusions | undefined {
@@ -41,14 +51,17 @@ function validateAgentResourceExclusions(value: unknown, settingsPath: string, e
     const entries = value[kind];
     if (entries === undefined) continue;
     if (!Array.isArray(entries)) fail(errorCode, `${base}.${kind} must be an array`);
-    const seen = new Set<string>();
     for (const [index, entry] of entries.entries()) {
       if (typeof entry !== "string" || !entry.trim()) fail(errorCode, `${base}.${kind}[${String(index)}] must be a non-empty string`);
       let selector = entry.trim();
       if (kind === "extensions") {
-        try { selector = normalizedResourcePath(selector, settingsPath); } catch (error) { fail(errorCode, `${base}.${kind}[${String(index)}] must be a valid path: ${errorText(error)}`); }
+        const negated = selector.startsWith("!");
+        const body = negated ? selector.slice(1) : selector;
+        if (!body) fail(errorCode, `${base}.${kind}[${String(index)}] must be a valid minimatch pattern: Empty minimatch pattern ${JSON.stringify(selector)}`);
+        try { selector = `${negated ? "!" : ""}${normalizedResourcePath(body, settingsPath)}`; } catch (error) { fail(errorCode, `${base}.${kind}[${String(index)}] must be a valid path: ${errorText(error)}`); }
       }
-      if (!seen.has(selector)) { seen.add(selector); normalized[kind].push(selector); }
+      try { validateResourcePattern(selector); } catch (error) { fail(errorCode, `${base}.${kind}[${String(index)}] must be a valid minimatch pattern: ${errorText(error)}`); }
+      normalized[kind].push(selector);
     }
   }
   return Object.freeze({ skills: Object.freeze(normalized.skills), extensions: Object.freeze(normalized.extensions) });
