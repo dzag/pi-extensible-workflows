@@ -3018,7 +3018,11 @@ void test("loads extension role directories as defaults beneath standard roles",
   const registry = new WorkflowRegistry();
   registry.register({ version: "1.0.0", headline: "Roles", description: "Packaged roles", roleDirectories: [extensionDirectory, pathToFileURL(secondExtensionDirectory)] });
   assert.deepEqual(registry.roleDirectories(), [extensionDirectory, secondExtensionDirectory]);
-  const roles = loadAgentDefinitions(cwd, agentDir, true, registry.roleDirectories());
+  assert.throws(() => loadAgentDefinitions(cwd, agentDir, true, registry.roleDirectories()), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA" && error.message.includes(extensionDirectory) && error.message.includes(secondExtensionDirectory));
+  const reversed = new WorkflowRegistry();
+  reversed.register({ version: "1.0.0", headline: "Roles", description: "Packaged roles", roleDirectories: [secondExtensionDirectory, extensionDirectory] });
+  assert.throws(() => loadAgentDefinitions(cwd, agentDir, true, reversed.roleDirectories()), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA" && error.message.includes(extensionDirectory) && error.message.includes(secondExtensionDirectory));
+  const roles = loadAgentDefinitions(cwd, agentDir, true, [secondExtensionDirectory]);
   assert.equal(roles["extension-only"]?.prompt, "Extension-only body");
   assert.equal(roles.packaged?.prompt, "Project override body");
   assert.throws(() => { registry.register({ version: "1.0.0", headline: "Invalid", description: "Invalid", roleDirectories: ["relative/roles"] }); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");

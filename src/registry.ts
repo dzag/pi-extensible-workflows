@@ -1,7 +1,7 @@
 import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Value } from "typebox/value";
-import type { JsonValue, RegisteredAgentSetupHook, WorkflowCatalog, WorkflowCatalogError, WorkflowCatalogFunction, WorkflowCatalogIndex, WorkflowCatalogVariable, WorkflowExtension, WorkflowFunction, WorkflowFunctionContext, WorkflowJournal, WorkflowVariable } from "./types.js";
+import type { JsonValue, RegisteredAgentSetupHook, WorkflowCatalog, WorkflowCatalogError, WorkflowCatalogFunction, WorkflowCatalogIndex, WorkflowCatalogVariable, WorkflowExtension, WorkflowFunction, WorkflowFunctionContext, WorkflowJournal, WorkflowRoleDirectoryRegistration, WorkflowVariable } from "./types.js";
 import { deepFreeze, fail, jsonValue, object } from "./utils.js";
 import { loadSettings, validateSchema } from "./validation.js";
 
@@ -28,7 +28,7 @@ export class WorkflowRegistry {
   readonly #extensions = new Set<Readonly<WorkflowExtension>>();
   readonly #globals = new Map<string, string>();
   readonly #hooks = new Map<string, RegisteredAgentSetupHook>();
-  readonly #roleDirectories = new Set<string>();
+  readonly #roleDirectories = new Map<string, WorkflowRoleDirectoryRegistration>();
   #frozen = false;
 
   get frozen(): boolean { return this.#frozen; }
@@ -68,7 +68,7 @@ export class WorkflowRegistry {
     }
     const stored = deepFreeze({ ...extension, functions, variables, agentSetupHooks, ...(roleDirectories.length ? { roleDirectories } : {}) });
     this.#extensions.add(stored);
-    for (const directory of roleDirectories) this.#roleDirectories.add(directory);
+    for (const directory of roleDirectories) if (!this.#roleDirectories.has(directory)) this.#roleDirectories.set(directory, deepFreeze({ path: directory, extension: { version: extension.version, headline: extension.headline, description: extension.description } }));
     for (const name of names) this.#globals.set(name, name);
     for (const [name, hook] of Object.entries(agentSetupHooks)) this.#hooks.set(name, { name, priority: hook.priority ?? 10, setup: hook.setup });
   }
@@ -139,10 +139,13 @@ export class WorkflowRegistry {
     return [...this.#hooks.values()].sort((left, right) => left.priority - right.priority || (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
   }
   roleDirectories(): readonly string[] {
-    return [...this.#roleDirectories];
+    return [...this.#roleDirectories.keys()];
+  }
+  roleDirectoryRegistrations(): readonly WorkflowRoleDirectoryRegistration[] {
+    return [...this.#roleDirectories.values()];
   }
 }
-export type WorkflowRegistryApi = Pick<WorkflowRegistry, "frozen" | "freeze" | "register" | "function" | "functions" | "catalog" | "catalogIndex" | "catalogDetail" | "globals" | "invokeFunction" | "variables" | "agentSetupHooks" | "roleDirectories">;
+export type WorkflowRegistryApi = Pick<WorkflowRegistry, "frozen" | "freeze" | "register" | "function" | "functions" | "catalog" | "catalogIndex" | "catalogDetail" | "globals" | "invokeFunction" | "variables" | "agentSetupHooks" | "roleDirectories" | "roleDirectoryRegistrations">;
 interface WorkflowRegistryHost { api: WorkflowRegistryApi }
 const WORKFLOW_REGISTRY_KEY = Symbol.for("pi-extensible-workflows.workflow-registry");
 const globalRegistry = globalThis as typeof globalThis & Record<symbol, WorkflowRegistryHost | undefined>;
@@ -160,6 +163,7 @@ function createWorkflowRegistryApi(registry: WorkflowRegistry): WorkflowRegistry
     invokeFunction: (...args) => registry.invokeFunction(...args),
     variables: () => registry.variables(),
     roleDirectories: () => registry.roleDirectories(),
+    roleDirectoryRegistrations: () => registry.roleDirectoryRegistrations(),
     agentSetupHooks: () => registry.agentSetupHooks(),
   };
 }
@@ -182,6 +186,10 @@ export function registeredWorkflowFunctions(): Readonly<Record<string, WorkflowF
 export function registeredWorkflowRoleDirectories(): readonly string[] {
   const directories = loadingRegistry().roleDirectories;
   return typeof directories === "function" ? directories() : [];
+}
+export function registeredWorkflowRoleDirectoryRegistrations(): readonly WorkflowRoleDirectoryRegistration[] {
+  const registrations = loadingRegistry().roleDirectoryRegistrations;
+  return typeof registrations === "function" ? registrations() : [];
 }
 
 export type { WorkflowCatalog, WorkflowCatalogError, WorkflowCatalogFunction, WorkflowCatalogIndex, WorkflowCatalogIndexFunction, WorkflowCatalogIndexVariable, WorkflowCatalogVariable } from "./types.js";

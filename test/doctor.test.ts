@@ -385,3 +385,27 @@ void test("doctor cleanup parses a positive age and confirmation flag", () => {
   assert.throws(() => parseDoctorCleanupArgs(["--older-than-days", "0"]), /positive integer/);
   assert.throws(() => parseDoctorCleanupArgs(["--older-than-days", "1.5"]), /positive integer/);
 });
+void test("doctor diagnoses extension role directories with extension provenance", async () => {
+  const paths = fixture();
+  const missing = join(paths.root, "missing-roles");
+  const empty = join(paths.root, "empty-roles");
+  const first = join(paths.root, "first-roles");
+  const second = join(paths.root, "second-roles");
+  mkdirSync(empty);
+  mkdirSync(first);
+  mkdirSync(second);
+  writeFileSync(join(first, "same.md"), "First role");
+  writeFileSync(join(first, "unique.md"), "Unique role");
+  writeFileSync(join(second, "same.md"), "Second role");
+  writeFileSync(join(second, "broken.md"), "---\ndescription: [broken\n---\nBroken");
+  registerWorkflowExtension({ version: "1.0.0", headline: "Role package", description: "Role package for doctor", roleDirectories: [missing, empty, first, pathToFileURL(second)] });
+  const report = await doctor({ ...paths, discoverPi: async () => pi() });
+  const codes = report.diagnostics.map(({ code }) => code);
+  assert.ok(codes.includes("ROLE_DIRECTORY"));
+  assert.ok(codes.includes("ROLE_DIRECTORY_EMPTY"));
+  assert.ok(codes.includes("ROLE_DUPLICATE"));
+  assert.ok(codes.includes("ROLE_FRONTMATTER"));
+  assert.ok(report.diagnostics.every(({ message }) => !message.includes("scandir") || message.includes("Role package")));
+  assert.equal(report.roles.find(({ name, scope }) => name === "unique" && scope === "extension")?.extension?.headline, "Role package");
+  assert.equal(doctorExitCode(report), 1);
+});

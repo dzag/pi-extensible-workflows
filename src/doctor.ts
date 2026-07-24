@@ -17,20 +17,22 @@ import {
   resolveModelReference,
   parseRoleMarkdown,
   registeredWorkflowFunctions,
-  registeredWorkflowRoleDirectories,
+  registeredWorkflowRoleDirectoryRegistrations,
   workflowRoleDirectories,
   workflowProjectSettingsPath,
   workflowSettingsPath,
   type AgentResourceExclusions,
   type AgentResourcePolicy,
+  type WorkflowExtensionMetadata,
   type WorkflowFunction,
+  type WorkflowRoleDirectoryRegistration,
   type WorkflowSettings,
 } from "./index.js";
 import type { AgentDefinition } from "./agent-execution.js";
 
 export type DoctorSeverity = "error" | "warning";
 export interface DoctorDiagnostic { severity: DoctorSeverity; code: string; message: string; source?: string; hint?: string }
-export interface DoctorRole { name: string; path: string; scope: "extension" | "global" | "project"; active: boolean; overrides?: string; overriddenBy?: string }
+export interface DoctorRole { name: string; path: string; scope: "extension" | "global" | "project"; active: boolean; overrides?: string; overriddenBy?: string; extension?: WorkflowExtensionMetadata }
 export interface DoctorFunction { name: string; description: string; valid: boolean }
 export interface DoctorTrust { required: boolean; trusted: boolean; source: string }
 export interface DoctorPiState {
@@ -152,7 +154,27 @@ function roleFilesFrom(dirs: readonly string[]): string[] {
   const paths = dirs.flatMap((dir) => roleFiles(dir));
   return [...new Map(paths.map((path) => [basename(path, ".md"), path])).values()].sort();
 }
-
+type ExtensionRoleFile = { name: string; path: string; directory: string; extension: WorkflowExtensionMetadata };
+type ExtensionRoleScan = { files: ExtensionRoleFile[]; empty: WorkflowRoleDirectoryRegistration[]; errors: Array<{ registration: WorkflowRoleDirectoryRegistration; error: unknown }> };
+function extensionLabel(extension: WorkflowExtensionMetadata): string { return `Extension "${extension.headline}" (${extension.version})`; }
+function scanExtensionRoleFiles(registrations: readonly WorkflowRoleDirectoryRegistration[]): ExtensionRoleScan {
+  const files: ExtensionRoleFile[] = [];
+  const empty: WorkflowRoleDirectoryRegistration[] = [];
+  const errors: Array<{ registration: WorkflowRoleDirectoryRegistration; error: unknown }> = [];
+  for (const registration of registrations) {
+    try {
+      const entries = readdirSync(registration.path, { withFileTypes: true });
+      const roleFiles = entries.filter((entry) => entry.isFile() && extname(entry.name) === ".md");
+      if (!roleFiles.length) empty.push(registration);
+      for (const entry of roleFiles) files.push({ name: basename(entry.name, ".md"), path: join(registration.path, entry.name), directory: registration.path, extension: registration.extension });
+    } catch (error) { errors.push({ registration, error }); }
+  }
+  files.sort((left, right) => left.name.localeCompare(right.name) || left.path.localeCompare(right.path));
+  return { files, empty, errors };
+}
+function roleProvenance(source?: { directory: string; extension: WorkflowExtensionMetadata }): string {
+  return source ? `${extensionLabel(source.extension)} role directory "${source.directory}"` : "Role";
+}
 function diagnostic(severity: DoctorSeverity, code: string, message: string, source?: string, hint?: string): DoctorDiagnostic {
   return { severity, code, message, ...(source ? { source } : {}), ...(hint ? { hint } : {}) };
 }
@@ -170,11 +192,12 @@ function validateModel(value: string, known: ReadonlySet<string>, available: Rea
   }
 }
 
-function inspectRole(path: string, activeTools: ReadonlySet<string>, knownModels: ReadonlySet<string>, availableModels: ReadonlySet<string>, diagnostics: DoctorDiagnostic[], aliases: Readonly<Record<string, string>>, settingsPath: string): AgentDefinition | undefined {
+function inspectRole(path: string, activeTools: ReadonlySet<string>, knownModels: ReadonlySet<string>, availableModels: ReadonlySet<string>, diagnostics: DoctorDiagnostic[], aliases: Readonly<Record<string, string>>, settingsPath: string, source?: { directory: string; extension: WorkflowExtensionMetadata }): AgentDefinition | undefined {
   let definition: AgentDefinition;
   try { definition = parseRoleMarkdown(readFileSync(path, "utf8"), true, path); }
   catch (error) {
-    diagnostics.push(diagnostic("error", "ROLE_FRONTMATTER", (error as Error).message, path, "Fix the role YAML frontmatter."));
+    const message = error instanceof Error ? error.message : String(error);
+    diagnostics.push(diagnostic("error", "ROLE_FRONTMATTER", source ? `${roleProvenance(source)} contains invalid role at "${path}": ${message}` : message, path, "Fix the role YAML frontmatter."));
     return undefined;
   }
   const body = definition.prompt ?? "";
@@ -229,13 +252,26 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
   const aliases = settings.modelAliases ?? {};
   const roles: DoctorRole[] = [];
   const definitions = new Map<string, AgentDefinition>();
+  const extensionScan = scanExtensionRoleFiles(registeredWorkflowRoleDirectoryRegistrations());
+  for (const { registration, error } of extensionScan.errors) {
+    const message = error instanceof Error ? error.message : String(error);
+    diagnostics.push(diagnostic("error", "ROLE_DIRECTORY", `${extensionLabel(registration.extension)} role directory "${registration.path}" could not be scanned: ${message}`, registration.path, "Fix or remove the registered role directory."));
+  }
+  for (const registration of extensionScan.empty) diagnostics.push(diagnostic("warning", "ROLE_DIRECTORY_EMPTY", `${extensionLabel(registration.extension)} role directory "${registration.path}" contains no .md role files`, registration.path, "Add packaged role files or remove the directory registration."));
+  const extensionFilesByName = new Map<string, ExtensionRoleFile[]>();
+  for (const file of extensionScan.files) extensionFilesByName.set(file.name, [...(extensionFilesByName.get(file.name) ?? []), file]);
+  const duplicateExtensionNames = new Set<string>();
+  for (const [name, matches] of extensionFilesByName) if (matches.length > 1) {
+    duplicateExtensionNames.add(name);
+    diagnostics.push(diagnostic("error", "ROLE_DUPLICATE", `Duplicate extension role "${name}": ${matches.map(({ path, directory, extension }) => `${extensionLabel(extension)} role directory "${directory}" (${path})`).join("; ")}`, matches[0]?.path, "Keep one extension role with this name; global and project roles may override packaged defaults."));
+  }
   const extensionPaths = new Map<string, string>();
-  for (const path of roleFilesFrom(registeredWorkflowRoleDirectories())) {
-    const name = basename(path, ".md");
-    roles.push({ name, path, scope: "extension", active: true });
-    extensionPaths.set(name, path);
-    const definition = inspectRole(path, activeTools, knownModels, availableModels, diagnostics, aliases, settingsPath);
-    if (definition) definitions.set(name, definition);
+  for (const file of extensionScan.files) {
+    roles.push({ name: file.name, path: file.path, scope: "extension", active: true, extension: file.extension });
+    const definition = inspectRole(file.path, activeTools, knownModels, availableModels, diagnostics, aliases, settingsPath, { directory: file.directory, extension: file.extension });
+    if (duplicateExtensionNames.has(file.name)) continue;
+    extensionPaths.set(file.name, file.path);
+    if (definition) definitions.set(file.name, definition);
   }
   const globalPaths = new Map<string, string>();
   const globalRoleDirs = workflowRoleDirectories(agentDir);

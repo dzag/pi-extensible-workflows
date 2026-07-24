@@ -8,9 +8,9 @@ import { Script } from "node:vm";
 import { Value } from "typebox/value";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { WorkflowError } from "./types.js";
-import type { AgentDefinition, AgentResourceExclusions, AgentResourcePolicy, CheckpointInput, JsonSchema, JsonValue, LaunchSnapshot, PreflightCapabilities, PreflightResult, ShellOptions, StaticWorkflowCall, StaticWorkflowExecution, StaticWorkflowScope, ValidatedWorkflowLaunch, WorkflowCallKind, WorkflowErrorCode, WorkflowMetadata, WorkflowSettings, WorkflowValidationContext, WorkflowValidationParameters } from "./types.js";
+import type { AgentDefinition, AgentResourceExclusions, AgentResourcePolicy, CheckpointInput, JsonSchema, JsonValue, LaunchSnapshot, PreflightCapabilities, PreflightResult, ShellOptions, StaticWorkflowCall, StaticWorkflowExecution, StaticWorkflowScope, ValidatedWorkflowLaunch, WorkflowCallKind, WorkflowErrorCode, WorkflowExtensionMetadata, WorkflowMetadata, WorkflowRoleDirectoryRegistration, WorkflowSettings, WorkflowValidationContext, WorkflowValidationParameters } from "./types.js";
 import type { WorkflowRegistryApi } from "./registry.js";
-import { registeredWorkflowRoleDirectories } from "./registry.js";
+import { registeredWorkflowRoleDirectoryRegistrations } from "./registry.js";
 import { deepFreeze, errorText, fail, jsonValue, mergeAgentResourceExclusions, modelAliasName, modelCapability, object, parseThinking, positiveInteger, resolveModelReference, unknownModel, validateModelAliases } from "./utils.js";
 import { WORKFLOW_CALL_KINDS } from "./types.js";
 
@@ -136,23 +136,51 @@ function projectRoleDirectories(root: string): readonly string[] {
   return [join(root, ROLE_DIRECTORY, "roles")];
 }
 
-function readAgentDefinitions(dir: string): Record<string, AgentDefinition> {
-  try {
-    return Object.fromEntries(readdirSync(dir, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && extname(entry.name) === ".md")
-      .map((entry) => { const path = join(dir, entry.name); return [basename(entry.name, ".md"), parseRoleMarkdown(readFileSync(path, "utf8"), true, path)]; }));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw error;
+type RoleDirectorySource = { path: string; extension?: WorkflowExtensionMetadata };
+export type WorkflowRoleDirectoryInput = string | WorkflowRoleDirectoryRegistration;
+type RoleFile = { name: string; path: string; source: RoleDirectorySource };
+function roleDirectorySources(dirs: readonly WorkflowRoleDirectoryInput[]): RoleDirectorySource[] {
+  const seen = new Set<string>();
+  return dirs.flatMap((value) => {
+    const source = typeof value === "string" ? { path: value } : { path: value.path, extension: value.extension };
+    if (seen.has(source.path)) return [];
+    seen.add(source.path);
+    return [source];
+  });
+}
+function roleDirectoryLabel(source: RoleDirectorySource): string {
+  return source.extension ? `Extension "${source.extension.headline}" (${source.extension.version})` : "Registered workflow extension";
+}
+function scanRoleFiles(dirs: readonly WorkflowRoleDirectoryInput[], extension: boolean): RoleFile[] {
+  const files: RoleFile[] = [];
+  for (const source of roleDirectorySources(dirs)) {
+    let entries: import("node:fs").Dirent[];
+    try { entries = readdirSync(source.path, { withFileTypes: true }); }
+    catch (error) {
+      if (!extension && (error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      fail("INVALID_METADATA", `${roleDirectoryLabel(source)} role directory "${source.path}" could not be scanned: ${errorText(error)}`);
+    }
+    for (const entry of entries) if (entry.isFile() && extname(entry.name) === ".md") files.push({ name: basename(entry.name, ".md"), path: join(source.path, entry.name), source });
   }
+  return files.sort((left, right) => left.name.localeCompare(right.name) || left.path.localeCompare(right.path));
 }
-
-function readRoleDefinitions(dirs: readonly string[]): Record<string, AgentDefinition> {
-  return Object.fromEntries(dirs.flatMap((dir) => Object.entries(readAgentDefinitions(dir))));
+function readRoleDefinitions(dirs: readonly WorkflowRoleDirectoryInput[], extension = false): Record<string, AgentDefinition> {
+  const files = scanRoleFiles(dirs, extension);
+  if (extension) {
+    const byName = new Map<string, RoleFile[]>();
+    for (const file of files) byName.set(file.name, [...(byName.get(file.name) ?? []), file]);
+    for (const [name, matches] of byName) if (matches.length > 1) fail("INVALID_METADATA", `Duplicate extension role "${name}": ${matches.map(({ path, source }) => `${roleDirectoryLabel(source)} role directory "${source.path}" (${path})`).join("; ")}`);
+  }
+  return Object.fromEntries(files.map(({ name, path, source }) => {
+    try { return [name, parseRoleMarkdown(readFileSync(path, "utf8"), true, path)]; }
+    catch (error) {
+      if (extension) fail("INVALID_METADATA", `${roleDirectoryLabel(source)} role directory "${source.path}" contains invalid role "${name}" at "${path}": ${errorText(error)}`);
+      throw error;
+    }
+  }));
 }
-
-export function loadAgentDefinitions(cwd: string, agentDir = getAgentDir(), projectTrusted = true, extensionRoleDirectories: readonly string[] = registeredWorkflowRoleDirectories()): Readonly<Record<string, AgentDefinition>> {
-  return deepFreeze({ ...readRoleDefinitions(extensionRoleDirectories), ...readRoleDefinitions(workflowRoleDirectories(agentDir)), ...(projectTrusted ? readRoleDefinitions(projectRoleDirectories(join(cwd, ".pi"))) : {}) });
+export function loadAgentDefinitions(cwd: string, agentDir = getAgentDir(), projectTrusted = true, extensionRoleDirectories: readonly WorkflowRoleDirectoryInput[] = registeredWorkflowRoleDirectoryRegistrations()): Readonly<Record<string, AgentDefinition>> {
+  return deepFreeze({ ...readRoleDefinitions(extensionRoleDirectories, true), ...readRoleDefinitions(workflowRoleDirectories(agentDir)), ...(projectTrusted ? readRoleDefinitions(projectRoleDirectories(join(cwd, ".pi"))) : {}) });
 }
 function validateRolePolicies(definitions: Readonly<Record<string, AgentDefinition>>, roles: readonly string[], availableModels: ReadonlySet<string>, rootTools: ReadonlySet<string>, aliases: Readonly<Record<string, string>> = {}, knownModels = availableModels, settingsPath?: string): void {
   for (const role of roles) {
@@ -591,7 +619,7 @@ export function validateWorkflowLaunchWithRegistry(params: WorkflowValidationPar
   const script = functionName !== undefined && fn ? functionLaunchScript(functionName) : typeof params.script === "string" && params.script.trim() ? params.script : "";
   if (!script) fail("INVALID_SYNTAX", "Provide script or registered function");
   const metadata = validateWorkflowMetadata({ name: workflowName, ...(typeof params.description === "string" ? { description: params.description } : fn?.description ? { description: fn.description } : {}) });
-  const globalAgentDefinitions = loadAgentDefinitions(context.cwd, context.agentDir, false, registry && typeof registry.roleDirectories === "function" ? registry.roleDirectories() : undefined);
+  const globalAgentDefinitions = loadAgentDefinitions(context.cwd, context.agentDir, false, registry && typeof registry.roleDirectoryRegistrations === "function" ? registry.roleDirectoryRegistrations() : registry && typeof registry.roleDirectories === "function" ? registry.roleDirectories() : undefined);
   const projectAgentDefinitions = context.projectTrusted ? readRoleDefinitions(projectRoleDirectories(join(context.cwd, ".pi"))) : {};
   const agentDefinitions = deepFreeze({ ...globalAgentDefinitions, ...projectAgentDefinitions });
   const aliases = context.modelAliases ?? {};
