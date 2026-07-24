@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 import test from "node:test";
 import type { AgentSessionEvent, InlineExtension, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDiagnostics, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resolveAgentResourcePolicy, resolveModelReference, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
+import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDiagnostics, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resolveAgentResourcePolicy, resolveModelReference, resolveWorkflowSettings, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
 import type { NativeSession, SessionInput } from "../src/agent-execution.js";
 import { listRunIds } from "../src/persistence.js";
 
@@ -2209,7 +2209,7 @@ void test("strict settings use defaults and reject unknown or unsafe values", ()
   writeFileSync(path, JSON.stringify({ surprise: true }));
   assert.throws(() => loadSettings(path), /Unknown workflow setting/);
 });
-void test("merges trusted agent resource exclusions and ignores untrusted project selectors", () => {
+void test("replaces trusted agent resource exclusions and ignores untrusted project selectors", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-resources-"));
   const home = join(root, "home");
   const cwd = join(root, "project");
@@ -2224,7 +2224,7 @@ void test("merges trusted agent resource exclusions and ignores untrusted projec
   process.env.HOME = home;
   try {
     const trusted = resolveAgentResourcePolicy(cwd, true, globalPath);
-    assert.deepEqual(trusted.effective.skills, ["learning-opportunities", "project-only"]);
+    assert.deepEqual(trusted.effective.skills, ["project-only", "learning-opportunities"]);
     assert.deepEqual(trusted.effective.extensions, [extension, join(cwd, ".pi", "project-only.ts")]);
     assert.equal(loadSettings(globalPath).modelAliases?.reviewer, "openai/gpt");
     const untrusted = resolveAgentResourcePolicy(cwd, false, globalPath);
@@ -3676,4 +3676,58 @@ void test("workflow_resume persists exact proposals and approval or rejection co
   assert.equal(events.filter(({ channel }) => channel === WORKFLOW_RUN_RESUMED_EVENT).length, 1);
   assert.deepEqual(events.filter(({ channel }) => channel === WORKFLOW_BUDGET_EVENT).map(({ data }) => (data as { type: string }).type), ["adjustment_requested", "adjustment_rejected", "adjustment_requested", "adjustment_approved", "soft_crossed"]);
   assert.ok(events.some(({ channel, data }) => channel === WORKFLOW_RUN_STATE_CHANGED_EVENT && (data as { state: string }).state === "running"));
+});
+
+void test("resolves trusted project settings with replacement and inheritance semantics", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-project-settings-"));
+  const home = join(root, "home");
+  const cwd = join(root, "project");
+  const globalPath = join(home, "agent", "pi-extensible-workflows", "settings.json");
+  const projectPath = join(cwd, ".pi", "pi-extensible-workflows", "settings.json");
+  mkdirSync(join(home, "agent", "pi-extensible-workflows"), { recursive: true });
+  mkdirSync(join(cwd, ".pi", "pi-extensible-workflows"), { recursive: true });
+  writeFileSync(globalPath, JSON.stringify({ concurrency: 6, modelAliases: { reviewer: "openai/gpt" }, disabledAgentResources: { skills: ["global"], extensions: ["/global.ts"] } }));
+  writeFileSync(projectPath, JSON.stringify({ concurrency: 2, modelAliases: {}, disabledAgentResources: { skills: [], extensions: [] } }));
+  const trusted = resolveWorkflowSettings(cwd, true, globalPath);
+  assert.equal(trusted.effective.concurrency, 2);
+  assert.deepEqual(trusted.effective.modelAliases, {});
+  assert.deepEqual(trusted.effective.disabledAgentResources, { skills: [], extensions: [] });
+  assert.equal(trusted.sources.modelAliases, projectPath);
+  writeFileSync(projectPath, JSON.stringify({ concurrency: 3 }));
+  const partial = resolveWorkflowSettings(cwd, true, globalPath);
+  assert.equal(partial.effective.concurrency, 3);
+  assert.deepEqual(partial.effective.modelAliases, { reviewer: "openai/gpt" });
+  assert.deepEqual(partial.effective.disabledAgentResources, { skills: ["global"], extensions: ["/global.ts"] });
+  writeFileSync(projectPath, "{ malformed");
+  assert.doesNotThrow(() => resolveWorkflowSettings(cwd, false, globalPath));
+  assert.throws(() => resolveWorkflowSettings(cwd, true, globalPath), /Invalid workflow settings JSON/);
+});
+void test("workflow_catalog reports effective project settings without registered functions", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-project-catalog-"));
+  const cwd = join(root, "project");
+  const agentDir = join(root, "agent");
+  const globalPath = join(agentDir, "pi-extensible-workflows", "settings.json");
+  const projectPath = join(cwd, ".pi", "pi-extensible-workflows", "settings.json");
+  mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
+  mkdirSync(join(cwd, ".pi", "pi-extensible-workflows"), { recursive: true });
+  writeFileSync(globalPath, JSON.stringify({ concurrency: 6 }));
+  writeFileSync(projectPath, JSON.stringify({ concurrency: 2 }));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const tools: Array<{ name: string; execute?: (...args: never[]) => Promise<{ content: Array<{ text: string }> }> }> = [];
+  let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let shutdown: (() => Promise<void>) | undefined;
+  try {
+    workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getActiveTools: () => ["workflow"], on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; } } as never, root);
+    assert.ok(start && shutdown);
+    await start({}, { cwd, isProjectTrusted: () => true, sessionManager: { getSessionId: () => "catalog" } });
+    const catalogTool = tools.find(({ name }) => name === "workflow_catalog");
+    assert.ok(catalogTool?.execute);
+    const catalog = JSON.parse((await catalogTool.execute()).content[0]?.text ?? "null") as { settings: { concurrency: number; sources: { concurrency: string } } };
+    assert.equal(catalog.settings.concurrency, 2);
+    assert.equal(catalog.settings.sources.concurrency, projectPath);
+  } finally {
+    await shutdown?.();
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+  }
 });

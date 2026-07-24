@@ -14,6 +14,7 @@ import {
   DEFAULT_SETTINGS,
   loadSettings,
   resolveAgentResourcePolicy,
+  resolveWorkflowSettings,
   resolveModelReference,
   parseRoleMarkdown,
   registeredWorkflowFunctions,
@@ -24,6 +25,7 @@ import {
   type AgentResourcePolicy,
   type WorkflowFunction,
   type WorkflowSettings,
+  type WorkflowSettingsSources,
 } from "./index.js";
 import type { AgentDefinition } from "./agent-execution.js";
 
@@ -47,6 +49,7 @@ export interface DoctorReport {
   agentDir: string;
   settingsPath: string;
   settings: Readonly<WorkflowSettings>;
+  settingsSources: WorkflowSettingsSources;
   trust: DoctorTrust;
   activeTools: readonly string[];
   roles: readonly DoctorRole[];
@@ -201,6 +204,8 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
   let settings = DEFAULT_SETTINGS;
   try { settings = loadSettings(settingsPath); }
   catch (error) { diagnostics.push(diagnostic("error", "SETTINGS_INVALID", (error as Error).message, settingsPath, "Fix or remove the invalid workflow settings file.")); }
+  let settingsSources: WorkflowSettingsSources = { concurrency: settingsPath, modelAliases: settingsPath, disabledAgentResources: settingsPath };
+  const projectSettingsPath = workflowProjectSettingsPath(cwd);
 
   let pi: DoctorPiState;
   try { pi = await (options.discoverPi ?? discoverPi)(cwd, agentDir); }
@@ -211,12 +216,22 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
   if (options.activeTools) pi = { ...pi, activeTools: options.activeTools.filter((tool) => tool !== "workflow" && tool !== "workflow_respond" && tool !== "workflow_catalog") };
   if (pi.trust.required && !pi.trust.trusted) diagnostics.push(diagnostic("warning", "PROJECT_UNTRUSTED", "Pi project resources are inactive because the project is not trusted", cwd, "Open this project in Pi, choose Trust, then rerun doctor."));
   for (const error of pi.extensionErrors) diagnostics.push(diagnostic("error", "EXTENSION_LOAD", error.message, error.path, "Fix or disable the failing Pi extension."));
+  try {
+    const resolved = resolveWorkflowSettings(cwd, pi.trust.trusted, settingsPath);
+    settings = resolved.effective;
+    settingsSources = resolved.sources;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const source = message.includes(projectSettingsPath) ? projectSettingsPath : settingsPath;
+    if (!diagnostics.some(({ code, source: itemSource }) => code === "SETTINGS_INVALID" && itemSource === source)) diagnostics.push(diagnostic("error", "SETTINGS_INVALID", message, source, "Fix or remove the invalid workflow settings file."));
+  }
   let resourcePolicy: AgentResourcePolicy;
   try {
     resourcePolicy = matchResourcePolicy(resolveAgentResourcePolicy(cwd, pi.trust.trusted, settingsPath), pi);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (!diagnostics.some(({ code, source }) => code === "SETTINGS_INVALID" && source === settingsPath)) diagnostics.push(diagnostic("error", "SETTINGS_INVALID", message, message.includes(".json") ? message.match(/(?:settings: )?([^ )]+\.json)/)?.[1] : undefined, "Fix or remove the invalid workflow settings file."));
+    const source = message.includes(projectSettingsPath) ? projectSettingsPath : settingsPath;
+    if (!diagnostics.some(({ code, source: itemSource }) => code === "SETTINGS_INVALID" && itemSource === source)) diagnostics.push(diagnostic("error", "SETTINGS_INVALID", message, source, "Fix or remove the invalid workflow settings file."));
     resourcePolicy = emptyResourcePolicy(settingsPath, cwd, pi.trust.trusted);
   }
   for (const skill of resourcePolicy.unmatchedSkills) diagnostics.push(diagnostic("warning", "AGENT_RESOURCE_UNMATCHED", `Disabled skill selector currently matches no discovered skill: ${skill}`, `${resourcePolicySource(resourcePolicy, "skills", skill)}.disabledAgentResources.skills`));
@@ -259,7 +274,7 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
   const severityOrder: Record<DoctorSeverity, number> = { error: 0, warning: 1 };
   diagnostics.sort((left, right) => severityOrder[left.severity] - severityOrder[right.severity] || (left.source ?? "").localeCompare(right.source ?? "") || left.code.localeCompare(right.code) || left.message.localeCompare(right.message));
   roles.sort((left, right) => left.name.localeCompare(right.name) || left.scope.localeCompare(right.scope));
-  return { cwd, agentDir, settingsPath, settings, trust: pi.trust, activeTools: [...activeTools].sort(), roles, functions, resourcePolicy, diagnostics };
+  return { cwd, agentDir, settingsPath, settings, settingsSources, trust: pi.trust, activeTools: [...activeTools].sort(), roles, functions, resourcePolicy, diagnostics };
 }
 
 function count(report: DoctorReport, severity: DoctorSeverity): number { return report.diagnostics.filter((item) => item.severity === severity).length; }
@@ -273,7 +288,9 @@ export function formatDoctorReport(report: DoctorReport): string {
     "## Environment",
     `- CWD: \`${report.cwd}\``,
     `- Agent dir: \`${report.agentDir}\``,
-    `- Workflow settings: \`${report.settingsPath}\``,
+    `- Global workflow settings: \`${report.settingsPath}\``,
+    `- Project workflow settings: \`${report.resourcePolicy.projectSettingsPath}\` (${report.resourcePolicy.projectTrusted ? "trusted" : "ignored: project untrusted"})`,
+    `- Effective setting sources: concurrency=\`${report.settingsSources.concurrency}\`, modelAliases=\`${report.settingsSources.modelAliases}\`, disabledAgentResources=\`${report.settingsSources.disabledAgentResources}\``,
     `- Limits: concurrency=${String(report.settings.concurrency)}`,
     "",
     "## Trust/resources",

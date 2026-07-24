@@ -496,6 +496,13 @@ export class FairAgentScheduler {
     this.#runs.set(runId, { limit, ...(beforeLaunch ? { beforeLaunch } : {}), logical: 0, active: 0, queue: [] });
     this.#runOrder.push(runId);
   }
+  updateRunLimit(runId: string, limit: number): void {
+    const run = this.#runs.get(runId);
+    if (!run) throw new WorkflowError("INTERNAL_ERROR", `Unknown scheduler run: ${runId}`);
+    if (!Number.isInteger(limit) || limit < 1 || limit > this.sessionLimit) throw new WorkflowError("INVALID_SETTINGS", "Invalid run concurrency");
+    run.limit = limit;
+    this.#dispatch();
+  }
 
   spawn(runId: string, prompt: string, options: ScheduledAgentOptions, parentId?: string): { id: string; result: Promise<ScheduledAgentResult> } {
     const run = this.#runs.get(runId);

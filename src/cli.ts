@@ -8,7 +8,7 @@ import { ProjectTrustStore, SessionManager, SettingsManager, createAgentSessionF
 import { Value } from "typebox/value";
 import { doctor, doctorExitCode, formatDoctorReport, type DoctorOptions } from "./doctor.js";
 import { doctorCleanup, doctorCleanupExitCode, formatDoctorCleanupReport, type DoctorCleanupOptions } from "./doctor-cleanup.js";
-import workflowExtension, { formatWorkflowProgress, truncateWorkflowProgress, workflowCatalog, type JsonSchema, type JsonValue, type WorkflowProgressStyles } from "./index.js";
+import workflowExtension, { formatWorkflowProgress, truncateWorkflowProgress, workflowCatalog, workflowSettingsPath, type JsonSchema, type JsonValue, type WorkflowProgressStyles } from "./index.js";
 import { runSessionInspector, transcriptFileLines } from "./session-inspector.js";
 import type { PersistedRun } from "./persistence.js";
 import type { WorkflowCatalogFunction } from "./index.js";
@@ -254,7 +254,7 @@ async function createWorkflowRuntime(options: WorkflowIo, shutdownHandlers: Shut
   workflowExtension(headlessPi as never, homedir(), undefined, undefined, agentDir);
   const workflowTool = tools.find((tool) => object(tool) && tool.name === "workflow") as HeadlessWorkflowTool | undefined;
   if (!workflowTool) throw new Error("The workflow runtime could not be initialized");
-  return { catalog: workflowCatalog(), services, workflowTool, shutdownHandlers };
+  return { catalog: workflowCatalog({ cwd, projectTrusted: settingsManager.isProjectTrusted(), globalSettingsPath: workflowSettingsPath(agentDir) }), services, workflowTool, shutdownHandlers };
 }
 
 function availableModelInfo(services: WorkflowRuntime["services"], available = false): { provider: string; id: string }[] {
