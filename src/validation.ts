@@ -148,8 +148,8 @@ function roleDirectorySources(dirs: readonly WorkflowRoleDirectoryInput[]): Role
     return [source];
   });
 }
-function roleDirectoryLabel(source: RoleDirectorySource): string {
-  return source.extension ? `Extension "${source.extension.headline}" (${source.extension.version})` : "Registered workflow extension";
+function roleDirectoryLabel(source: RoleDirectorySource, extension = true): string {
+  return source.extension ? `Extension "${source.extension.headline}" (${source.extension.version})` : extension ? "Registered workflow extension" : "Standard workflow";
 }
 function scanRoleFiles(dirs: readonly WorkflowRoleDirectoryInput[], extension: boolean): RoleFile[] {
   const files: RoleFile[] = [];
@@ -158,7 +158,7 @@ function scanRoleFiles(dirs: readonly WorkflowRoleDirectoryInput[], extension: b
     try { entries = readdirSync(source.path, { withFileTypes: true }); }
     catch (error) {
       if (!extension && (error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      fail("INVALID_METADATA", `${roleDirectoryLabel(source)} role directory "${source.path}" could not be scanned: ${errorText(error)}`);
+      fail("INVALID_METADATA", `${roleDirectoryLabel(source, extension)} role directory "${source.path}" could not be scanned: ${errorText(error)}`);
     }
     for (const entry of entries) if (entry.isFile() && extname(entry.name) === ".md") files.push({ name: basename(entry.name, ".md"), path: join(source.path, entry.name), source });
   }

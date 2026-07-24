@@ -408,4 +408,6 @@ void test("doctor diagnoses extension role directories with extension provenance
   assert.ok(report.diagnostics.every(({ message }) => !message.includes("scandir") || message.includes("Role package")));
   assert.equal(report.roles.find(({ name, scope }) => name === "unique" && scope === "extension")?.extension?.headline, "Role package");
   assert.equal(doctorExitCode(report), 1);
+  const formatted = formatDoctorReport({ ...report, diagnostics: [] });
+  assert.ok(formatted.includes(`Extension "Role package" (1.0.0) role directory "${first}"`));
 });

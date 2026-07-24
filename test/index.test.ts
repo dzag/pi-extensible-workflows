@@ -3028,6 +3028,15 @@ void test("loads extension role directories as defaults beneath standard roles",
   assert.throws(() => { registry.register({ version: "1.0.0", headline: "Invalid", description: "Invalid", roleDirectories: ["relative/roles"] }); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   assert.throws(() => { registry.register({ version: "1.0.0", headline: "Invalid", description: "Invalid", roleDirectories: [new URL("https://example.com/roles")] }); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
 });
+void test("labels standard role directory scan failures as standard roles", () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-standard-role-scan-"));
+  const cwd = join(home, "project");
+  const agentDir = join(home, "agent");
+  const roleDirectory = join(agentDir, "pi-extensible-workflows", "roles");
+  mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
+  writeFileSync(roleDirectory, "not a directory");
+  assert.throws(() => loadAgentDefinitions(cwd, agentDir, true, []), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA" && error.message.includes("Standard workflow role directory") && !error.message.includes("extension"));
+});
 void test("registers setup hooks by priority and stable name", () => {
   const registry = new WorkflowRegistry();
   registry.register({ version: "1.0.0", headline: "Hooks", description: "Hooks", agentSetupHooks: { z: { setup() {} }, a: { priority: 10, setup() {} }, early: { priority: 1, setup() {} } } });

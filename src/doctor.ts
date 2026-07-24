@@ -350,7 +350,7 @@ export function formatDoctorReport(report: DoctorReport): string {
     ...(report.activeTools.length ? report.activeTools.map((tool) => `- \`${tool}\``) : ["- None resolved"]),
     "",
     "## Roles",
-    ...(report.roles.length ? report.roles.map((role) => `- \`${role.name}\` (${role.scope}, ${role.active ? "active" : role.overriddenBy ? `overridden by ${role.overriddenBy}` : "inactive: project untrusted"}) - \`${role.path}\`${role.overrides ? `; overrides \`${role.overrides}\`` : ""}`) : ["- None found"]),
+    ...(report.roles.length ? report.roles.map((role) => `- \`${role.name}\` (${role.scope}, ${role.active ? "active" : role.overriddenBy ? `overridden by ${role.overriddenBy}` : "inactive: project untrusted"}) - \`${role.path}\`${role.extension ? `; ${extensionLabel(role.extension)} role directory "${dirname(role.path)}"` : ""}${role.overrides ? `; overrides \`${role.overrides}\`` : ""}`) : ["- None found"]),
     "",
     "## Reusable functions",
     ...(report.functions.length ? report.functions.map((fn) => `- [${fn.valid ? "ok" : "error"}] \`${fn.name}\` - ${fn.description}`) : ["- None registered"]),
