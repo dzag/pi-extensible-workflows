@@ -50,6 +50,7 @@ export interface AgentExecutionRoot {
   tools: ReadonlySet<string>;
   agentDefinitions?: Readonly<Record<string, AgentDefinition>>;
   agentDir?: string;
+  additionalSkillPaths?: readonly string[];
   availableModels?: ReadonlySet<string>;
   knownModels?: ReadonlySet<string>;
   modelAliases?: Readonly<Record<string, string>>;
@@ -175,7 +176,7 @@ export async function createNativeAgentSession(input: SessionInput): Promise<Nat
       noExtensions: true,
       additionalExtensionPaths: extensionPaths,
       noSkills: true,
-      additionalSkillPaths: skillPaths,
+      additionalSkillPaths: [...new Set([...skillPaths, ...(input.additionalSkillPaths ?? [])])],
       ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}),
       skillsOverride: (base) => {
         const disabledSkills = updateSkillMatches(base.skills);
@@ -185,8 +186,8 @@ export async function createNativeAgentSession(input: SessionInput): Promise<Nat
       ...systemPromptOptions,
     });
     await resourceLoader.reload();
-  } else if (input.systemPrompt !== undefined || systemPromptSource !== undefined || input.systemPromptAppend || input.extensionFactories?.length) {
-    resourceLoader = new DefaultResourceLoader({ cwd: input.cwd, agentDir, ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}), ...systemPromptOptions, ...(input.systemPromptAppend ? { appendSystemPromptOverride: (base) => [...base, input.systemPromptAppend ?? ""] } : {}) });
+  } else if (input.systemPrompt !== undefined || systemPromptSource !== undefined || input.systemPromptAppend || input.extensionFactories?.length || input.additionalSkillPaths?.length) {
+    resourceLoader = new DefaultResourceLoader({ cwd: input.cwd, agentDir, ...(input.additionalSkillPaths?.length ? { additionalSkillPaths: [...input.additionalSkillPaths] } : {}), ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}), ...systemPromptOptions, ...(input.systemPromptAppend ? { appendSystemPromptOverride: (base) => [...base, input.systemPromptAppend ?? ""] } : {}) });
     await resourceLoader.reload();
   }
   const { session } = await createAgentSession({ ...(input.options ?? {}), cwd: input.cwd, agentDir, modelRuntime, model, ...(settingsManager ? { settingsManager } : {}), ...(input.model.thinking ? { thinkingLevel: input.model.thinking } : {}), tools, ...(customTools.length ? { customTools } : {}), ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}), ...(resourceLoader ? { resourceLoader } : {}), sessionManager: manager });
@@ -234,7 +235,7 @@ async function prepareAgentSetup(root: AgentExecutionRoot, createSession: Sessio
   const baseResourcePolicy = await root.agentResourcePolicy?.();
   const roleExclusions = options.role ? root.agentDefinitions?.[options.role]?.disabledAgentResources : undefined;
   const resourcePolicy = baseResourcePolicy && roleExclusions ? { ...baseResourcePolicy, effective: mergeAgentResourceExclusions(baseResourcePolicy.effective, roleExclusions) } : baseResourcePolicy;
-  const sessionInput: SessionInput = { cwd, model: { ...resolved.model }, tools: [...resolved.tools], sessionLabel: `${options.workflowName}:${options.label}:attempt-${String(attempt)}`, ...(root.agentDir ? { agentDir: root.agentDir } : {}), ...(customTools.length ? { customTools: [...customTools] } : {}), ...(resultTool ? { resultTool } : {}), ...(resolved.systemPrompt !== undefined ? { systemPrompt: resolved.systemPrompt } : {}), systemPromptAppend: resolved.systemPromptAppend, ...(resourcePolicy ? { resourcePolicy } : {}), options: structuredClone(baselineOptions) };
+  const sessionInput: SessionInput = { cwd, model: { ...resolved.model }, tools: [...resolved.tools], sessionLabel: `${options.workflowName}:${options.label}:attempt-${String(attempt)}`, ...(root.agentDir ? { agentDir: root.agentDir } : {}), ...(root.additionalSkillPaths?.length ? { additionalSkillPaths: [...root.additionalSkillPaths] } : {}), ...(customTools.length ? { customTools: [...customTools] } : {}), ...(resultTool ? { resultTool } : {}), ...(resolved.systemPrompt !== undefined ? { systemPrompt: resolved.systemPrompt } : {}), systemPromptAppend: resolved.systemPromptAppend, ...(resourcePolicy ? { resourcePolicy } : {}), options: structuredClone(baselineOptions) };
   const setup: AgentSetup = { prompt: task, options: sessionInput.options ?? {}, sessionInput, createSession };
   const base = fallbackSetupContext(root, options, setupSignal);
   const context = Object.freeze({ run: base.run, identity: base.identity, attempt, signal: setupSignal });

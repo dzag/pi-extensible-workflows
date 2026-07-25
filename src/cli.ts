@@ -14,7 +14,7 @@ import { runSessionInspector, transcriptFileLines, type InspectMode } from "./se
 import type { PersistedRun } from "./persistence.js";
 import type { WorkflowCatalogFunction } from "./index.js";
 
-export interface CliOptions extends DoctorOptions { inspect?: (sessionId?: string, mode?: InspectMode) => Promise<void>; transcript?: (sessionFile: string) => Promise<void>; stderr?: (text: string) => void; signal?: AbortSignal; trustOverride?: boolean; isTTY?: boolean }
+export interface CliOptions extends DoctorOptions { inspect?: (sessionId?: string, mode?: InspectMode) => Promise<void>; transcript?: (sessionFile: string) => Promise<void>; stderr?: (text: string) => void; signal?: AbortSignal; trustOverride?: boolean; isTTY?: boolean; skillPaths?: readonly string[] }
 
 type CliScalar = "string" | "integer" | "number" | "boolean";
 type CliField = { name: string; option: string; schema: Record<string, unknown>; type: CliScalar | "array"; itemType?: CliScalar; required: boolean };
@@ -209,7 +209,7 @@ function stripTrustOptions(rawArgs: readonly string[]): { args: string[]; trustO
   }
   return { args, ...(trustOverride !== undefined ? { trustOverride } : {}) };
 }
-type WorkflowIo = { write: (text: string) => void; stderr: (text: string) => void; cwd?: string; agentDir?: string; trustOverride?: boolean; isTTY?: boolean; signal?: AbortSignal };
+type WorkflowIo = { write: (text: string) => void; stderr: (text: string) => void; cwd?: string; agentDir?: string; trustOverride?: boolean; isTTY?: boolean; signal?: AbortSignal; skillPaths?: readonly string[] };
 
 type HeadlessWorkflowTool = { execute: (toolCallId: string, params: Record<string, JsonValue>, signal: AbortSignal | undefined, onUpdate: ((update: unknown) => void) | undefined, context: unknown) => Promise<{ content: Array<{ type: string; text: string }>; details?: unknown }> };
 type ShutdownHandler = (event: unknown, context: unknown) => Promise<void> | void;
@@ -251,7 +251,7 @@ async function createWorkflowRuntime(options: WorkflowIo, shutdownHandlers: Shut
     cwd,
     agentDir,
     settingsManager,
-    resourceLoaderOptions: {},
+    resourceLoaderOptions: { ...(options.skillPaths?.length ? { additionalSkillPaths: [...options.skillPaths] } : {}) },
     resourceLoaderReloadOptions: { resolveProjectTrust },
   });
   const extensions = services.resourceLoader.getExtensions();
@@ -267,7 +267,7 @@ async function createWorkflowRuntime(options: WorkflowIo, shutdownHandlers: Shut
     sendMessage() {},
     events: { emit() {} },
   };
-  workflowExtension(headlessPi as never, homedir(), undefined, undefined, agentDir);
+  workflowExtension(headlessPi as never, homedir(), undefined, undefined, agentDir, options.skillPaths);
   const workflowTool = tools.find((tool) => object(tool) && tool.name === "workflow") as HeadlessWorkflowTool | undefined;
   if (!workflowTool) throw new Error("The workflow runtime could not be initialized");
   return { catalog: workflowCatalog({ cwd, projectTrusted: settingsManager.isProjectTrusted(), globalSettingsPath: workflowSettingsPath(agentDir) }), services, workflowTool, shutdownHandlers };
@@ -544,7 +544,7 @@ export async function runCli(args: readonly string[], options: CliOptions = {}, 
   }
   if (args[0] === "bundle" || args[0] === "run" || args[0] === "export") {
     try {
-      const workflowOptions: WorkflowIo = { write, stderr, ...(options.cwd !== undefined ? { cwd: options.cwd } : {}), ...(options.agentDir !== undefined ? { agentDir: options.agentDir } : {}), ...(options.signal ? { signal: options.signal } : {}), ...(options.trustOverride !== undefined ? { trustOverride: options.trustOverride } : {}), ...(options.isTTY !== undefined ? { isTTY: options.isTTY } : {}) };
+      const workflowOptions: WorkflowIo = { write, stderr, ...(options.cwd !== undefined ? { cwd: options.cwd } : {}), ...(options.agentDir !== undefined ? { agentDir: options.agentDir } : {}), ...(options.signal ? { signal: options.signal } : {}), ...(options.trustOverride !== undefined ? { trustOverride: options.trustOverride } : {}), ...(options.isTTY !== undefined ? { isTTY: options.isTTY } : {}), ...(options.skillPaths?.length ? { skillPaths: [...options.skillPaths] } : {}) };
       if (args[0] === "bundle") return await bundleWorkflowCli(args.slice(1), workflowOptions);
       return args[0] === "run" ? await runWorkflowCli(args.slice(1), workflowOptions) : await exportWorkflowCli(args.slice(1), workflowOptions);
     } catch (error) { stderr(`Error: ${error instanceof Error ? error.message : String(error)}\n`); return 1; }

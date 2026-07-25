@@ -120,6 +120,7 @@ export interface SessionInput {
   systemPrompt?: string;
   systemPromptAppend?: string;
   extensionFactories?: InlineExtension[];
+  additionalSkillPaths?: readonly string[];
   resourcePolicy?: AgentResourcePolicy;
   options?: AgentOptions;
 }

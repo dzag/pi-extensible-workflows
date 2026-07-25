@@ -944,3 +944,19 @@ void test("applies ordered minimatch resource exclusions and records concrete ma
   assert.deepEqual(resourcePolicy.unmatchedExtensions, []);
   session.dispose();
 });
+void test("selected skill paths load in native Pi sessions", async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-bundle-skill-runtime-"));
+  const agentDir = join(rootDir, "agent");
+  const cwd = join(rootDir, "project");
+  const skillDir = join(rootDir, "bundle-skill");
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(skillDir, { recursive: true });
+  writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: {} }));
+  writeFileSync(join(agentDir, "auth.json"), "{}");
+  writeFileSync(join(skillDir, "SKILL.md"), "---\nname: bundle-skill\ndescription: Selected bundle skill\n---\nUse this selected bundle skill.");
+  const session = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "bundle-skill", additionalSkillPaths: [skillDir] });
+  const loaded = (session as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> } } }).resourceLoader;
+  assert.ok(loaded.getSkills().skills.some(({ name }) => name === "bundle-skill"));
+  session.dispose();
+});
