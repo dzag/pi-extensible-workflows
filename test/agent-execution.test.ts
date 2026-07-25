@@ -327,6 +327,37 @@ void test("continues terminal provider errors in the same native session when re
   assert.equal(prompts[1], "The provider error was transient. Continue the task from your current state.");
   assert.match(prompts[2] ?? "", /Submit the final result/);
 });
+void test("keeps an accepted structured result when same-session continuation aborts its prompt", async () => {
+  const messages: Array<{ role: string; content: unknown; stopReason?: string; errorMessage?: string; usage?: typeof usage }> = [terminalAssistant("TRANSIENT_PROVIDER_ERROR")];
+  let prompts = 0;
+  let sessions = 0;
+  let disposals = 0;
+  const executor = new WorkflowAgentExecutor(root, async ({ resultTool }) => {
+    sessions += 1;
+    assert.ok(resultTool);
+    return {
+      sessionId: "same-session-abort", sessionFile: "/sessions/same-session-abort.jsonl", messages, getSessionStats: sessionStats,
+      async prompt(prompt) {
+        prompts += 1;
+        if (prompt === "The provider error was transient. Continue the task from your current state.") {
+          await resultTool.execute("id", { answer: 7 }, new AbortController().signal, () => {}, {} as never);
+          messages[0] = assistant("accepted");
+          throw new Error("aborted after workflow_result");
+        }
+      },
+      async abort() {},
+      dispose() { disposals += 1; },
+    };
+  });
+  const result = await executor.execute("structured", {
+    label: "schema", workflowName: "flow", schema: { type: "object", properties: { answer: { type: "number" } }, required: ["answer"], additionalProperties: false },
+    providerErrorRecovery: async () => "retry",
+  });
+  assert.deepEqual(result.value, { answer: 7 });
+  assert.equal(sessions, 1);
+  assert.equal(prompts, 2);
+  assert.equal(disposals, 1);
+});
 
 void test("retries in fresh persisted sessions and reports terminal attempt history", async () => {
   let created = 0;

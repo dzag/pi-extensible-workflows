@@ -344,7 +344,7 @@ export class WorkflowAgentExecutor {
         await options.onAttempt?.({ attempt, sessionId: session.sessionId, sessionFile: requiredFile(session.sessionFile), ...(includeAttemptSetup ? { setup: setupSummary } : {}) });
         const activeSession = session;
         const sessionModel = setup.sessionInput.model;
-        const recoverTerminal = () => recoverTerminalProviderError(activeSession, sessionModel, options.label, options.providerErrorRecovery, () => promptWithProviderPause(activeSession, providerContinuationPrompt, remaining(options.timeoutMs, started), executionSignal, this.root.providerPause));
+        const recoverTerminal = () => recoverTerminalProviderError(activeSession, sessionModel, options.label, options.providerErrorRecovery, async () => { try { await promptWithProviderPause(activeSession, providerContinuationPrompt, remaining(options.timeoutMs, started), executionSignal, this.root.providerPause); } catch (error) { if (!hasSchemaResult()) throw error; } });
         unsubscribe = activeSession.subscribe?.((event) => {
           if (event.type === "agent_start" && session?.systemPrompt !== undefined) {
             if (this.root.runStore) {
