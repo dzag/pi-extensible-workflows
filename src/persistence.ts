@@ -282,8 +282,11 @@ export class RunStore {
     const run = await json<PersistedRun>(join(this.directory, "state.json"));
     const journal = await json<Journal>(join(this.directory, "journal.json"));
     const previous = await json<RunSummary>(join(this.directory, "summary.json")).catch(() => undefined);
-    const fallbackCreatedAt = await stat(join(this.directory, "state.json")).then((value) => new Date(value.mtimeMs).toISOString());
-    return summaryFromRun(run, this.directory, journal, previous, fallbackCreatedAt, fallbackCreatedAt);
+    const [stateStat, journalStat] = await Promise.all([stat(join(this.directory, "state.json")), stat(join(this.directory, "journal.json"))]);
+    const fallbackCreatedAt = new Date(stateStat.mtimeMs).toISOString();
+    const previousUpdatedAt = previous?.updatedAt === undefined ? Number.NaN : Date.parse(previous.updatedAt);
+    const updatedAt = new Date(Math.max(stateStat.mtimeMs, journalStat.mtimeMs, Number.isNaN(previousUpdatedAt) ? 0 : previousUpdatedAt)).toISOString();
+    return summaryFromRun(run, this.directory, journal, previous, fallbackCreatedAt, updatedAt);
   }
 
   async saveState(run: PersistedRun): Promise<void> {

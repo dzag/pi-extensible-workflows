@@ -558,8 +558,11 @@ void test("loadSummary derives from authoritative state and journal when the pro
   const stale = await store.loadSummary();
   await store.updateState((current) => ({ ...current, usage: { tokens: 42, costUsd: 1, durationMs: 2, agentLaunches: 3 } }));
   await store.complete("agent/one", "done");
+  const later = new Date(Date.now() + 2000);
+  utimesSync(join(store.directory, "journal.json"), later, later);
   writeFileSync(join(store.directory, "summary.json"), `${JSON.stringify(stale)}\n`);
   const current = await store.loadSummary();
   assert.deepEqual(current.usage, { tokens: 42, costUsd: 1, durationMs: 2, agentLaunches: 3 });
   assert.deepEqual(current.replayablePaths, ["agent/one"]);
+  assert.ok(Date.parse(current.updatedAt) >= later.getTime() - 2);
 });
