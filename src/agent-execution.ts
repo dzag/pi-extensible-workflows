@@ -65,7 +65,7 @@ export interface AgentExecutionRoot {
 export interface AgentAccounting { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }
 export interface AgentToolCallProgress { id: string; name: string; state: "running" | "completed" | "failed" }
 export interface AgentActivity { kind: "reasoning" | "tool" | "text"; text: string }
-export interface AgentProgress { accounting: AgentAccounting; toolCalls: readonly AgentToolCallProgress[]; activity?: AgentActivity; persist: boolean }
+export interface AgentProgress { accounting: AgentAccounting; toolCalls: readonly AgentToolCallProgress[]; activity?: AgentActivity; lastEventAt?: number; persist: boolean }
 export interface AgentAttempt { attempt: number; sessionId: string; sessionFile: string; result?: JsonValue; error?: { code: string; message: string }; accounting: AgentAccounting; setup?: AgentSetupSummary }
 export interface AgentExecutionResult { value: JsonValue; attempts: readonly AgentAttempt[]; cwd: string }
 
@@ -329,6 +329,7 @@ export class WorkflowAgentExecutor {
       } as ToolDefinition : undefined;
       const toolCalls = new Map<string, AgentToolCallProgress>();
       let activity: AgentActivity | undefined;
+      let lastEventAt: number | undefined;
       let progress = Promise.resolve();
       let unsubscribe: (() => void) | undefined;
       let systemPromptTurn = 0;
@@ -340,7 +341,7 @@ export class WorkflowAgentExecutor {
       };
       const report = (persist: boolean) => {
         if (!session || !options.onProgress) return;
-        const update = { accounting: accounting(session.getSessionStats()), toolCalls: [...toolCalls.values()], ...(activity ? { activity } : {}), persist };
+        const update = { accounting: accounting(session.getSessionStats()), toolCalls: [...toolCalls.values()], ...(activity ? { activity } : {}), ...(lastEventAt === undefined ? {} : { lastEventAt }), persist };
         progress = progress.then(() => options.onProgress?.(update)).then(() => undefined);
       };
       try {
@@ -366,6 +367,8 @@ export class WorkflowAgentExecutor {
           if (promptFailed && !hasSchemaResult() && !recovered) throw promptError;
         };
         unsubscribe = activeSession.subscribe?.((event) => {
+          lastEventAt = Date.now();
+          let persist = false;
           if (event.type === "agent_start" && session?.systemPrompt !== undefined) {
             if (this.root.runStore) {
               systemPromptTurn += 1;
@@ -375,7 +378,11 @@ export class WorkflowAgentExecutor {
           }
           if (event.type === "message_start" && event.message.role === "assistant") {
             if (!turnStarted) { try { options.budget?.beforeTurn(); turnStarted = true; } catch (error) { budgetError ??= error instanceof WorkflowError ? error : new WorkflowError("BUDGET_EXHAUSTED", error instanceof Error ? error.message : String(error)); void session?.abort?.(); } }
-            activity = { kind: "text", text: "responding" }; report(false);
+            activity = { kind: "text", text: "responding" };
+          }
+          if (event.type === "message_update") {
+            if (["thinking_start", "thinking_delta", "thinking_end"].includes(event.assistantMessageEvent.type)) activity = { kind: "reasoning", text: "reasoning" };
+            else if (["text_start", "text_delta", "text_end", "toolcall_start", "toolcall_delta", "toolcall_end"].includes(event.assistantMessageEvent.type)) activity = { kind: "text", text: "responding" };
           }
           if (event.type === "message_end") {
             activity = undefined;
@@ -384,11 +391,13 @@ export class WorkflowAgentExecutor {
               const final = !needsMoreWork || (options.schema !== undefined && hasSchemaResult());
               if (!budgetError) { try { options.budget?.afterTurn(accounting(activeSession.getSessionStats()), final); if (!final) { const instruction = options.budget?.instruction(); if (instruction) void session?.steer?.(instruction); } } catch (error) { budgetError ??= error instanceof WorkflowError ? error : new WorkflowError("BUDGET_EXHAUSTED", error instanceof Error ? error.message : String(error)); void session?.abort?.(); } }
               turnStarted = false;
-              report(true);
+              persist = true;
             }
           }
-          if (event.type === "tool_execution_start") { toolCalls.set(event.toolCallId, { id: event.toolCallId, name: event.toolName, state: "running" }); activity = { kind: "tool", text: event.toolName }; report(false); }
+          if (event.type === "tool_execution_start") { toolCalls.set(event.toolCallId, { id: event.toolCallId, name: event.toolName, state: "running" }); activity = { kind: "tool", text: event.toolName }; }
+          if (event.type === "tool_execution_update") { activity = { kind: "tool", text: event.toolName }; }
           if (event.type === "tool_execution_end") { toolCalls.set(event.toolCallId, { id: event.toolCallId, name: event.toolName, state: event.isError ? "failed" : "completed" }); if (activity?.kind === "tool" && activity.text === event.toolName) activity = undefined; report(false); toolCalls.delete(event.toolCallId); }
+          else report(persist);
         });
         report(false);
         if (setSteer) {

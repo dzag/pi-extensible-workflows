@@ -2,6 +2,7 @@
 ## Unreleased
 
 - Added workflow-specific `SYSTEM.md` files and role-level system prompt replacement for workflow agents.
+- Added orange stalled-agent warnings after ten minutes without observable session events.
 
 ## [3.2.0] - 2026-07-25
 
