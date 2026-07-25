@@ -328,15 +328,24 @@ class CliProgress {
   }
   update(run: PersistedRun): void {
     if (this.#runId !== run.id) { this.#runId = run.id; this.onRunId(run.id); }
-    const stable = formatWorkflowProgress(run, "◇", this.#styles);
-    if (!this.#interactive) { if (stable !== this.#lastStable) { this.#lastStable = stable; this.stderr(`${stable}\n`); } return; }
     this.#run = run;
+    if (!this.#interactive) {
+      this.#timer ??= setInterval(() => { this.render(); }, 1000);
+      this.#timer.unref();
+      this.render();
+      return;
+    }
     this.#timer ??= setInterval(() => { this.render(); }, 80);
     this.#timer.unref();
     this.render();
   }
   render(): void {
     if (!this.#run) return;
+    if (!this.#interactive) {
+      const stable = formatWorkflowProgress(this.#run, "◇", this.#styles);
+      if (stable !== this.#lastStable) { this.#lastStable = stable; this.stderr(`${stable}\n`); }
+      return;
+    }
     const spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][this.#frame++ % 10] ?? "◇";
     const width = process.stderr.columns || 80;
     const text = truncateWorkflowProgress(formatWorkflowProgress(this.#run, spinner, this.#styles), width).join("\n");
