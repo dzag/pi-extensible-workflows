@@ -1,4 +1,14 @@
 # Changelog
+## [3.2.0] - 2026-07-25
+
+### Highlights
+
+- Added a phase-first workflow navigator with responsive layouts and external-editor actions for workflow scripts and completed top-level agent results.
+- Published a discoverable workflow extension template with a working role, tests, and setup documentation.
+- Rejected unsafe concurrent same-callsite `agent()` calls and obvious `Promise.all(...map(agent))` fan-out; use `parallel()` or `pipeline()` for stable identity.
+- Hardened worker temporary-path handling, workflow recovery routing, control-error rendering, and artifact navigation.
+- Updated the bundled workflow skill to make named inline parallel fan-out followed by a summarizing agent the default path.
+
 ## [3.1.0] - 2026-07-24
 
 ### Highlights
@@ -56,6 +66,7 @@
 - Runtime acceptance suite: 24 tests passing.
 - Build, lint, documentation checks, and package dry-run passing.
 
+[3.2.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v1.0.1...v2.0.0
