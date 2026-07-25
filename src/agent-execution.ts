@@ -123,7 +123,7 @@ function workflowSystemPromptPath(cwd: string, agentDir: string, projectTrusted:
 export async function createNativeAgentSession(input: SessionInput): Promise<NativeSession> {
   const agentDir = input.agentDir ?? getAgentDir();
   const systemPromptSource = workflowSystemPromptPath(input.cwd, agentDir, input.resourcePolicy?.projectTrusted ?? true);
-  const selectedSystemPrompt = input.systemPrompt ?? systemPromptSource;
+  const systemPromptOptions = input.systemPrompt !== undefined ? { systemPromptOverride: () => input.systemPrompt } : systemPromptSource !== undefined ? { systemPrompt: systemPromptSource } : {};
   const manager = input.agentDir ? SessionManager.create(input.cwd, join(agentDir, "sessions")) : SessionManager.create(input.cwd);
   manager.appendSessionInfo(input.sessionLabel);
   const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") });
@@ -164,11 +164,11 @@ export async function createNativeAgentSession(input: SessionInput): Promise<Nat
         return { ...base, skills: base.skills.filter(({ name }) => !disabledSkills.has(name)) };
       },
       ...(input.systemPromptAppend ? { appendSystemPromptOverride: (base) => [...base, input.systemPromptAppend ?? ""] } : {}),
-      ...(selectedSystemPrompt !== undefined ? { systemPrompt: selectedSystemPrompt } : {}),
+      ...systemPromptOptions,
     });
     await resourceLoader.reload();
-  } else if (selectedSystemPrompt !== undefined || input.systemPromptAppend || input.extensionFactories?.length) {
-    resourceLoader = new DefaultResourceLoader({ cwd: input.cwd, agentDir, ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}), ...(selectedSystemPrompt !== undefined ? { systemPrompt: selectedSystemPrompt } : {}), ...(input.systemPromptAppend ? { appendSystemPromptOverride: (base) => [...base, input.systemPromptAppend ?? ""] } : {}) });
+  } else if (input.systemPrompt !== undefined || systemPromptSource !== undefined || input.systemPromptAppend || input.extensionFactories?.length) {
+    resourceLoader = new DefaultResourceLoader({ cwd: input.cwd, agentDir, ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}), ...systemPromptOptions, ...(input.systemPromptAppend ? { appendSystemPromptOverride: (base) => [...base, input.systemPromptAppend ?? ""] } : {}) });
     await resourceLoader.reload();
   }
   const { session } = await createAgentSession({ ...(input.options ?? {}), cwd: input.cwd, agentDir, modelRuntime, model, ...(settingsManager ? { settingsManager } : {}), ...(input.model.thinking ? { thinkingLevel: input.model.thinking } : {}), tools, ...(customTools.length ? { customTools } : {}), ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}), ...(resourceLoader ? { resourceLoader } : {}), sessionManager: manager });

@@ -783,6 +783,24 @@ void test("filters disabled native extensions before factories and skills before
   parent.dispose();
 });
 
+void test("treats role system prompt bodies as literal content", async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-literal-system-prompt-"));
+  const agentDir = join(rootDir, "agent");
+  const cwd = join(rootDir, "project");
+  mkdirSync(join(agentDir, "extensions"), { recursive: true });
+  mkdirSync(cwd, { recursive: true });
+  writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: {} }));
+  writeFileSync(join(agentDir, "auth.json"), "{}");
+  const promptBody = join(rootDir, "prompt-body");
+  writeFileSync(promptBody, "This file must not be loaded as the prompt body.");
+  const session = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "literal-system-prompt", systemPrompt: promptBody });
+  try {
+    assert.ok(session.systemPrompt?.startsWith(promptBody));
+    assert.doesNotMatch(session.systemPrompt ?? "", /This file must not be loaded/);
+  } finally {
+    session.dispose();
+  }
+});
 void test("loads workflow SYSTEM.md with project trust and precedence", async () => {
   const rootDir = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-system-prompt-"));
   const agentDir = join(rootDir, "agent");
