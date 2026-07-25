@@ -167,7 +167,21 @@ export function formatWorkflowPreview(args: { script?: unknown; workflow?: unkno
 }
 export const WORKFLOW_TOOL_LABEL = "Workflow";
 export const WORKFLOW_TOOL_DESCRIPTION = "Run a deterministic JavaScript workflow";
-export const WORKFLOW_TOOL_PROMPT_SNIPPET = "Run a deterministic, resumable JavaScript workflow that orchestrates subagents. Inline launches require an explicit non-empty name; registered function launches reject name and use workflow as the run name. Runs in the background by default; completion arrives as a follow-up message. Foreground results include the completed run ID. Use workflow_retry with an explicit failed run ID to replay completed structural operations; parentRunId only reuses named worktrees.";
+export const WORKFLOW_TOOL_PROMPT_SNIPPET = "Run a deterministic, resumable JavaScript workflow that orchestrates subagents. Inline launches require an explicit non-empty name; registered function launches reject name and use workflow as the run name. Runs in the background by default; completion arrives as a follow-up message. Foreground results include the completed run ID. Recovery map: agent(..., { retries }) reruns one agent call in the same run for transient failures; workflow_retry({ runId }) replays a failed run into a child; workflow_resume({ runId, budget? }) continues a budget_exhausted run; parentRunId on a new launch only borrows named worktrees and never replays or resumes.";
+function workflowRecoveryGuidance(action: "resume" | "retry", state: RunState): string {
+  if (action === "resume") {
+    if (state === "failed") return "Failed workflow runs must use workflow_retry({ runId })";
+    if (state === "completed") return "Completed workflow runs have no recovery action";
+    if (state === "stopped") return "Stopped workflow runs have no recovery action; launch a new workflow";
+    if (state === "interrupted") return "Interrupted workflow runs use /workflow resume, not workflow_resume";
+    return `Only budget-exhausted runs can be resumed with workflow_resume; source is ${state}`;
+  }
+  if (state === "budget_exhausted") return "Budget-exhausted workflow runs must use workflow_resume({ runId, budget? })";
+  if (state === "completed") return "Completed workflow runs have no recovery action";
+  if (state === "stopped") return "Stopped workflow runs cannot be retried; launch a new workflow";
+  if (state === "interrupted") return "Interrupted workflow runs use /workflow resume, not workflow_retry";
+  return `Only failed workflow runs can be retried; source is ${state}`;
+}
 export const WORKFLOW_TOOL_PARAMETERS = Type.Object({
   name: Type.Optional(Type.String({ description: "Required non-empty name for inline workflow runs; invalid for registered function launches" })),
   description: Type.Optional(Type.String({ description: "Optional human-readable workflow description" })),
@@ -1896,9 +1910,23 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
   };
   const resumeWorkflowRun = async (runId: string, rawPatch?: unknown, context?: unknown, signal?: AbortSignal): Promise<Record<string, JsonValue>> => {
     const run = runs.get(runId);
-    if (!run) throw new WorkflowError("RESUME_INCOMPATIBLE", `Unknown workflow run: ${runId}`);
+    if (!run) {
+      const host = object(context) ? context : {};
+      const cwd = typeof host.cwd === "string" ? host.cwd : undefined;
+      const sessionManager = object(host.sessionManager) ? host.sessionManager : undefined;
+      const sessionId = typeof sessionManager?.getSessionId === "function" ? String(Reflect.apply(sessionManager.getSessionId, sessionManager, [])) : undefined;
+      if (cwd && sessionId) {
+        try {
+          const state = (await new RunStore(cwd, sessionId, runId, home).load()).run.state;
+          throw new WorkflowError("RESUME_INCOMPATIBLE", workflowRecoveryGuidance("resume", state));
+        } catch (error) {
+          if (error instanceof WorkflowError) throw error;
+        }
+      }
+      throw new WorkflowError("RESUME_INCOMPATIBLE", `Unknown workflow run ${runId} in the current project and Pi session`);
+    }
     const loaded = await run.store.load();
-    if (loaded.run.state !== "budget_exhausted") throw new WorkflowError("RESUME_INCOMPATIBLE", "Only budget-exhausted runs can be resumed with workflow_resume");
+    if (loaded.run.state !== "budget_exhausted") throw new WorkflowError("RESUME_INCOMPATIBLE", workflowRecoveryGuidance("resume", loaded.run.state));
     const currentBudget = validateBudget(loaded.run.budget ?? loaded.snapshot.budget);
     const patch = rawPatch === undefined ? {} : validateBudgetPatch(rawPatch);
     const nextBudget = mergeBudget(currentBudget, patch);
@@ -1933,8 +1961,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     await ensureSessionLease(cwd, sessionId);
     const sourceStore = new RunStore(cwd, sessionId, runId, home);
     let loaded: { run: PersistedRun; snapshot: Readonly<LaunchSnapshot> };
-    try { loaded = await sourceStore.load(); } catch (error) { throw new WorkflowError("RESUME_INCOMPATIBLE", `Cannot load failed source run ${runId}: ${errorText(error)}`); }
-    if (loaded.run.state !== "failed") throw new WorkflowError("RESUME_INCOMPATIBLE", `Only failed workflow runs can be retried; source is ${loaded.run.state}`);
+    try { loaded = await sourceStore.load(); } catch (error) { throw new WorkflowError("RESUME_INCOMPATIBLE", `Unknown workflow run ${runId} in the current project and Pi session: ${errorText(error)}`); }
+    if (loaded.run.state !== "failed") throw new WorkflowError("RESUME_INCOMPATIBLE", workflowRecoveryGuidance("retry", loaded.run.state));
     if (loaded.run.retry && (typeof loaded.run.retry.sourceRunId !== "string" || !loaded.run.retry.sourceRunId || typeof loaded.run.retry.lineageRootRunId !== "string" || !loaded.run.retry.lineageRootRunId || !Array.isArray(loaded.run.retry.completedPaths) || loaded.run.retry.completedPaths.some((path) => typeof path !== "string") || !Array.isArray(loaded.run.retry.incompletePaths) || loaded.run.retry.incompletePaths.some((path) => typeof path !== "string") || !Array.isArray(loaded.run.retry.namedWorktrees) || loaded.run.retry.namedWorktrees.some((name) => typeof name !== "string"))) throw new WorkflowError("RESUME_INCOMPATIBLE", "The source retry provenance is incomplete");
     const lineageRootRunId = loaded.run.retry?.lineageRootRunId ?? loaded.run.id;
     if (retryReservations.has(lineageRootRunId)) throw new WorkflowError("RESUME_INCOMPATIBLE", `An active retry already owns lineage ${lineageRootRunId}`);
