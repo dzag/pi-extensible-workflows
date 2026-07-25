@@ -249,6 +249,13 @@ export class TestHarness {
     return herdr("pane", "read", this.paneId, "--source", "visible");
   }
 
+  /** Current pane width in columns. */
+  paneWidth(): number {
+    if (!this.paneId) throw new Error("Not launched");
+    const layout = herdrJson("pane", "layout", "--pane", this.paneId) as { result: { layout: { area: { width: number } } } };
+    return layout.result.layout.area.width;
+  }
+
   /** Send a keypress (e.g. "Enter", "Escape", "j", "k"). */
   sendKey(key: string): void {
     if (!this.paneId) throw new Error("Not launched");
