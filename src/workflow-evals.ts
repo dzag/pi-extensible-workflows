@@ -91,7 +91,7 @@ export interface EvalCaseResult {
 }
 
 const CASE_PROCESS_GRACE_MS = 1_000;
-export const SAFE_PARENT_EVAL_TOOLS = Object.freeze(["read", "grep", "find", "bash", "workflow"] as const);
+export const SAFE_PARENT_EVAL_TOOLS = Object.freeze(["read", "grep", "find", "bash", "workflow", "workflow_retry"] as const);
 const EVAL_MODEL_TOKEN = "$EVAL_MODEL";
 const semantic = (description: string): readonly SemanticCriterion[] => [{ id: "intent", description }];
 const JSON_RESULT_TYPES = ["null", "boolean", "number", "integer", "string", "array", "object"] as const;

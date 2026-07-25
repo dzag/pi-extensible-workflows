@@ -1,0 +1,14 @@
+id: recovery-failed-run
+prompt: >-
+  A workflow failure diagnostic identifies the persisted failed run ID "failed-run-42" and says the exact next action is
+  workflow_retry({ runId: "failed-run-42" }). Select that recovery tool now with exactly {"runId":"failed-run-42"}.
+  Do not launch a new workflow, use parentRunId, or answer with prose.
+maxCost: 0.1
+expectedWorkflowCalls: 0
+expectations:
+  firstTool: workflow_retry
+  firstBatchToolSequence:
+    equals: [workflow_retry]
+  parentToolSequence:
+    equals: [workflow_retry]
+  workflowCallCount: 0

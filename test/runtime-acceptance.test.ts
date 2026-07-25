@@ -858,3 +858,58 @@ void test("cold-resumed failures deliver structured diagnostics while persistenc
   assert.match(diagnostic.artifacts.statePath, /state\.json$/);
   assert.match(diagnostic.artifacts.journalPath, /journal\.json$/);
 });
+void test("workflow_retry replays a journaled shell mutation while completing incomplete work", { timeout: 10000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-partial-shell-retry-"));
+  const marker = join(home, "mutation.log");
+  const messages: string[] = [];
+  let sessions = 0;
+  const createSession = async (): Promise<NativeSession> => {
+    const session = ++sessions;
+    return {
+      sessionId: `partial-shell-${String(session)}`,
+      sessionFile: `/sessions/partial-shell-${String(session)}.jsonl`,
+      messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+      getSessionStats: sessionStats,
+      prompt: async () => { if (session === 1) throw new Error("later failure"); },
+      steer: async () => {},
+      dispose() {},
+    };
+  };
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ details: { runId?: string; parentRunId?: string } }> }> = [];
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "agent"] } as never, home, async () => {}, createSession);
+  const workflow = tools.find(({ name }) => name === "workflow");
+  const retry = tools.find(({ name }) => name === "workflow_retry");
+  assert.ok(workflow && retry);
+  const context = { cwd: home, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
+  const command = `printf x >> ${marker}`;
+  const started = await workflow.execute("id", { name: "partial-shell-retry", script: `await shell(${JSON.stringify(command)}); await agent("later failure"); return true;` }, new AbortController().signal, undefined, context);
+  const parentRunId = started.details.runId;
+  assert.ok(parentRunId);
+  const parent = new RunStore(home, "session", parentRunId, home);
+  let diagnosticMessage: string | undefined;
+  for (let attempt = 0; attempt < 1000; attempt += 1) {
+    const loaded = await parent.load();
+    diagnosticMessage = messages.find((message) => message.includes("failure diagnostics:"));
+    if (loaded.run.state === "failed" && diagnosticMessage) break;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal((await parent.load()).run.state, "failed");
+  assert.equal((await parent.load()).run.error?.message, "later failure");
+  assert.equal(readFileSync(marker, "utf8"), "x");
+  assert.ok(diagnosticMessage);
+  const diagnostic = JSON.parse(diagnosticMessage.slice(diagnosticMessage.indexOf("{"))) as { runId: string; retry: { action: string; completedPaths: string[] } };
+  assert.equal(diagnostic.runId, parentRunId);
+  assert.equal(diagnostic.retry.action, `workflow_retry({ runId: ${JSON.stringify(parentRunId)} })`);
+  assert.ok(diagnostic.retry.completedPaths.some((path) => path.startsWith("shell/")));
+  const journaled = await parent.replayableOperations();
+  assert.ok(journaled.some(({ path }) => path.startsWith("shell/")));
+  const retried = await retry.execute("retry", { runId: diagnostic.runId }, undefined, undefined, context);
+  const childRunId = retried.details.runId;
+  assert.ok(childRunId && retried.details.parentRunId === parentRunId);
+  const child = new RunStore(home, "session", childRunId, home);
+  for (let attempt = 0; attempt < 1000 && (await child.load()).run.state !== "completed"; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal((await child.load()).run.state, "completed", JSON.stringify((await child.load()).run.error));
+  assert.equal(readFileSync(marker, "utf8"), "x");
+  assert.equal(sessions, 2);
+  assert.equal((await child.load()).run.agents.filter((agent) => agent.state === "completed").length, 1);
+});
