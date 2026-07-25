@@ -45,7 +45,7 @@ export interface WorkflowBudgetUsage { tokens: number; costUsd: number; duration
 export type BudgetEventType = "soft_crossed" | "hard_overrun" | "hard_exhausted" | "adjustment_requested" | "adjustment_approved" | "adjustment_rejected";
 export interface BudgetEvent { type: BudgetEventType; budgetVersion: number; dimensions: readonly BudgetDimension[]; usage: WorkflowBudgetUsage; limits: WorkflowBudget; at: number; proposalId?: string; previous?: WorkflowBudget; proposed?: WorkflowBudget }
 export interface BudgetApprovalRequest { kind: "budget"; proposalId: string; runId: string; consumed: WorkflowBudgetUsage; previous: WorkflowBudget; proposed: WorkflowBudget; budgetVersion: number }
-export interface WorkflowErrorShape { code: WorkflowErrorCode; message: string }
+export interface WorkflowErrorShape { code: WorkflowErrorCode; message: string; failedAt?: string }
 export interface WorkflowEventBase { runId: string; sessionId: string; workflowName: string; cwd: string; runDirectory: string; timestamp: number }
 export type WorkflowRunStartedEvent = WorkflowEventBase;
 export type WorkflowRunResumedEvent = WorkflowEventBase;
@@ -77,7 +77,7 @@ export interface AgentRecord { id: string; name: string; label?: string; path: s
 export interface WorkflowRunEvent { type: string; message: string }
 export interface WorkflowRetryProvenance { sourceRunId: string; lineageRootRunId: string; completedPaths: readonly string[]; incompletePaths: readonly string[]; namedWorktrees: readonly string[] }
 export interface WorkflowPhaseRecord { phase: string; afterAgent: number }
-export interface RunRecord { id: string; workflowName: string; cwd: string; sessionId: string; state: RunState; parentRunId?: string; retry?: WorkflowRetryProvenance; phase?: string; phaseHistory?: readonly WorkflowPhaseRecord[]; agents: readonly AgentRecord[]; error?: WorkflowErrorShape; budget?: WorkflowBudget; budgetVersion?: number; usage?: WorkflowBudgetUsage; budgetEvents?: readonly BudgetEvent[]; events?: readonly WorkflowRunEvent[] }
+export interface RunRecord { id: string; workflowName: string; cwd: string; sessionId: string; state: RunState; parentRunId?: string; retry?: WorkflowRetryProvenance; phase?: string; phaseHistory?: readonly WorkflowPhaseRecord[]; agents: readonly AgentRecord[]; error?: WorkflowErrorShape; failedAt?: string; budget?: WorkflowBudget; budgetVersion?: number; usage?: WorkflowBudgetUsage; budgetEvents?: readonly BudgetEvent[]; events?: readonly WorkflowRunEvent[] }
 export const LAUNCH_SNAPSHOT_IDENTITY_VERSION = 5;
 export interface AgentDefinition { prompt?: string; description?: string; model?: string; thinking?: NonNullable<ModelSpec["thinking"]>; tools?: readonly string[]; disabledAgentResources?: AgentResourceExclusions }
 export interface LaunchSnapshot { identityVersion?: number; launchKind?: "inline" | "function"; functionName?: string; script: string; args: JsonValue; metadata: WorkflowMetadata; settings: WorkflowSettings; settingsSources?: WorkflowSettingsSources; budget?: WorkflowBudget; settingsPath?: string; modelAliases?: Readonly<Record<string, string>>; phases?: readonly string[]; models: readonly string[]; tools: readonly string[]; agentTypes: readonly string[]; roles?: Readonly<Record<string, AgentDefinition>>; projectRoles?: readonly string[]; schemas: readonly JsonSchema[] }

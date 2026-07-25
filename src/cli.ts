@@ -9,11 +9,11 @@ import { Value } from "typebox/value";
 import { doctor, doctorExitCode, formatDoctorReport, type DoctorOptions } from "./doctor.js";
 import { doctorCleanup, doctorCleanupExitCode, formatDoctorCleanupReport, type DoctorCleanupOptions } from "./doctor-cleanup.js";
 import workflowExtension, { formatWorkflowProgress, truncateWorkflowProgress, workflowCatalog, workflowSettingsPath, type JsonSchema, type JsonValue, type WorkflowProgressStyles } from "./index.js";
-import { runSessionInspector, transcriptFileLines } from "./session-inspector.js";
+import { runSessionInspector, transcriptFileLines, type InspectMode } from "./session-inspector.js";
 import type { PersistedRun } from "./persistence.js";
 import type { WorkflowCatalogFunction } from "./index.js";
 
-export interface CliOptions extends DoctorOptions { inspect?: (sessionId?: string) => Promise<void>; transcript?: (sessionFile: string) => Promise<void>; stderr?: (text: string) => void; signal?: AbortSignal; trustOverride?: boolean; isTTY?: boolean }
+export interface CliOptions extends DoctorOptions { inspect?: (sessionId?: string, mode?: InspectMode) => Promise<void>; transcript?: (sessionFile: string) => Promise<void>; stderr?: (text: string) => void; signal?: AbortSignal; trustOverride?: boolean; isTTY?: boolean }
 
 type CliScalar = "string" | "integer" | "number" | "boolean";
 type CliField = { name: string; option: string; schema: Record<string, unknown>; type: CliScalar | "array"; itemType?: CliScalar; required: boolean };
@@ -159,6 +159,20 @@ function launcherHelpLines(): string[] {
 }
 function workflowUsage(): string { return [`Usage: pi-extensible-workflows run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force]`, "", "Launcher options:", ...launcherHelpLines()].join("\n") + "\n"; }
 function exportUsage(): string { return [`Usage: pi-extensible-workflows export <workflow-name> [--name <command>] [--output <path>] [--force]`, "", "Launcher options:", ...launcherHelpLines()].join("\n") + "\n"; }
+function parseInspectArgs(rawArgs: readonly string[]): { sessionId?: string; mode: InspectMode } {
+  let sessionId: string | undefined;
+  let mode: InspectMode = "tui";
+  for (const arg of rawArgs) {
+    if (arg === "--json" || arg === "--summary") {
+      const next: InspectMode = arg === "--json" ? "json" : "summary";
+      if (mode !== "tui" && mode !== next) throw new Error("inspect accepts only one output mode");
+      mode = next;
+    } else if (arg.startsWith("--")) throw new Error(`Unknown inspect option: ${arg}`);
+    else if (sessionId !== undefined) throw new Error(`Unexpected argument: ${arg}`);
+    else sessionId = arg;
+  }
+  return { ...(sessionId ? { sessionId } : {}), mode };
+}
 export function parseDoctorCleanupArgs(rawArgs: readonly string[]): Required<Pick<DoctorCleanupOptions, "olderThanDays" | "yes">> {
   let olderThanDays = 90;
   let yes = false;
@@ -334,16 +348,18 @@ class CliProgress {
   }
 }
 
-async function invokeWorkflow(fn: WorkflowCatalogFunction, args: Record<string, JsonValue>, runtime: WorkflowRuntime, options: WorkflowIo, context: unknown): Promise<JsonValue> {
+type CliWorkflowResult = { value: JsonValue; runId?: string };
+async function invokeWorkflow(fn: WorkflowCatalogFunction, args: Record<string, JsonValue>, runtime: WorkflowRuntime, options: WorkflowIo, context: unknown): Promise<CliWorkflowResult> {
   if (!Value.Check(fn.input, args)) throw new Error(`Invalid input for ${fn.name}`);
   const progress = new CliProgress(options.stderr, options.isTTY ?? process.stderr.isTTY);
   try {
     const result = await runtime.workflowTool.execute(randomUUID(), { workflow: fn.name, args, foreground: true }, options.signal, (update: unknown) => { if (object(update) && object(update.details) && object(update.details.run)) progress.update(update.details.run as unknown as PersistedRun); }, context);
     const details = object(result.details) ? result.details : {};
-    if (has(details, "value")) return details.value as JsonValue;
+    const runId = typeof details.runId === "string" ? details.runId : undefined;
+    if (has(details, "value")) return { value: details.value as JsonValue, ...(runId ? { runId } : {}) };
     const first = result.content[0];
     if (!first || first.type !== "text") throw new Error("Workflow returned no result");
-    try { return parseJsonInput(first.text); } catch { throw new Error("Workflow returned invalid JSON"); }
+    try { return { value: parseJsonInput(first.text), ...(runId ? { runId } : {}) }; } catch { throw new Error("Workflow returned invalid JSON"); }
   } finally {
     progress.finish();
   }
@@ -385,8 +401,9 @@ async function runWorkflowCli(rawArgs: readonly string[], options: WorkflowIo): 
     if (!fn) throw new Error(`Unknown workflow function: ${name}`);
     if (help) { options.write(formatWorkflowCliHelp(fn)); return 0; }
     const input = parseWorkflowCliArgs(fn.input, args.slice(1));
-    const value = await invokeWorkflow(fn, input, runtime, options, context);
-    options.write(`${JSON.stringify(value)}\n`);
+    const result = await invokeWorkflow(fn, input, runtime, options, context);
+    if (result.runId) options.stderr(`Run ID: ${result.runId}\n`);
+    options.write(`${JSON.stringify(result.value)}\n`);
     return 0;
   });
 }
@@ -446,8 +463,13 @@ export async function runCli(args: readonly string[], options: CliOptions = {}, 
       return doctorCleanupExitCode(report);
     } catch (error) { stderr(`Error: ${error instanceof Error ? error.message : String(error)}\n`); return 1; }
   }
-  if (args[0] === "inspect" && args.length <= 2) {
-    try { await (options.inspect ?? runSessionInspector)(args[1]); return 0; }
+  if (args[0] === "inspect") {
+    try {
+      const parsed = parseInspectArgs(args.slice(1));
+      if (options.inspect) await options.inspect(parsed.sessionId, parsed.mode);
+      else await runSessionInspector(parsed.sessionId, parsed.mode, options.cwd ?? process.cwd(), undefined, write);
+      return 0;
+    }
     catch (error) { write(`Error: ${error instanceof Error ? error.message : String(error)}\n`); return 1; }
   }
   if (args[0] === "transcript" && args.length === 2) {
@@ -463,7 +485,7 @@ export async function runCli(args: readonly string[], options: CliOptions = {}, 
       return args[0] === "run" ? await runWorkflowCli(args.slice(1), workflowOptions) : await exportWorkflowCli(args.slice(1), workflowOptions);
     } catch (error) { stderr(`Error: ${error instanceof Error ? error.message : String(error)}\n`); return 1; }
   }
-  write("Usage: pi-extensible-workflows doctor | inspect [session-id] | transcript <session-file> | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force]\n");
+  write("Usage: pi-extensible-workflows doctor | inspect [session-id] [--json|--summary] | transcript <session-file> | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force]\n");
   return 1;
 }
 
