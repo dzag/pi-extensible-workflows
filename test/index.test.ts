@@ -527,6 +527,40 @@ void test("registers workflow_catalog only for active non-empty registries", asy
   assert.ok(stripAnsi(narrowCall[0]).length <= 10);
   await activeShutdown();
 });
+void test("workflow control tools render styled calls and compact or expanded results", () => {
+  type Rendered = { render: (width: number) => string[] };
+  type ControlTool = { name: string; renderCall?: (args: unknown, theme: unknown, context: unknown) => Rendered; renderResult?: (result: unknown, options: unknown, theme: unknown, context: unknown) => Rendered };
+  const tools: ControlTool[] = [];
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never);
+  const theme = { fg: (color: string, text: string) => `[${color}]${text}[/${color}]`, bold: (text: string) => `<bold>${text}</bold>` };
+  const cases = [
+    { name: "workflow_respond", args: { runId: "run-checkpoint", name: "approval", approved: true }, details: { accepted: true, state: "checkpoint_answered", approved: true, reason: "checkpoint" }, identifier: "approval" },
+    { name: "workflow_stop", args: { runId: "run-stop" }, details: { runId: "run-stop", state: "stopped", stopped: true }, identifier: "run-stop" },
+    { name: "workflow_retry", args: { runId: "run-failed" }, details: { runId: "run-retry", parentRunId: "run-failed", state: "running" }, identifier: "run-retry" },
+    { name: "workflow_resume", args: { runId: "run-budget", budget: { tokens: { hard: 10 } } }, details: { state: "awaiting_approval", proposalId: "proposal-1" }, identifier: "proposal-1" },
+  ] as const;
+  for (const entry of cases) {
+    const tool = tools.find(({ name }) => name === entry.name);
+    assert.ok(tool);
+    assert.ok(tool.renderCall);
+    assert.ok(tool.renderResult);
+    const context = { args: entry.args, lastComponent: undefined, state: {}, cwd: "/project", expanded: false, isPartial: false };
+    const call = tool.renderCall(entry.args, theme, context).render(120).join("\n");
+    assert.match(call, new RegExp(entry.name));
+    assert.match(call, new RegExp(entry.args.runId));
+    const renderResult = (expanded: boolean): string => tool.renderResult?.({ content: [{ type: "text", text: JSON.stringify(entry.details) }], details: entry.details }, { expanded, isPartial: false }, theme, { ...context, expanded }).render(120).join("\n") ?? "";
+    const compact = renderResult(false);
+    const expanded = renderResult(true);
+    assert.match(compact, new RegExp(entry.identifier));
+    assert.match(expanded, new RegExp(entry.identifier));
+    assert.match(expanded, /Action|State|Run/);
+    assert.doesNotMatch(compact, /"runId"|"proposalId"|"hard"/);
+    if (entry.name === "workflow_resume") {
+      assert.match(call, /tokens hard=10/);
+      assert.match(expanded, /Budget patch/);
+    }
+  }
+});
 
 void test("advertises only described effective roles in the system prompt while workflow is active", () => {
   type StartHandler = (event: { systemPrompt: string }, ctx: { cwd: string; isProjectTrusted?: () => boolean }) => { systemPrompt?: string } | undefined;

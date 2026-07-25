@@ -530,6 +530,89 @@ function workflowCatalogBlock(text: string, expanded: boolean) {
   };
 }
 
+type WorkflowControlResult = { details?: unknown; content?: readonly { type: string; text?: string }[] };
+function controlString(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value : undefined; }
+function controlValue(value: unknown): string {
+  if (value === null) return "removed";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  const json = JSON.stringify(value);
+  return typeof json === "string" ? json : "unknown";
+}
+function controlTitle(name: string, theme: Theme): string { return theme.fg("toolTitle", theme.bold(name)); }
+function controlState(state: string, theme: Theme): string {
+  const color = state === "completed" || state === "running" || state === "stopped" ? "success" : state === "failed" || state === "unknown" ? "error" : state === "budget_exhausted" || state === "awaiting_approval" ? "warning" : "accent";
+  return theme.fg(color, state);
+}
+function controlAction(action: string, theme: Theme): string {
+  const color = /approved|stopped|started|resumed/.test(action) ? "success" : /rejected|failed/.test(action) ? "error" : "warning";
+  return theme.fg(color, action);
+}
+function budgetPatchEntries(value: unknown): string[] {
+  if (!object(value)) return value === undefined ? [] : [controlValue(value)];
+  return Object.entries(value).map(([dimension, limits]) => {
+    if (limits === null) return `${dimension}=removed`;
+    if (!object(limits)) return `${dimension}=${controlValue(limits)}`;
+    const parts = ["soft", "hard"].filter((key) => Object.prototype.hasOwnProperty.call(limits, key)).map((key) => `${key}=${controlValue(limits[key])}`);
+    return `${dimension} ${parts.join(" ")}`;
+  });
+}
+function budgetPatchSummary(value: unknown): string {
+  const entries = budgetPatchEntries(value);
+  return entries.length ? entries.join(", ") : "unchanged";
+}
+function budgetPatchDetails(value: unknown, theme: Theme): string[] {
+  const entries = budgetPatchEntries(value);
+  return entries.length ? [theme.fg("accent", theme.bold("Budget patch")), ...entries.map((entry) => `  ${theme.fg("toolOutput", entry)}`)] : [];
+}
+function workflowControlValue(result: WorkflowControlResult): unknown { return catalogResultValue(result); }
+function workflowControlCall(name: string, args: Record<string, unknown>, theme: Theme): string {
+  const runId = controlString(args.runId) ?? "(missing run ID)";
+  if (name === "workflow_respond") {
+    const proposalId = controlString(args.proposalId);
+    const target = proposalId ? `budget proposal ${proposalId}` : `checkpoint ${controlString(args.name) ?? "(missing name)"}`;
+    const decision = args.approved === true ? "approve" : "reject";
+    return [`${controlTitle(name, theme)} ${theme.fg("accent", runId)}`, `${theme.fg("muted", target)} · ${controlAction(decision, theme)}`].join("\n");
+  }
+  if (name === "workflow_resume") return args.budget === undefined ? `${controlTitle(name, theme)} ${theme.fg("accent", runId)}` : [`${controlTitle(name, theme)} ${theme.fg("accent", runId)}`, `${theme.fg("muted", "Budget")} ${theme.fg("toolOutput", budgetPatchSummary(args.budget))}`].join("\n");
+  if (name === "workflow_retry") return `${controlTitle(name, theme)} ${theme.fg("accent", runId)} ${theme.fg("muted", "failed run")}`;
+  return `${controlTitle(name, theme)} ${theme.fg("accent", runId)}`;
+}
+function workflowControlResult(name: string, args: Record<string, unknown>, result: WorkflowControlResult, expanded: boolean, theme: Theme): string {
+  const value = workflowControlValue(result);
+  if (!object(value)) return theme.fg("error", `The ${name} tool returned an invalid result.`);
+  const runId = controlString(args.runId) ?? controlString(value.runId) ?? "(unknown)";
+  const title = controlTitle(name, theme);
+  if (name === "workflow_stop") {
+    const state = controlString(value.state) ?? "unknown";
+    const action = value.stopped === true ? "stopped" : value.reason === "already_terminal" ? "already terminal" : value.reason === "unknown_run" ? "run not found" : "no change";
+    if (!expanded) return `${title}\nRun ${theme.fg("accent", runId)} · ${controlState(state, theme)} · ${controlAction(action, theme)}`;
+    return [title, `Run: ${theme.fg("accent", runId)}`, `State: ${controlState(state, theme)}`, `Action: ${controlAction(action, theme)}`, ...(controlString(value.reason) ? [`Reason: ${theme.fg("toolOutput", controlValue(value.reason))}`] : [])].join("\n");
+  }
+  if (name === "workflow_retry") {
+    const childRunId = controlString(value.runId) ?? "(unknown)";
+    const state = controlString(value.state) ?? "unknown";
+    if (!expanded) return [title, `Source ${theme.fg("accent", runId)}`, `Child ${theme.fg("accent", childRunId)} · ${controlState(state, theme)} · ${controlAction("started", theme)}`].join("\n");
+    return [title, `Source run: ${theme.fg("accent", runId)}`, `Retry run: ${theme.fg("accent", childRunId)}`, `State: ${controlState(state, theme)}`, `Action: ${controlAction("started; completed work will be replayed", theme)}`].join("\n");
+  }
+  if (name === "workflow_resume") {
+    const state = controlString(value.state) ?? "unknown";
+    const proposalId = controlString(value.proposalId);
+    const action = state === "awaiting_approval" ? "approval required" : state === "running" ? "resumed" : "no change";
+    if (!expanded) return [title, `Run ${theme.fg("accent", runId)} · ${controlState(state, theme)} · ${controlAction(action, theme)}`, ...(proposalId ? [`Proposal ${theme.fg("accent", proposalId)}`] : [])].join("\n");
+    return [title, `Run: ${theme.fg("accent", runId)}`, `State: ${controlState(state, theme)}`, `Action: ${controlAction(action, theme)}`, ...(proposalId ? [`Proposal: ${theme.fg("accent", proposalId)}`] : []), ...budgetPatchDetails(args.budget, theme)].join("\n");
+  }
+  const proposalId = controlString(args.proposalId);
+  const checkpointName = controlString(args.name);
+  const target = proposalId ? `Budget proposal ${theme.fg("accent", proposalId)}` : `Checkpoint ${theme.fg("accent", checkpointName ?? "(missing)")}`;
+  const accepted = value.accepted === true;
+  const approved = value.approved === true;
+  const reason = controlString(value.reason);
+  const action = reason === "proposal_not_pending" ? "not pending" : reason === "checkpoint" && !accepted ? "not pending" : approved ? "approved" : "rejected";
+  const state = controlString(value.state);
+  if (!expanded) return [title, target, `Run ${theme.fg("accent", runId)} · ${controlAction(action, theme)}${state ? ` · ${controlState(state, theme)}` : ""}`].join("\n");
+  return [title, `Run: ${theme.fg("accent", runId)}`, `Target: ${target}`, `Action: ${controlAction(action, theme)}`, ...(state ? [`State: ${controlState(state, theme)}`] : []), ...(reason ? [`Reason: ${theme.fg("toolOutput", reason)}`] : [])].join("\n");
+}
+
 function catalogText(value: string): string { return value.replace(/\s+/g, " ").trim(); }
 
 type CatalogToolResult = { details?: unknown; content?: readonly { type: string; text?: string }[] };
@@ -1705,6 +1788,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         throw mainAgentError(error);
       }
     },
+    renderCall(args, theme) { return styledTextBlock(workflowControlCall("workflow_respond", args, theme)); },
+    renderResult(result, options, theme, context) { return workflowCatalogBlock(workflowControlResult("workflow_respond", context.args, result, options.expanded, theme), options.expanded); },
   });
   pi.registerTool({
     name: "workflow_stop",
@@ -1719,6 +1804,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         throw mainAgentError(error);
       }
     },
+    renderCall(args, theme) { return styledTextBlock(workflowControlCall("workflow_stop", args, theme)); },
+    renderResult(result, options, theme, context) { return workflowCatalogBlock(workflowControlResult("workflow_stop", context.args, result, options.expanded, theme), options.expanded); },
   });
   let catalogRegistered = false;
   let sessionStarted = false;
@@ -2007,6 +2094,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       try { const result = await retryWorkflowRun(params.runId, ctx, signal); return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result }; }
       catch (error) { throw mainAgentError(error); }
     },
+    renderCall(args, theme) { return styledTextBlock(workflowControlCall("workflow_retry", args, theme)); },
+    renderResult(result, options, theme, context) { return workflowCatalogBlock(workflowControlResult("workflow_retry", context.args, result, options.expanded, theme), options.expanded); },
   });
   pi.registerTool({
     name: "workflow_resume",
@@ -2017,6 +2106,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       try { const result = await resumeWorkflowRun(params.runId, params.budget, ctx, signal); return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result }; }
       catch (error) { throw mainAgentError(error); }
     },
+    renderCall(args, theme) { return styledTextBlock(workflowControlCall("workflow_resume", args, theme)); },
+    renderResult(result, options, theme, context) { return workflowCatalogBlock(workflowControlResult("workflow_resume", context.args, result, options.expanded, theme), options.expanded); },
   });
   pi.on("session_start", async (_event, ctx) => {
     if (sessionStarted) return;
