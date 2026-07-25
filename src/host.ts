@@ -1584,7 +1584,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const activity = activities?.get(agent.id);
       const lastEventAt = timestamps?.get(agent.id);
       if (activity === undefined && lastEventAt === undefined) return agent;
-      return { ...agent, ...(activity ? { activity } : { activity: undefined }), ...(lastEventAt === undefined ? {} : { lastEventAt }) };
+      return { ...agent, ...(activity === undefined ? {} : { activity }), ...(lastEventAt === undefined ? {} : { lastEventAt }) };
     }) };
   };
   const terminalRunStates = new Map<string, "completed" | "failed" | "stopped">();

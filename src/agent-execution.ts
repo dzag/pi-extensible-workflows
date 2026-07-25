@@ -330,6 +330,7 @@ export class WorkflowAgentExecutor {
       const toolCalls = new Map<string, AgentToolCallProgress>();
       let activity: AgentActivity | undefined;
       let lastEventAt: number | undefined;
+      let lastReportedEventAt: number | undefined;
       let progress = Promise.resolve();
       let unsubscribe: (() => void) | undefined;
       let systemPromptTurn = 0;
@@ -342,8 +343,14 @@ export class WorkflowAgentExecutor {
       const report = (persist: boolean) => {
         if (!session || !options.onProgress) return;
         const update = { accounting: accounting(session.getSessionStats()), toolCalls: [...toolCalls.values()], ...(activity ? { activity } : {}), ...(lastEventAt === undefined ? {} : { lastEventAt }), persist };
+        if (lastEventAt !== undefined) lastReportedEventAt = lastEventAt;
         progress = progress.then(() => options.onProgress?.(update)).then(() => undefined);
       };
+      const reportTimestamp = () => {
+        if (lastEventAt !== undefined && lastReportedEventAt !== undefined && lastEventAt - lastReportedEventAt < 1000) return;
+        report(false);
+      };
+      const activityChanged = (previous: AgentActivity | undefined) => previous?.kind !== activity?.kind || previous?.text !== activity?.text;
       try {
         setupFailed = true;
         const prepared = await prepareAgentSetup(this.root, this.createSession, task, options, resolved, cwd, attempt, executionSignal, customTools, resultTool);
@@ -369,6 +376,8 @@ export class WorkflowAgentExecutor {
         unsubscribe = activeSession.subscribe?.((event) => {
           lastEventAt = Date.now();
           let persist = false;
+          let shouldReport = false;
+          let removeToolCallId: string | undefined;
           if (event.type === "agent_start" && session?.systemPrompt !== undefined) {
             if (this.root.runStore) {
               systemPromptTurn += 1;
@@ -379,13 +388,18 @@ export class WorkflowAgentExecutor {
           if (event.type === "message_start" && event.message.role === "assistant") {
             if (!turnStarted) { try { options.budget?.beforeTurn(); turnStarted = true; } catch (error) { budgetError ??= error instanceof WorkflowError ? error : new WorkflowError("BUDGET_EXHAUSTED", error instanceof Error ? error.message : String(error)); void session?.abort?.(); } }
             activity = { kind: "text", text: "responding" };
+            shouldReport = true;
           }
           if (event.type === "message_update") {
+            const previousActivity = activity;
             if (["thinking_start", "thinking_delta", "thinking_end"].includes(event.assistantMessageEvent.type)) activity = { kind: "reasoning", text: "reasoning" };
             else if (["text_start", "text_delta", "text_end", "toolcall_start", "toolcall_delta", "toolcall_end"].includes(event.assistantMessageEvent.type)) activity = { kind: "text", text: "responding" };
+            shouldReport = activityChanged(previousActivity);
           }
           if (event.type === "message_end") {
+            const previousActivity = activity;
             activity = undefined;
+            shouldReport = activityChanged(previousActivity);
             if (event.message.role === "assistant") {
               const needsMoreWork = hasToolCall(event.message);
               const final = !needsMoreWork || (options.schema !== undefined && hasSchemaResult());
@@ -394,10 +408,11 @@ export class WorkflowAgentExecutor {
               persist = true;
             }
           }
-          if (event.type === "tool_execution_start") { toolCalls.set(event.toolCallId, { id: event.toolCallId, name: event.toolName, state: "running" }); activity = { kind: "tool", text: event.toolName }; }
-          if (event.type === "tool_execution_update") { activity = { kind: "tool", text: event.toolName }; }
-          if (event.type === "tool_execution_end") { toolCalls.set(event.toolCallId, { id: event.toolCallId, name: event.toolName, state: event.isError ? "failed" : "completed" }); if (activity?.kind === "tool" && activity.text === event.toolName) activity = undefined; report(false); toolCalls.delete(event.toolCallId); }
-          else report(persist);
+          if (event.type === "tool_execution_start") { toolCalls.set(event.toolCallId, { id: event.toolCallId, name: event.toolName, state: "running" }); activity = { kind: "tool", text: event.toolName }; shouldReport = true; }
+          if (event.type === "tool_execution_update") { const previousActivity = activity; activity = { kind: "tool", text: event.toolName }; shouldReport = activityChanged(previousActivity); }
+          if (event.type === "tool_execution_end") { toolCalls.set(event.toolCallId, { id: event.toolCallId, name: event.toolName, state: event.isError ? "failed" : "completed" }); if (activity?.kind === "tool" && activity.text === event.toolName) activity = undefined; shouldReport = true; removeToolCallId = event.toolCallId; }
+          if (shouldReport || persist) report(persist); else reportTimestamp();
+          if (removeToolCallId) toolCalls.delete(removeToolCallId);
         });
         report(false);
         if (setSteer) {
