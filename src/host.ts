@@ -1137,6 +1137,16 @@ export function formatWorkflowFailureDiagnostics(diagnostic: WorkflowFailureDiag
   const retry = diagnostic.retry ? [`  Retry: ${diagnostic.retry.action}`, `  Replayable completed paths: ${diagnostic.retry.completedPaths.join(", ") || "(none)"}`, `  Incomplete paths: ${diagnostic.retry.incompletePaths.join(", ") || "(unknown)"}`, `  Named worktrees: ${diagnostic.retry.namedWorktrees.join(", ") || "(none)"}`, `  Warning: ${diagnostic.retry.warning}`] : [];
   return [`✗ Workflow: ${diagnostic.workflowName}`, `  Run: ${diagnostic.runId}`, `  State: ${diagnostic.state}`, `  Error: ${diagnostic.error.code}: ${diagnostic.error.message}`, `  Failed at: ${diagnostic.failedAt ?? "(unknown)"}`, `  Failed agent: ${failedAgent}`, `  Completed sibling ${siblingAgents ? "agents" : "paths"}: ${siblings}`, ...retry, `  Artifacts: state=${diagnostic.artifacts.statePath} journal=${diagnostic.artifacts.journalPath}`].join("\n");
 }
+function deliveryPart(value: string, maxBytes: number): string { return utf8Prefix(value.replace(/\s+/g, " ").trim(), maxBytes) || "(unknown)"; }
+export function formatWorkflowFailureDelivery(diagnostic: WorkflowFailureDiagnostics): string {
+  const name = deliveryPart(diagnostic.workflowName, 128);
+  const runId = deliveryPart(diagnostic.runId, 128);
+  const error = `${diagnostic.error.code}: ${deliveryPart(diagnostic.error.message, 768)}`;
+  const failedPath = diagnostic.failedAt ? `; failed path=${deliveryPart(diagnostic.failedAt, 512)}` : "";
+  const nextAction = diagnostic.retry ? `; next action: ${deliveryPart(diagnostic.retry.action, 256)}` : "";
+  const artifacts = `; artifacts: runDirectory=${deliveryPart(diagnostic.artifacts.runDirectory, 512)} statePath=${deliveryPart(diagnostic.artifacts.statePath, 512)} journalPath=${deliveryPart(diagnostic.artifacts.journalPath, 512)}`;
+  return `Workflow ${name} failed (runId=${runId}): error=${error}${failedPath}${nextAction}${artifacts}`;
+}
 
 function serializeWorkflowFailureDiagnostics(diagnostic: WorkflowFailureDiagnostics): string { return JSON.stringify(diagnostic); }
 function isWorkflowFailureDiagnostics(value: unknown): value is WorkflowFailureDiagnostics {
@@ -1146,7 +1156,7 @@ function deliver(pi: ExtensionAPI, content: string): void {
   pi.sendMessage({ customType: "workflow", content, display: true }, { deliverAs: "followUp", triggerTurn: true });
 }
 function deliverFailure(pi: ExtensionAPI, diagnostic: WorkflowFailureDiagnostics): void {
-  deliver(pi, `Workflow ${utf8Prefix(diagnostic.workflowName, 128)} failure diagnostics: ${serializeWorkflowFailureDiagnostics(diagnostic)}`);
+  deliver(pi, formatWorkflowFailureDelivery(diagnostic));
 }
 
 type WorkflowEventSink = { emit: (name: string, payload: unknown) => unknown };
