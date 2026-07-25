@@ -1,4 +1,8 @@
 # Changelog
+## Unreleased
+
+- Added workflow-specific `SYSTEM.md` files and role-level system prompt replacement for workflow agents.
+
 ## [3.2.0] - 2026-07-25
 
 ### Highlights

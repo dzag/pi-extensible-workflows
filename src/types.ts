@@ -79,7 +79,7 @@ export interface WorkflowRetryProvenance { sourceRunId: string; lineageRootRunId
 export interface WorkflowPhaseRecord { phase: string; afterAgent: number }
 export interface RunRecord { id: string; workflowName: string; cwd: string; sessionId: string; state: RunState; parentRunId?: string; retry?: WorkflowRetryProvenance; phase?: string; phaseHistory?: readonly WorkflowPhaseRecord[]; agents: readonly AgentRecord[]; error?: WorkflowErrorShape; budget?: WorkflowBudget; budgetVersion?: number; usage?: WorkflowBudgetUsage; budgetEvents?: readonly BudgetEvent[]; events?: readonly WorkflowRunEvent[] }
 export const LAUNCH_SNAPSHOT_IDENTITY_VERSION = 5;
-export interface AgentDefinition { prompt?: string; description?: string; model?: string; thinking?: NonNullable<ModelSpec["thinking"]>; tools?: readonly string[]; disabledAgentResources?: AgentResourceExclusions }
+export interface AgentDefinition { prompt?: string; description?: string; model?: string; thinking?: NonNullable<ModelSpec["thinking"]>; tools?: readonly string[]; overrideSystemPrompt?: boolean; disabledAgentResources?: AgentResourceExclusions }
 export interface LaunchSnapshot { identityVersion?: number; launchKind?: "inline" | "function"; functionName?: string; script: string; args: JsonValue; metadata: WorkflowMetadata; settings: WorkflowSettings; settingsSources?: WorkflowSettingsSources; budget?: WorkflowBudget; settingsPath?: string; modelAliases?: Readonly<Record<string, string>>; phases?: readonly string[]; models: readonly string[]; tools: readonly string[]; agentTypes: readonly string[]; roles?: Readonly<Record<string, AgentDefinition>>; projectRoles?: readonly string[]; schemas: readonly JsonSchema[] }
 export interface PreflightCapabilities { models: ReadonlySet<string>; tools: ReadonlySet<string>; agentTypes: ReadonlySet<string>; modelAliases?: Readonly<Record<string, string>>; knownModels?: ReadonlySet<string>; settingsPath?: string; skipModelAvailability?: boolean }
 export interface PreflightResult { metadata: WorkflowMetadata; referenced: { phases: readonly string[]; models: readonly string[]; tools: readonly string[]; agentTypes: readonly string[] }; schemas: readonly JsonSchema[]; dynamicAgentRoles: boolean }
@@ -117,6 +117,7 @@ export interface SessionInput {
   agentDir?: string;
   customTools?: SessionCustomTools;
   resultTool?: ToolDefinition;
+  systemPrompt?: string;
   systemPromptAppend?: string;
   extensionFactories?: InlineExtension[];
   resourcePolicy?: AgentResourcePolicy;

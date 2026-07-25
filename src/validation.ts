@@ -141,7 +141,7 @@ export function parseRoleMarkdown(content: string, strict = false, rolePath?: st
     if (end < 0) return { prompt: content };
     const meta: Record<string, string> = {};
     for (const line of content.slice(4, end).split("\n")) {
-      const match = /^(model|thinking|tools|description)\s*:\s*(.+)$/.exec(line.trim());
+      const match = /^(model|thinking|tools|description|overrideSystemPrompt|override_system_prompt|is_system_prompt)\s*:\s*(.+)$/.exec(line.trim());
       if (match?.[1] && match[2]) meta[match[1]] = match[2].trim();
     }
     const tools = meta.tools ? meta.tools.replace(/^\[|\]$/g, "").split(",").map((tool) => tool.trim().replace(/^[']|[']$/g, "").replace(/^["]|["]$/g, "")).filter(Boolean) : undefined;
@@ -152,6 +152,8 @@ export function parseRoleMarkdown(content: string, strict = false, rolePath?: st
     if (meta.description) definition.description = meta.description.replace(/^[']|[']$/g, "").replace(/^["]|["]$/g, "");
     if (thinking) definition.thinking = thinking as NonNullable<AgentDefinition["thinking"]>;
     if (tools) definition.tools = tools;
+    const overrideSystemPrompt = meta.overrideSystemPrompt ?? meta.override_system_prompt ?? meta.is_system_prompt;
+    if (overrideSystemPrompt) definition.overrideSystemPrompt = overrideSystemPrompt === "true";
     return definition;
   }
   const normalized = content.replace(/\r\n?/g, "\n");
@@ -161,12 +163,14 @@ export function parseRoleMarkdown(content: string, strict = false, rolePath?: st
   catch (error) { fail("INVALID_METADATA", `Invalid role frontmatter: ${errorText(error)}`); }
   if (!object(parsed.frontmatter)) fail("INVALID_METADATA", "Role frontmatter must be an object");
   const { model, thinking, tools, description, disabledAgentResources } = parsed.frontmatter;
+  const overrideSystemPrompt = parsed.frontmatter.overrideSystemPrompt ?? parsed.frontmatter.override_system_prompt ?? parsed.frontmatter.is_system_prompt;
   if (model !== undefined && (typeof model !== "string" || model.trim() === "")) fail("INVALID_METADATA", "Role model must be a non-empty string");
   if (thinking !== undefined && (typeof thinking !== "string" || !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinking))) fail("INVALID_METADATA", `Invalid role thinking level: ${typeof thinking === "string" ? thinking : typeof thinking}`);
   if (description !== undefined && (typeof description !== "string" || description.trim() === "" || description.length > 1024 || /[\r\n]/.test(description))) fail("INVALID_METADATA", "Role description must be a non-empty single-line string of at most 1024 characters");
+  if (overrideSystemPrompt !== undefined && typeof overrideSystemPrompt !== "boolean") fail("INVALID_METADATA", "Role overrideSystemPrompt must be a boolean");
   if (tools !== undefined && (!Array.isArray(tools) || tools.some((tool) => typeof tool !== "string" || tool.trim() === ""))) fail("INVALID_METADATA", "Role tools must be an array of non-empty strings");
   const normalizedResources = validateAgentResourceExclusions(disabledAgentResources, rolePath ?? "<role>", "INVALID_METADATA");
-  return { prompt: parsed.body, ...(typeof description === "string" ? { description: description.trim() } : {}), ...(typeof model === "string" ? { model: model.trim() } : {}), ...(typeof thinking === "string" ? { thinking: thinking as NonNullable<AgentDefinition["thinking"]> } : {}), ...(Array.isArray(tools) ? { tools: tools.map((tool) => (tool as string).trim()) } : {}), ...(normalizedResources ? { disabledAgentResources: normalizedResources } : {}) };
+  return { prompt: parsed.body, ...(typeof description === "string" ? { description: description.trim() } : {}), ...(typeof model === "string" ? { model: model.trim() } : {}), ...(typeof thinking === "string" ? { thinking: thinking as NonNullable<AgentDefinition["thinking"]> } : {}), ...(Array.isArray(tools) ? { tools: tools.map((tool) => (tool as string).trim()) } : {}), ...(typeof overrideSystemPrompt === "boolean" ? { overrideSystemPrompt } : {}), ...(normalizedResources ? { disabledAgentResources: normalizedResources } : {}) };
 }
 
 const ROLE_DIRECTORY = "pi-extensible-workflows";
