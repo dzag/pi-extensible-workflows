@@ -331,6 +331,32 @@ void test("export refuses existing files and replaces them only with --force", a
   assert.equal(await runCli(["export", "cliEcho", "--output", directory, "--force"], { cwd: paths.cwd, agentDir: paths.agentDir, stderr: () => {} }), 1);
   assert.equal(lstatSync(directory).isDirectory(), true);
 });
+void test("portable bundle export writes a self-contained payload and external-runtime launcher", async () => {
+  registerCliExtension();
+  const paths = fixture();
+  const destination = join(paths.root, "bundle");
+  let output = "";
+  assert.equal(await runCli(["bundle", "cliEcho", "--output", destination], { cwd: paths.cwd, agentDir: paths.agentDir, stderr: () => {} }, (text) => { output += text; } ), 0);
+  const manifest = JSON.parse(readFileSync(join(destination, "manifest.json"), "utf8")) as { format: string; version: number; command: string; workflow: { name: string; input: unknown; output: unknown }; runtime: { pi: string; "pi-extensible-workflows": string }; requirements: { commands: string[]; environment: string[] } };
+  assert.deepEqual({ format: manifest.format, version: manifest.version, command: manifest.command }, { format: "pi-extensible-workflows-bundle", version: 1, command: "cli-echo" });
+  assert.equal(manifest.workflow.name, "cliEcho");
+  assert.deepEqual(manifest.requirements, { roles: [], aliases: [], tools: [], commands: [], environment: [] });
+  assert.notEqual(manifest.runtime.pi, "");
+  assert.notEqual(manifest.runtime["pi-extensible-workflows"], "unknown");
+  assert.equal(lstatSync(join(destination, "cli-echo")).mode & 0o111, 0o111);
+  assert.match(readFileSync(join(destination, "cli-echo"), "utf8"), /payload\/runner\.mjs/);
+  assert.match(readFileSync(join(destination, "payload", "workflow.mjs"), "utf8"), /registerWorkflowExtension/);
+  assert.match(readFileSync(join(destination, "payload", "runner.mjs"), "utf8"), /pi-extensible-workflows@/);
+  assert.match(output, /Run .* setup/);
+  writeFileSync(join(paths.agentDir, "pi-extensible-workflows", "roles", "reviewer.md"), "---\nmodel: openai/gpt\n---\nReview the result");
+  registerCliExtension();
+  const selectedDestination = join(paths.root, "selected-bundle");
+  assert.equal(await runCli(["bundle", "cliEcho", "--output", selectedDestination, "--role", "reviewer", "--command", "git", "--environment", "REVIEW_TOKEN"], { cwd: paths.cwd, agentDir: paths.agentDir, stderr: () => {} }), 0);
+  const selectedManifest = JSON.parse(readFileSync(join(selectedDestination, "manifest.json"), "utf8")) as { requirements: { roles: string[]; commands: string[]; environment: string[] } };
+  assert.deepEqual(selectedManifest.requirements, { roles: ["reviewer"], aliases: [], tools: [], commands: ["git"], environment: ["REVIEW_TOKEN"] });
+  assert.match(readFileSync(join(selectedDestination, "payload", "workflow.mjs"), "utf8"), /roleDirectories/);
+  assert.match(readFileSync(join(selectedDestination, "payload", "roles", "reviewer.md"), "utf8"), /Review the result/);
+});
 void test("CLI validates registered function output schemas", () => {
   const paths = fixture();
   const result = runIsolatedCli(paths, `cliBadOutput: { description: "Return an invalid result", input: { type: "object", additionalProperties: false }, output: { type: "object", properties: { issue: { type: "integer" } }, required: ["issue"], additionalProperties: false }, run: () => ({ issue: "not an integer" }) }`, ["run", "cliBadOutput"]);

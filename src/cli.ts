@@ -8,7 +8,8 @@ import { ProjectTrustStore, SessionManager, SettingsManager, createAgentSessionF
 import { Value } from "typebox/value";
 import { doctor, doctorExitCode, formatDoctorReport, type DoctorOptions } from "./doctor.js";
 import { doctorCleanup, doctorCleanupExitCode, formatDoctorCleanupReport, type DoctorCleanupOptions } from "./doctor-cleanup.js";
-import workflowExtension, { formatWorkflowProgress, truncateWorkflowProgress, workflowCatalog, workflowSettingsPath, type JsonSchema, type JsonValue, type WorkflowProgressStyles } from "./index.js";
+import workflowExtension, { formatWorkflowProgress, loadAgentDefinitions, registeredWorkflowFunctions, truncateWorkflowProgress, workflowCatalog, workflowSettingsPath, type JsonSchema, type JsonValue, type WorkflowProgressStyles } from "./index.js";
+import { portableEngineVersion, portablePiVersion, writePortableWorkflowBundle } from "./bundles.js";
 import { runSessionInspector, transcriptFileLines, type InspectMode } from "./session-inspector.js";
 import type { PersistedRun } from "./persistence.js";
 import type { WorkflowCatalogFunction } from "./index.js";
@@ -158,7 +159,8 @@ function launcherHelpLines(): string[] {
   ];
 }
 function workflowUsage(): string { return [`Usage: pi-extensible-workflows run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force]`, "", "Launcher options:", ...launcherHelpLines()].join("\n") + "\n"; }
-function exportUsage(): string { return [`Usage: pi-extensible-workflows export <workflow-name> [--name <command>] [--output <path>] [--force]`, "", "Launcher options:", ...launcherHelpLines()].join("\n") + "\n"; }
+function exportUsage(): string { return [`Usage: pi-extensible-workflows export <workflow-name> [--name <command>] [--output <path>] [--force] [--bundle]`, "", "Launcher options:", ...launcherHelpLines()].join("\n") + "\n"; }
+function bundleUsage(): string { return [`Usage: pi-extensible-workflows bundle <workflow-name> [--name <command>] [--output <directory>] [--force]`, "", "The bundle contains a launcher, manifest, workflow payload, and external-runtime setup instructions.", "Repeat --role, --alias, --tool, --command, or --environment to declare recipient requirements."].join("\n") + "\n"; }
 function parseInspectArgs(rawArgs: readonly string[]): { sessionId?: string; mode: InspectMode } {
   let sessionId: string | undefined;
   let mode: InspectMode = "tui";
@@ -415,6 +417,7 @@ async function runWorkflowCli(rawArgs: readonly string[], options: WorkflowIo): 
 async function exportWorkflowCli(rawArgs: readonly string[], options: WorkflowIo): Promise<number> {
   const parsed = stripTrustOptions(rawArgs);
   const args = parsed.args;
+  if (args.includes("--bundle")) return bundleWorkflowCli(args.filter((arg) => arg !== "--bundle"), options);
   if (!args.length || args[0] === "--help" || args[0] === "-h") { options.write(exportUsage()); return args.length ? 0 : 1; }
   const workflowName = args[0] as string;
   return withWorkflowRuntime({ ...options, ...(parsed.trustOverride !== undefined ? { trustOverride: parsed.trustOverride } : {}) }, async (runtime) => {
@@ -446,6 +449,56 @@ async function exportWorkflowCli(rawArgs: readonly string[], options: WorkflowIo
       if (!pathEntries.includes(binDir)) options.stderr(`Warning: ${binDir} is not in PATH\n`);
     }
     options.write(`Exported ${destination}\n`);
+    return 0;
+  });
+}
+
+async function bundleWorkflowCli(rawArgs: readonly string[], options: WorkflowIo): Promise<number> {
+  const parsed = stripTrustOptions(rawArgs);
+  const args = parsed.args;
+  if (!args.length || args[0] === "--help" || args[0] === "-h") { options.write(bundleUsage()); return args.length ? 0 : 1; }
+  const workflowName = args[0] as string;
+  return withWorkflowRuntime({ ...options, ...(parsed.trustOverride !== undefined ? { trustOverride: parsed.trustOverride } : {}) }, async (runtime) => {
+    let name: string | undefined;
+    let output: string | undefined;
+    let force = false;
+    const requirements = { roles: [] as string[], aliases: [] as string[], tools: [] as string[], commands: [] as string[], environment: [] as string[] };
+    for (let index = 1; index < args.length; index += 1) {
+      const arg = args[index] as string;
+      if (arg === "--force") { force = true; continue; }
+      const equals = arg.indexOf("=");
+      const option = equals >= 0 ? arg.slice(0, equals) : arg;
+      if (option === "--name" || option === "--output" || Object.prototype.hasOwnProperty.call({ "--role": "roles", "--alias": "aliases", "--tool": "tools", "--command": "commands", "--environment": "environment" }, option)) {
+        const value = equals >= 0 ? arg.slice(equals + 1) : args[++index];
+        if (!value) throw new Error(`Missing value for ${option}`);
+        if (option === "--name") name = value;
+        else if (option === "--output") output = value;
+        else {
+          const requirement = { "--role": "roles", "--alias": "aliases", "--tool": "tools", "--command": "commands", "--environment": "environment" }[option] as keyof typeof requirements;
+          requirements[requirement].push(value);
+        }
+        continue;
+      }
+      if (arg === "--help" || arg === "-h") { options.write(bundleUsage()); return 0; }
+      throw new Error(`Unknown option: ${arg}`);
+    }
+    const fn = runtime.catalog.functions.find((candidate) => candidate.name === workflowName);
+    if (!fn) throw new Error(`Unknown workflow function: ${workflowName}`);
+    const registered = registeredWorkflowFunctions()[workflowName];
+    if (!registered) throw new Error(`Workflow ${workflowName} is not exportable because its registered implementation is unavailable`);
+    const definitions = requirements.roles.length ? loadAgentDefinitions(options.cwd ?? process.cwd(), options.agentDir ?? getAgentDir(), runtime.services.settingsManager.isProjectTrusted()) : {};
+    const roles = Object.fromEntries(requirements.roles.map((role) => {
+      if (!role || role === "." || role === ".." || role.includes("/") || role.includes("\\")) throw new Error(`Invalid role name for bundle: ${role}`);
+      const definition = definitions[role];
+      if (!definition) throw new Error(`Unknown role for bundle: ${role}`);
+      return [role, definition];
+    }));
+    const command = commandName(name ?? kebabCase(workflowName));
+    if (!command) throw new Error("Command name must be a non-empty name without path separators");
+    const destination = output ?? join(homedir(), ".local", "share", "pi-extensible-workflows", "bundles", command);
+    writePortableWorkflowBundle({ destination, command, workflow: fn, functionSource: registered.run.toString(), requirements, roles, piVersion: portablePiVersion(), engineVersion: portableEngineVersion(), force });
+    options.write(`Bundled ${workflowName} at ${destination}\n`);
+    options.write(`Run ${join(destination, command)} setup before launching the workflow.\n`);
     return 0;
   });
 }
@@ -483,9 +536,10 @@ export async function runCli(args: readonly string[], options: CliOptions = {}, 
       return 0;
     } catch (error) { write(`Error: ${error instanceof Error ? error.message : String(error)}\n`); return 1; }
   }
-  if (args[0] === "run" || args[0] === "export") {
+  if (args[0] === "bundle" || args[0] === "run" || args[0] === "export") {
     try {
       const workflowOptions: WorkflowIo = { write, stderr, ...(options.cwd !== undefined ? { cwd: options.cwd } : {}), ...(options.agentDir !== undefined ? { agentDir: options.agentDir } : {}), ...(options.signal ? { signal: options.signal } : {}), ...(options.trustOverride !== undefined ? { trustOverride: options.trustOverride } : {}), ...(options.isTTY !== undefined ? { isTTY: options.isTTY } : {}) };
+      if (args[0] === "bundle") return await bundleWorkflowCli(args.slice(1), workflowOptions);
       return args[0] === "run" ? await runWorkflowCli(args.slice(1), workflowOptions) : await exportWorkflowCli(args.slice(1), workflowOptions);
     } catch (error) { stderr(`Error: ${error instanceof Error ? error.message : String(error)}\n`); return 1; }
   }
