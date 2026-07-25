@@ -20,31 +20,23 @@ For source installs and local development, see the [installation guide](https://
 
 ## Capabilities
 
-The main Pi agent acts as the orchestrator: it writes workflow scripts on the fly for each task. Pi extensions can add reusable functions and variables to those scripts; every registered function is also directly runnable as a top-level workflow.
-
-Inline workflow launches require a non-empty `name`; registered function launches reject `name` and use their registered function name as the run name. Workflow worktree scopes always use the explicit `withWorktree(name, callback)` form.
-
-A workflow can fan out across specialized agents, combine their results, and resume without rerunning completed work.
+The default path is a named inline workflow: write a `script` that fans out independent work with `parallel(...)`, awaits the keyed results, passes them into one summarizing `agent(...)`, and returns. Inline launches require a non-empty `name`; registered function launches reject `name` and use their registered function name as the run name. Runs are backgrounded by default; set `foreground: true` when the final value must be returned in the same tool call.
 
 ```js
 const reviews = await parallel("review", {
-  correctness: () =>
-    agent("Review the current changes for correctness issues."),
-  security: () =>
-    agent("Review the current changes for security risks.", {
-      role: "security-specialist",
-    }),
+  correctness: () => agent("Review the current changes for correctness issues."),
+  security: () => agent("Review the current changes for security risks."),
   tests: () => agent("Review the current changes for missing test coverage."),
 });
 
-const summary = await agent(
-  prompt("Deduplicate and prioritize these findings:\n\n{reviews}", {
-    reviews,
-  }),
+return await agent(
+  prompt("Summarize and prioritize these findings:\n\n{reviews}", { reviews }),
 );
-
-return summary;
 ```
+
+**Advanced capabilities:** Use registered functions, `outputSchema`, budgets, checkpoints, worktrees, retry/resume, CLI export, and `pipeline(...)` when the task requires them. They remain available without complicating the basic inline path. Workflow worktree scopes always use the explicit `withWorktree(name, callback)` form.
+
+The main Pi agent writes these scripts on the fly for each task; extensions can add reusable functions and variables, and completed workflows can resume without rerunning completed work.
 
 Learn more about roles, workflow contracts, and extension APIs in the documentation:
 

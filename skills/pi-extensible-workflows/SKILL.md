@@ -5,39 +5,27 @@ description: Use when the task is complex enough to require multiple subagents o
 
 # pi-extensible-workflows
 
-Use `workflow` only for genuinely multi-agent orchestration; one agent uses ordinary tools or `Agent` directly. Give phases distinct responsibilities and keep result flow explicit.
+## Default path
 
-## Example
+Use `workflow` only for genuinely multi-agent orchestration; a single agent uses ordinary tools or `Agent` directly. Give phases distinct responsibilities and keep result flow explicit.
+
+For most multi-agent tasks, start with a named inline workflow: provide a non-empty `name` and a `script` that fans out independent work with `parallel(...)`, awaits the keyed results, passes them into one summarizing `agent(...)`, and returns.
 
 ```js
-const reportSchema = {
-  type: "object",
-  properties: {
-    summary: { type: "string" },
-    findings: { type: "array", items: { type: "string" } },
-  },
-  required: ["summary", "findings"],
-  additionalProperties: false,
-};
-
 const reports = await parallel("research", {
-  first: () =>
-    agent("Research the first target.", {
-      role: "scout",
-      outputSchema: reportSchema,
-    }),
-  second: () =>
-    agent("Research the second target.", {
-      role: "scout",
-      outputSchema: reportSchema,
-    }),
+  first: () => agent("Research the first target."),
+  second: () => agent("Research the second target."),
 });
 
-return agent(prompt("Review these reports:\n\n{reports}", { reports }), {
-  role: "reviewer",
-  outputSchema: reportSchema,
-});
+return await agent(
+  prompt("Summarize these reports:\n\n{reports}", { reports }),
+);
 ```
+
+Await `parallel(...)` or `pipeline(...)` results before interpolation. Runs are backgrounded by default; set the tool-call `foreground: true` when the caller must wait for the final value.
+
+## Runtime and safety rules
+
 
 Inline launches require a non-empty `name`. Registered function launches must omit `name`; they use `workflow` as the run name:
 
@@ -63,6 +51,10 @@ if (testRes.exitCode === 0) {
 ```
 
 Most of the times using `shell()` to perform mutations is an antipattern. Use it mainly for verifications or idempotent actions.
+
+## Advanced capabilities
+
+Registered functions, `outputSchema`, budgets, checkpoints, worktrees, retry/resume, CLI export, and `pipeline(...)` remain available for workflows that need them. Treat these as advanced controls rather than requirements for the default inline path.
 
 ## `agent()` options
 
