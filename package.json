@@ -25,6 +25,7 @@
     "src",
     "skills",
     "evals",
+    "examples",
     "test/fixtures"
   ],
   "scripts": {

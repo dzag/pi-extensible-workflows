@@ -53,6 +53,7 @@ Learn more about roles, workflow contracts, and extension APIs in the documentat
 - [Aggregate run budgets](https://vekexasia.github.io/pi-extensible-workflows/developers.html#budgets)
 - [Workflow DSL and worktrees](https://vekexasia.github.io/pi-extensible-workflows/developers.html#dsl)
 - [Extension authoring guide](https://vekexasia.github.io/pi-extensible-workflows/extensions.html)
+- [Copy-paste extension template](https://github.com/vekexasia/pi-extensible-workflows/tree/main/examples/workflow-extension-template)
 - [Run artifacts and lifecycle events](https://vekexasia.github.io/pi-extensible-workflows/developers.html#lifecycle)
 - [Run inspection and recovery](https://vekexasia.github.io/pi-extensible-workflows/developers.html#operations)
 - [Agent patterns and model selection](https://vekexasia.github.io/pi-extensible-workflows/agents.html#patterns)
