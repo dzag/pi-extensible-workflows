@@ -14,13 +14,13 @@ node --test examples/workflow-extension-template/extension.test.mjs
 ```
 
 For a published package, run the same test from this directory after installing
-`pi-extensible-workflows` in the surrounding project. Load `extension.mjs` as a
-trusted Pi extension.
+`pi-extensible-workflows` in the surrounding project. Copy the directory into a
+trusted Pi extension location; Pi auto-discovers its `index.js` entry point.
 
 
 ## Files
 
-- `extension.mjs` registers `greet` and resolves `roles/` from `import.meta.url`.
+- `index.js` registers `greet` and resolves `roles/` from `import.meta.url`.
   Relative role-directory strings are not accepted by the extension API.
 - `roles/reviewer.md` is a portable packaged role with no provider or tool
   assumptions.

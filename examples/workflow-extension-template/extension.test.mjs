@@ -1,11 +1,31 @@
 import assert from "node:assert/strict";
+import { cp, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
-import { beginWorkflowExtensionLoading, loadingRegistry, registeredWorkflowFunctions, registeredWorkflowRoleDirectoryRegistrations, workflowCatalog } from "pi-extensible-workflows";
+import { fileURLToPath } from "node:url";
+import { discoverAndLoadExtensions } from "@earendil-works/pi-coding-agent";
+import { beginWorkflowExtensionLoading, loadingRegistry, registeredWorkflowFunctions, registeredWorkflowRoleDirectoryRegistrations, resetWorkflowRegistry, workflowCatalog } from "pi-extensible-workflows";
 
-test("registers the function, packaged role, and opt-in advanced pieces", async () => {
-  const { default: extension } = await import("./extension.mjs");
+test("discovers the copied directory as a trusted Pi extension", async () => {
+  const root = await mkdtemp(join(tmpdir(), "workflow-extension-template-"));
+  try {
+    const destination = join(root, ".pi", "extensions", "workflow-extension-template");
+    await mkdir(join(root, "node_modules"), { recursive: true });
+    const packageEntry = fileURLToPath(import.meta.resolve("pi-extensible-workflows"));
+    const packageRoot = join(dirname(packageEntry), "..", "..");
+    await symlink(packageRoot, join(root, "node_modules", "pi-extensible-workflows"), "dir");
+    await cp(dirname(fileURLToPath(import.meta.url)), destination, { recursive: true });
+    const result = await discoverAndLoadExtensions([], root, join(root, ".pi", "agent"));
+    assert.equal(result.errors.length, 0);
+    assert.equal(result.extensions.length, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+
+  resetWorkflowRegistry();
+  const { default: extension } = await import("./index.js");
   beginWorkflowExtensionLoading();
   extension();
 
