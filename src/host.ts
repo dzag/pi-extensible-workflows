@@ -1145,7 +1145,15 @@ export function formatWorkflowFailureDelivery(diagnostic: WorkflowFailureDiagnos
   const failedPath = diagnostic.failedAt ? `; failed path=${deliveryPart(diagnostic.failedAt, 512)}` : "";
   const nextAction = diagnostic.retry ? `; next action: ${deliveryPart(diagnostic.retry.action, 256)}` : "";
   const artifacts = `; artifacts: runDirectory=${deliveryPart(diagnostic.artifacts.runDirectory, 512)} statePath=${deliveryPart(diagnostic.artifacts.statePath, 512)} journalPath=${deliveryPart(diagnostic.artifacts.journalPath, 512)}`;
-  return `Workflow ${name} failed (runId=${runId}): error=${error}${failedPath}${nextAction}${artifacts}`;
+  const line = `Workflow ${name} failed (runId=${runId}): error=${error}${failedPath}${nextAction}${artifacts}`;
+  return Buffer.byteLength(line) <= DELIVERY_LIMIT_BYTES ? line : utf8Prefix(line, DELIVERY_LIMIT_BYTES);
+}
+function formatWorkflowFailureDeliveryFallback(workflowName: string, runId: string, runDirectory: string, error: unknown): string {
+  const code = errorCode(error) ?? "INTERNAL_ERROR";
+  const failedPath = workflowFailedAt(error);
+  const nextAction = code === "BUDGET_EXHAUSTED" || code === "CANCELLED" ? "" : `; next action: workflow_retry({ runId: ${JSON.stringify(runId)} })`;
+  const line = `Workflow ${deliveryPart(workflowName, 128)} failed (runId=${deliveryPart(runId, 128)}): error=${code}: ${deliveryPart(formatWorkflowFailure(error), 768)}${failedPath ? `; failed path=${deliveryPart(failedPath, 512)}` : ""}${nextAction}; artifacts: runDirectory=${deliveryPart(runDirectory, 512)} statePath=${deliveryPart(join(runDirectory, "state.json"), 512)} journalPath=${deliveryPart(join(runDirectory, "journal.json"), 512)}`;
+  return Buffer.byteLength(line) <= DELIVERY_LIMIT_BYTES ? line : utf8Prefix(line, DELIVERY_LIMIT_BYTES);
 }
 
 function serializeWorkflowFailureDiagnostics(diagnostic: WorkflowFailureDiagnostics): string { return JSON.stringify(diagnostic); }
@@ -2307,7 +2315,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         }, (error: unknown) => {
           const diagnostic = failureDiagnosticsFrom(error);
           if (diagnostic) deliverFailure(pi, diagnostic);
-          else deliver(pi, `Workflow ${checked.metadata.name} failed: ${formatWorkflowFailure(error)}`);
+          else deliver(pi, formatWorkflowFailureDeliveryFallback(checked.metadata.name, runId, store.directory, error));
         });
         return { content: [{ type: "text" as const, text: JSON.stringify({ runId, state: "running" }) }], details: { runId, preview: `Started workflow ${runId}.` } };
       }

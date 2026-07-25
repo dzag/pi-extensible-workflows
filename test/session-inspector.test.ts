@@ -270,6 +270,10 @@ void test("filters persisted inspection to failed runs", async () => {
     assert.equal(await runCli(["inspect", sessionId, "--summary", "--failed"], { cwd, isTTY: false }, (text) => { summary += text; }), 0);
     assert.match(summary, /failed-run/);
     assert.doesNotMatch(summary, /completed-run/);
+    let defaultSummary = "";
+    assert.equal(await runCli(["inspect", sessionId, "--failed"], { cwd, isTTY: false }, (text) => { defaultSummary += text; }), 0);
+    assert.match(defaultSummary, /failed-run/);
+    assert.doesNotMatch(defaultSummary, /completed-run/);
     let json = "";
     assert.equal(await runCli(["inspect", sessionId, "--json", "--failed"], { cwd, isTTY: false }, (text) => { json += text; }), 0);
     const parsed = JSON.parse(json) as { runs: Array<{ runId: string; state: string }> };
