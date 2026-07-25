@@ -549,3 +549,17 @@ void test("maintains an atomic compact summary and derives legacy summaries", as
   assert.equal(legacy.state, "failed");
   assert.deepEqual(legacy.replayablePaths, ["agent/one"]);
 });
+
+void test("loadSummary derives from authoritative state and journal when the projection is stale", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-summary-authority-"));
+  const cwd = join(home, "project");
+  const store = new RunStore(cwd, "session-a", "run-a", home);
+  await store.create(run(cwd), snapshot);
+  const stale = await store.loadSummary();
+  await store.updateState((current) => ({ ...current, usage: { tokens: 42, costUsd: 1, durationMs: 2, agentLaunches: 3 } }));
+  await store.complete("agent/one", "done");
+  writeFileSync(join(store.directory, "summary.json"), `${JSON.stringify(stale)}\n`);
+  const current = await store.loadSummary();
+  assert.deepEqual(current.usage, { tokens: 42, costUsd: 1, durationMs: 2, agentLaunches: 3 });
+  assert.deepEqual(current.replayablePaths, ["agent/one"]);
+});

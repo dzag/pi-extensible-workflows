@@ -252,9 +252,9 @@ export class RunStore {
       throw error;
     }
   }
-  private async refreshSummary(runOverride?: PersistedRun): Promise<void> {
+  private async refreshSummary(): Promise<void> {
     const write = this.summaryWrite.then(async () => {
-      const run = runOverride ?? await json<PersistedRun>(join(this.directory, "state.json"));
+      const run = await json<PersistedRun>(join(this.directory, "state.json"));
       const journal = await json<Journal>(join(this.directory, "journal.json"));
       const previous = await json<Partial<RunSummary>>(join(this.directory, "summary.json")).catch(() => undefined);
       const fallbackCreatedAt = await stat(join(this.directory, "state.json")).then((value) => new Date(value.mtimeMs).toISOString());
@@ -277,11 +277,11 @@ export class RunStore {
   }
   async loadSummary(): Promise<RunSummary> {
     await this.stateWrite;
+    await this.journalWrite;
     await this.summaryWrite;
     const run = await json<PersistedRun>(join(this.directory, "state.json"));
-    const previous = await json<RunSummary>(join(this.directory, "summary.json")).catch(() => undefined);
-    if (previous?.schemaVersion === 1 && previous.runId === run.id && previous.sessionId === run.sessionId && previous.state === run.state) return previous;
     const journal = await json<Journal>(join(this.directory, "journal.json"));
+    const previous = await json<RunSummary>(join(this.directory, "summary.json")).catch(() => undefined);
     const fallbackCreatedAt = await stat(join(this.directory, "state.json")).then((value) => new Date(value.mtimeMs).toISOString());
     return summaryFromRun(run, this.directory, journal, previous, fallbackCreatedAt, fallbackCreatedAt);
   }
@@ -289,8 +289,8 @@ export class RunStore {
   async saveState(run: PersistedRun): Promise<void> {
     const write = this.stateWrite.then(async () => {
       if (resolve(run.cwd) !== this.cwd || run.sessionId !== this.sessionId || run.id !== this.runId) throw new WorkflowError("INTERNAL_ERROR", "Run identity does not match its session-scoped store");
-      await this.refreshSummary(run).catch(() => undefined);
       await atomicJson(join(this.directory, "state.json"), run);
+      await this.refreshSummary();
     });
     this.stateWrite = write.catch(() => undefined);
     await write;
@@ -303,8 +303,8 @@ export class RunStore {
       if (resolve(current.cwd) !== this.cwd || current.sessionId !== this.sessionId || current.id !== this.runId) throw new WorkflowError("RESUME_INCOMPATIBLE", "Persisted run belongs to another cwd or Pi session");
       result = await update(current);
       if (resolve(result.cwd) !== this.cwd || result.sessionId !== this.sessionId || result.id !== this.runId) throw new WorkflowError("INTERNAL_ERROR", "Run identity does not match its session-scoped store");
-      await this.refreshSummary(result).catch(() => undefined);
       await atomicJson(join(this.directory, "state.json"), result);
+      await this.refreshSummary();
     });
     this.stateWrite = write.catch(() => undefined);
     await write;

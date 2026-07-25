@@ -339,6 +339,14 @@ void test("CLI validates registered function output schemas", () => {
   assert.match(result.stderr, /Invalid output from cliBadOutput|invalid output/i);
 });
 
+void test("headless CLI reports the run ID when execution fails", () => {
+  const paths = fixture();
+  const result = runIsolatedCli(paths, `cliFail: { description: "Fail", input: { type: "object", additionalProperties: false }, output: { type: "string" }, run: () => { throw new Error("boom"); } }`, ["run", "cliFail"]);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /Run ID: [0-9a-f-]+/);
+});
+
 void test("CLI progress stays on stderr and the final result stays on stdout", async () => {
   registerCliExtension();
   const paths = fixture();

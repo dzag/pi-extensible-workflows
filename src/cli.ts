@@ -318,14 +318,16 @@ class CliProgress {
   #lines = 0;
   #frame = 0;
   #run: PersistedRun | undefined;
+  #runId: string | undefined;
   #timer: ReturnType<typeof setInterval> | undefined;
   #interactive: boolean;
   #styles: WorkflowProgressStyles;
-  constructor(private readonly stderr: (text: string) => void, tty: boolean) {
+  constructor(private readonly stderr: (text: string) => void, tty: boolean, private readonly onRunId: (runId: string) => void) {
     this.#interactive = tty && process.env.NO_COLOR === undefined && process.env.TERM !== "dumb";
     this.#styles = terminalProgressStyles(this.#interactive);
   }
   update(run: PersistedRun): void {
+    if (this.#runId !== run.id) { this.#runId = run.id; this.onRunId(run.id); }
     const stable = formatWorkflowProgress(run, "◇", this.#styles);
     if (!this.#interactive) { if (stable !== this.#lastStable) { this.#lastStable = stable; this.stderr(`${stable}\n`); } return; }
     this.#run = run;
@@ -351,11 +353,14 @@ class CliProgress {
 type CliWorkflowResult = { value: JsonValue; runId?: string };
 async function invokeWorkflow(fn: WorkflowCatalogFunction, args: Record<string, JsonValue>, runtime: WorkflowRuntime, options: WorkflowIo, context: unknown): Promise<CliWorkflowResult> {
   if (!Value.Check(fn.input, args)) throw new Error(`Invalid input for ${fn.name}`);
-  const progress = new CliProgress(options.stderr, options.isTTY ?? process.stderr.isTTY);
+  let announcedRunId: string | undefined;
+  const announceRunId = (runId: string) => { if (announcedRunId === runId) return; announcedRunId = runId; options.stderr(`Run ID: ${runId}\n`); };
+  const progress = new CliProgress(options.stderr, options.isTTY ?? process.stderr.isTTY, announceRunId);
   try {
     const result = await runtime.workflowTool.execute(randomUUID(), { workflow: fn.name, args, foreground: true }, options.signal, (update: unknown) => { if (object(update) && object(update.details) && object(update.details.run)) progress.update(update.details.run as unknown as PersistedRun); }, context);
     const details = object(result.details) ? result.details : {};
     const runId = typeof details.runId === "string" ? details.runId : undefined;
+    if (runId) announceRunId(runId);
     if (has(details, "value")) return { value: details.value as JsonValue, ...(runId ? { runId } : {}) };
     const first = result.content[0];
     if (!first || first.type !== "text") throw new Error("Workflow returned no result");
@@ -402,7 +407,6 @@ async function runWorkflowCli(rawArgs: readonly string[], options: WorkflowIo): 
     if (help) { options.write(formatWorkflowCliHelp(fn)); return 0; }
     const input = parseWorkflowCliArgs(fn.input, args.slice(1));
     const result = await invokeWorkflow(fn, input, runtime, options, context);
-    if (result.runId) options.stderr(`Run ID: ${result.runId}\n`);
     options.write(`${JSON.stringify(result.value)}\n`);
     return 0;
   });
