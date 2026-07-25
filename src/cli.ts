@@ -160,7 +160,7 @@ function launcherHelpLines(): string[] {
 }
 function workflowUsage(): string { return [`Usage: pi-extensible-workflows run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force]`, "", "Launcher options:", ...launcherHelpLines()].join("\n") + "\n"; }
 function exportUsage(): string { return [`Usage: pi-extensible-workflows export <workflow-name> [--name <command>] [--output <path>] [--force] [--bundle]`, "", "Launcher options:", ...launcherHelpLines()].join("\n") + "\n"; }
-function bundleUsage(): string { return [`Usage: pi-extensible-workflows bundle <workflow-name> [--name <command>] [--output <directory>] [--force]`, "", "The bundle contains a launcher, manifest, workflow payload, and external-runtime setup instructions.", "Repeat --role, --alias, --tool, --command, or --environment to declare recipient requirements."].join("\n") + "\n"; }
+function bundleUsage(): string { return [`Usage: pi-extensible-workflows bundle <workflow-name> [--name <command>] [--output <directory>] [--force]`, "", "The bundle contains a launcher, manifest, workflow payload, and external-runtime setup instructions.", "Repeat --role, --alias, --tool, --command, or --environment to declare recipient requirements.", "Use --extension, --skill, --resource, and --dependency to copy selected payload resources."].join("\n") + "\n"; }
 function parseInspectArgs(rawArgs: readonly string[]): { sessionId?: string; mode: InspectMode } {
   let sessionId: string | undefined;
   let mode: InspectMode = "tui";
@@ -463,20 +463,21 @@ async function bundleWorkflowCli(rawArgs: readonly string[], options: WorkflowIo
     let output: string | undefined;
     let force = false;
     const requirements = { roles: [] as string[], aliases: [] as string[], tools: [] as string[], commands: [] as string[], environment: [] as string[] };
+    const resources = { extensions: [] as string[], skills: [] as string[], static: [] as string[], dependencies: [] as string[] };
     for (let index = 1; index < args.length; index += 1) {
       const arg = args[index] as string;
       if (arg === "--force") { force = true; continue; }
       const equals = arg.indexOf("=");
       const option = equals >= 0 ? arg.slice(0, equals) : arg;
-      if (option === "--name" || option === "--output" || Object.prototype.hasOwnProperty.call({ "--role": "roles", "--alias": "aliases", "--tool": "tools", "--command": "commands", "--environment": "environment" }, option)) {
+      const requirementOptions = { "--role": "roles", "--alias": "aliases", "--tool": "tools", "--command": "commands", "--environment": "environment" } as const;
+      const resourceOptions = { "--extension": "extensions", "--skill": "skills", "--resource": "static", "--dependency": "dependencies" } as const;
+      if (option === "--name" || option === "--output" || Object.prototype.hasOwnProperty.call(requirementOptions, option) || Object.prototype.hasOwnProperty.call(resourceOptions, option)) {
         const value = equals >= 0 ? arg.slice(equals + 1) : args[++index];
         if (!value) throw new Error(`Missing value for ${option}`);
         if (option === "--name") name = value;
         else if (option === "--output") output = value;
-        else {
-          const requirement = { "--role": "roles", "--alias": "aliases", "--tool": "tools", "--command": "commands", "--environment": "environment" }[option] as keyof typeof requirements;
-          requirements[requirement].push(value);
-        }
+        else if (Object.prototype.hasOwnProperty.call(requirementOptions, option)) requirements[requirementOptions[option as keyof typeof requirementOptions]].push(value);
+        else resources[resourceOptions[option as keyof typeof resourceOptions]].push(value);
         continue;
       }
       if (arg === "--help" || arg === "-h") { options.write(bundleUsage()); return 0; }
@@ -496,7 +497,12 @@ async function bundleWorkflowCli(rawArgs: readonly string[], options: WorkflowIo
     const command = commandName(name ?? kebabCase(workflowName));
     if (!command) throw new Error("Command name must be a non-empty name without path separators");
     const destination = output ?? join(homedir(), ".local", "share", "pi-extensible-workflows", "bundles", command);
-    writePortableWorkflowBundle({ destination, command, workflow: fn, functionSource: registered.run.toString(), requirements, roles, piVersion: portablePiVersion(), engineVersion: portableEngineVersion(), force });
+    const aliasTargets = Object.fromEntries(requirements.aliases.flatMap((name) => {
+      const target = runtime.catalog.modelAliases?.[name];
+      return typeof target === "string" ? [[name, target]] : [];
+    }));
+    const selectedResources = Object.values(resources).some((entries) => entries.length) ? resources : undefined;
+    writePortableWorkflowBundle({ destination, command, workflow: fn, functionSource: registered.run.toString(), requirements, aliasTargets, roles, ...(selectedResources ? { resources: selectedResources } : {}), piVersion: portablePiVersion(), engineVersion: portableEngineVersion(), force });
     options.write(`Bundled ${workflowName} at ${destination}\n`);
     options.write(`Run ${join(destination, command)} setup before launching the workflow.\n`);
     return 0;
@@ -543,7 +549,7 @@ export async function runCli(args: readonly string[], options: CliOptions = {}, 
       return args[0] === "run" ? await runWorkflowCli(args.slice(1), workflowOptions) : await exportWorkflowCli(args.slice(1), workflowOptions);
     } catch (error) { stderr(`Error: ${error instanceof Error ? error.message : String(error)}\n`); return 1; }
   }
-  write("Usage: pi-extensible-workflows doctor | inspect [session-id] [--json|--summary] | transcript <session-file> | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force]\n");
+  write("Usage: pi-extensible-workflows doctor | inspect [session-id] [--json|--summary] | transcript <session-file> | bundle <workflow-name> [--name <command>] [--output <path>] [--force] | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force]\n");
   return 1;
 }
 
