@@ -294,6 +294,39 @@ void test("retries native terminal errors as fresh workflow attempts", async () 
   assert.deepEqual(result.attempts[0]?.error, { code: "AGENT_FAILED", message: errorMessage });
   assert.deepEqual(result.attempts[1]?.result, { answer: 42 });
 });
+void test("continues terminal provider errors in the same native session when recovery retries", async () => {
+  const prompts: string[] = [];
+  const recoveries: Array<{ label: string; provider: string; model: string; error: string }> = [];
+  const messages: Array<{ role: string; content: unknown; stopReason?: string; errorMessage?: string; usage?: typeof usage }> = [terminalAssistant("TRANSIENT_PROVIDER_ERROR")];
+  let sessions = 0;
+  let disposals = 0;
+  const executor = new WorkflowAgentExecutor(root, async ({ resultTool }) => {
+    sessions += 1;
+    assert.ok(resultTool);
+    return {
+      sessionId: "same-session", sessionFile: "/sessions/same-session.jsonl", messages, getSessionStats: sessionStats,
+      async prompt(prompt) {
+        prompts.push(prompt);
+        if (prompts.length === 2) messages[0] = assistant("continued");
+        if (prompt.includes("Submit the final result")) await resultTool.execute("id", { answer: 42 }, new AbortController().signal, () => {}, {} as never);
+      },
+      dispose() { disposals += 1; },
+    };
+  });
+  const result = await executor.execute("structured", {
+    label: "schema", workflowName: "flow", schema: { type: "object", properties: { answer: { type: "number" } }, required: ["answer"], additionalProperties: false },
+    providerErrorRecovery: async (failure) => { recoveries.push(failure); return "retry"; },
+  });
+  assert.deepEqual(result.value, { answer: 42 });
+  assert.equal(sessions, 1);
+  assert.equal(disposals, 1);
+  assert.equal(recoveries.length, 1);
+  assert.deepEqual(result.attempts.map(({ attempt, sessionId }) => ({ attempt, sessionId })), [{ attempt: 1, sessionId: "same-session" }]);
+  assert.equal(prompts.length, 3);
+  assert.match(prompts[0] ?? "", /Task:\nstructured/);
+  assert.equal(prompts[1], "The provider error was transient. Continue the task from your current state.");
+  assert.match(prompts[2] ?? "", /Submit the final result/);
+});
 
 void test("retries in fresh persisted sessions and reports terminal attempt history", async () => {
   let created = 0;

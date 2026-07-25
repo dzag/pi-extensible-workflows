@@ -687,12 +687,15 @@ void test("orchestration lifecycle events cover phase, worktree, retry, checkpoi
 void test("TUI terminal provider recovery shows factual failure and retries without a recommendation", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-provider-recovery-retry-"));
   let sessions = 0;
+  let disposals = 0;
   const prompts: Array<{ title: string; options: string[] }> = [];
   let shutdown: (() => Promise<void>) | undefined;
   const createSession = async (input: SessionInput): Promise<NativeSession> => {
     const attempt = ++sessions;
     const terminal = { role: "assistant", content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: "AUTH_FAILED" };
-    return { sessionId: `recovery-retry-${String(attempt)}`, sessionFile: `/sessions/recovery-retry-${String(attempt)}.jsonl`, model: { provider: input.model.provider, model: input.model.model }, messages: [attempt === 1 ? terminal : { role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
+    const messages: Array<{ role: string; content: unknown; stopReason?: string; errorMessage?: string }> = [terminal];
+    let promptCount = 0;
+    return { sessionId: `recovery-retry-${String(attempt)}`, sessionFile: `/sessions/recovery-retry-${String(attempt)}.jsonl`, model: { provider: input.model.provider, model: input.model.model }, messages, getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { promptCount += 1; if (promptCount === 2) messages[0] = { role: "assistant", content: [{ type: "text", text: "done" }] }; }, steer: async () => {}, dispose() { disposals += 1; } };
   };
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
@@ -702,8 +705,9 @@ void test("TUI terminal provider recovery shows factual failure and retries with
   try {
     const result = await workflow.execute("id", { name: "provider-recovery-retry", script: "return await agent('work', {label:'worker', retries:2});", foreground: true }, new AbortController().signal, undefined, context) as { details?: { value?: unknown } };
     assert.equal(result.details?.value, "done");
-    assert.equal(sessions, 2);
+    assert.equal(sessions, 1);
     assert.deepEqual(prompts, [{ title: "Subagent \"worker\" failed\nCurrent provider/model: openai/gpt\nProvider error: AUTH_FAILED\nChoose what to do", options: ["Retry", "Change model", "Abort workflow"] }]);
+    assert.equal(disposals, 1);
     assert.doesNotMatch(prompts[0]?.title ?? "", /recommend/i);
   } finally {
     await shutdown?.();
