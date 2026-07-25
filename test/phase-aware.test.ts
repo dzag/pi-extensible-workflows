@@ -16,6 +16,8 @@ import {
   workflowPhaseTreeVisibleNodes,
   preflight,
   preserveWorkflowPhaseSelection,
+  workflowScriptArtifact,
+  workflowResultArtifact,
   type AgentRecord,
   type PersistedRun,
 } from "../src/index.js";
@@ -215,4 +217,10 @@ void test("phase tree navigation collapses, expands, and moves through visible r
   const folded = navigateWorkflowPhaseTree(tree, operation.id, opened.expandedNodeIds, "left");
   assert.equal(folded.nodeId, operation.id);
   assert.equal(folded.expandedNodeIds.has(operation.id), false);
+});
+
+void test("workflow artifact views use type-appropriate temporary file content", () => {
+  assert.deepEqual(workflowScriptArtifact("export const value = 1;"), { extension: ".js", content: "export const value = 1;" });
+  assert.deepEqual(workflowResultArtifact("plain result"), { extension: ".md", content: "plain result" });
+  assert.deepEqual(workflowResultArtifact({ answer: 42 }), { extension: ".json", content: "{\n  \"answer\": 42\n}\n" });
 });

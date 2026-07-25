@@ -1,11 +1,14 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
-import { copyToClipboard, getAgentDir, highlightCode, truncateToVisualLines, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
+import { copyToClipboard, getAgentDir, SettingsManager, truncateToVisualLines, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
 import { createNativeAgentSession, FairAgentScheduler, WorkflowAgentExecutor, type AgentActivity, type AgentAttempt, type AgentDefinition, type AgentProgress, type AgentProviderFailure, type AgentProviderRecovery, type SessionFactory } from "./agent-execution.js";
 import { herdrPaneId, openHerdrPane } from "./herdr.js";
 import { acquireSessionLease, listRunIds, RunStore, SessionLease, structuralPath as operationPath } from "./persistence.js";
@@ -165,6 +168,9 @@ export function formatWorkflowPreview(args: { script?: unknown; workflow?: unkno
   if (typeof args.script !== "string" || !args.script.trim()) return `workflow ${name}${registeredName ? "\nRegistered function" : ""}`;
   return [`workflow ${name}`, typeof args.description === "string" && args.description.trim() ? args.description.trim() : ""].filter(Boolean).join("\n");
 }
+export interface WorkflowArtifact { extension: ".js" | ".json" | ".md"; content: string }
+export function workflowScriptArtifact(script: string): WorkflowArtifact { return { extension: ".js", content: script }; }
+export function workflowResultArtifact(value: JsonValue): WorkflowArtifact { return typeof value === "string" ? { extension: ".md", content: value } : { extension: ".json", content: `${JSON.stringify(value, null, 2)}\n` }; }
 export const WORKFLOW_TOOL_LABEL = "Workflow";
 export const WORKFLOW_TOOL_DESCRIPTION = "Run a deterministic JavaScript workflow";
 export const WORKFLOW_TOOL_PROMPT_SNIPPET = "Run a deterministic, resumable JavaScript workflow that orchestrates subagents. Inline launches require an explicit non-empty name; registered function launches reject name and use workflow as the run name. Runs in the background by default; completion arrives as a follow-up message. Foreground results include the completed run ID. Use workflow_retry with an explicit failed run ID to replay completed structural operations; parentRunId only reuses named worktrees.";
@@ -1371,6 +1377,29 @@ function keybindingKeys(keybindings: unknown, name: string): readonly string[] |
   const getKeys = object(keybindings) ? asFn(keybindings.getKeys) as NonNullable<KeybindingsHostCapabilities["getKeys"]> | undefined : undefined;
   return getKeys ? getKeys.call(keybindings, name) : undefined;
 }
+type WorkflowTui = { stop(): void; start(): void; requestRender(force?: boolean): void };
+async function spawnWorkflowEditor(command: string, path: string): Promise<number | null> {
+  const [editor, ...editorArgs] = command.split(" ");
+  if (!editor) return null;
+  return new Promise((resolve) => {
+    let child;
+    try { child = spawn(editor, [...editorArgs, path], { stdio: "inherit", shell: process.platform === "win32" }); }
+    catch { resolve(null); return; }
+    child.once("error", () => { resolve(null); });
+    child.once("close", (code) => { resolve(code); });
+  });
+}
+async function openWorkflowArtifact(tui: WorkflowTui, command: string, artifact: WorkflowArtifact): Promise<number | null> {
+  const directory = await mkdtemp(join(tmpdir(), "pi-workflow-editor-"));
+  const path = join(directory, `artifact${artifact.extension}`);
+  try {
+    await writeFile(path, artifact.content, { encoding: "utf8", mode: 0o600 });
+    tui.stop();
+    try { return await spawnWorkflowEditor(command, path); }
+    finally { tui.start(); tui.requestRender(true); }
+  }
+  finally { await rm(directory, { recursive: true, force: true }); }
+}
 
 export default function workflowExtension(pi: ExtensionAPI, home?: string, clipboard = copyToClipboard, createSession: SessionFactory = createNativeAgentSession, agentDir?: string) {
   beginWorkflowExtensionLoading();
@@ -1583,7 +1612,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         let effective: { model: ModelSpec; requestedModel?: string; tools: readonly string[] };
         try { effective = run.executor.resolve(requested); }
         catch { effective = previous ? { model: previous.model, ...(previous.requestedModel ? { requestedModel: previous.requestedModel } : {}), tools: previous.tools } : { model: node.options.model ? modelSpec(node.options.model, run.model) : { ...run.model, ...(node.options.thinking ? { thinking: node.options.thinking } : {}) }, ...(node.options.model ? { requestedModel: node.options.model } : {}), tools: node.options.tools }; }
-        return { id: node.id, name: node.label, ...(node.options.requestedLabel ? { label: node.options.requestedLabel } : {}), path: node.id, state: node.state, ...(node.parentId ? { parentId: node.parentId } : {}), structuralPath: [...(node.options.agentIdentity?.structuralPath ?? [])], ...(node.options.parentBreadcrumb ? { parentBreadcrumb: node.options.parentBreadcrumb } : {}), ...(node.options.worktreeOwner ? { worktreeOwner: node.options.worktreeOwner } : {}), ...(node.options.role ? { role: node.options.role } : {}), ...(effective.requestedModel ? { requestedModel: effective.requestedModel } : {}), model: effective.model, tools: effective.tools, attempts: previous?.attempts ?? 0, ...(previous?.attemptDetails ? { attemptDetails: previous.attemptDetails } : {}), ...(previous?.accounting ? { accounting: previous.accounting } : {}), ...(previous?.toolCalls ? { toolCalls: previous.toolCalls } : {}), ...(previous?.activity ? { activity: previous.activity } : {}) };
+        const resultPath = node.options.agentIdentity ? agentIdentityPath(node.options.agentIdentity) : undefined;
+        return { id: node.id, name: node.label, ...(node.options.requestedLabel ? { label: node.options.requestedLabel } : {}), path: node.id, state: node.state, ...(node.parentId ? { parentId: node.parentId } : {}), structuralPath: [...(node.options.agentIdentity?.structuralPath ?? [])], ...(resultPath ? { resultPath } : {}), ...(node.options.parentBreadcrumb ? { parentBreadcrumb: node.options.parentBreadcrumb } : {}), ...(node.options.worktreeOwner ? { worktreeOwner: node.options.worktreeOwner } : {}), ...(node.options.role ? { role: node.options.role } : {}), ...(effective.requestedModel ? { requestedModel: effective.requestedModel } : {}), model: effective.model, tools: effective.tools, attempts: previous?.attempts ?? 0, ...(previous?.attemptDetails ? { attemptDetails: previous.attemptDetails } : {}), ...(previous?.accounting ? { accounting: previous.accounting } : {}), ...(previous?.toolCalls ? { toolCalls: previous.toolCalls } : {}), ...(previous?.activity ? { activity: previous.activity } : {}) };
       });
       return { ...current, agents };
     });
@@ -2404,6 +2434,14 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             const loaded = await store.load();
             const checkpoints = await store.awaitingCheckpoints();
             const worktrees = await store.worktrees();
+            const completedOperations = await store.replayableOperations();
+            const agentResults = new Map<string, JsonValue>();
+            for (const agent of loaded.run.agents) {
+              if (agent.state !== "completed") continue;
+              const prefix = `${operationPath("agent", ...(agent.structuralPath ?? []))}/`;
+              const operation = (agent.resultPath ? completedOperations.find((candidate) => candidate.path === agent.resultPath) : undefined) ?? completedOperations.find((candidate) => candidate.path.startsWith(prefix));
+              if (operation) agentResults.set(agent.id, operation.value);
+            }
             const actions = new Map<string, string>();
             const copies = new Map<string, { value: string; artifact: string }>();
             const reviews = new Map<string, AwaitingCheckpoint>();
@@ -2429,14 +2467,14 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
               }
             }
             if (ctx.mode !== "tui") actions.set("Refresh", "refresh");
-            else actions.set("View script", "view-script");
+            else actions.set("Open script in editor", "open-script");
             if (ctx.mode !== "tui" && loaded.run.agents.length) actions.set("Agents...", "agents");
             if (terminalStates.has(loaded.run.state)) add("Delete", "delete");
             if (ctx.mode === "tui") {
               addCopy("Copy run path", store.directory, "run path");
               addCopy("Copy run ID", store.runId, "run ID");
             }
-            return { dashboard: formatWorkflowPhaseDashboard(loaded.run, loaded.snapshot, process.stdout.columns || 80).join("\n"), phaseModel: buildWorkflowPhaseModel(loaded.run, loaded.snapshot), run: loaded.run, snapshot: loaded.snapshot, actions, copies, reviews, script: loaded.snapshot.script, agents: loaded.run.agents, worktrees, cwd: loaded.run.cwd };
+            return { dashboard: formatWorkflowPhaseDashboard(loaded.run, loaded.snapshot, process.stdout.columns || 80).join("\n"), phaseModel: buildWorkflowPhaseModel(loaded.run, loaded.snapshot), run: loaded.run, snapshot: loaded.snapshot, actions, copies, reviews, agentResults, agents: loaded.run.agents, worktrees, cwd: loaded.run.cwd };
           };
           const agentWorktreeFor = (dashboard: Awaited<ReturnType<typeof loadDashboard>>, agent: AgentRecord): WorktreeReference | undefined => agent.worktreeOwner ? dashboard.worktrees.find((candidate) => candidate.owner === agent.worktreeOwner) : undefined;
           const agentActionLabels = (dashboard: Awaited<ReturnType<typeof loadDashboard>>, agent: AgentRecord): string[] => {
@@ -2444,6 +2482,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             return [
               ...(agent.attemptDetails?.length && herdrPaneId() ? ["Fork as Pi session in pane"] : []),
               ...(worktree ? ["Copy branch", "Copy worktree path"] : []),
+              ...(dashboard.agentResults.has(agent.id) ? ["Open result in editor"] : []),
               "Copy agent ID",
               "Back",
             ];
@@ -2520,6 +2559,25 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                   const actionOptions = () => {
                     const agent = selectedAgentRecord();
                     return agent ? agentActionLabels(view, agent) : [...view.actions.keys(), "Back"];
+                  };
+                  let editorRunning = false;
+                  const openArtifact = async (artifact: Promise<WorkflowArtifact>, label: string): Promise<void> => {
+                    if (editorRunning) return;
+                    editorRunning = true;
+                    try {
+                      const command = SettingsManager.create(view.cwd, extensionAgentDir, { projectTrusted: projectTrusted(ctx) }).getExternalEditorCommand();
+                      if (!command) { ctx.ui.notify(`Cannot open ${label}: no external editor is configured.`, "warning"); return; }
+                      const exitCode = await openWorkflowArtifact(tui, command, await artifact);
+                      if (exitCode !== 0) {
+                        const detail = exitCode === null ? "could not be started" : `exited with code ${String(exitCode)}`;
+                        ctx.ui.notify(`Cannot open ${label}: external editor ${detail}.`, "warning");
+                      }
+                    } catch (error) {
+                      ctx.ui.notify(`Cannot open ${label}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+                    } finally {
+                      editorRunning = false;
+                      tui.requestRender(true);
+                    }
                   };
                   const updateDashboard = async () => {
                     const generation = ++refreshGeneration;
@@ -2601,7 +2659,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                     },
                     invalidate() {},
                     handleInput(data: string) {
-                      if (stopRequested) return;
+                      if (stopRequested || editorRunning) return;
                       const narrow = renderedWidth < 80;
                       if (!actionMode && (data === "a" || data === "A")) { actionMode = true; actionIndex = 0; dashboardOffset = 0; tui.requestRender(); return; }
                       if (actionMode) {
@@ -2617,11 +2675,16 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                           if (!action || action === "Back") { actionMode = false; dashboardOffset = 0; }
                           else if (agent) {
                             const worktree = agentWorktreeFor(view, agent);
-                            if (action === "Copy agent ID") void copyArtifact(agent.id, "agent ID");
+                            if (action === "Open result in editor") {
+                              const result = view.agentResults.get(agent.id);
+                              if (result !== undefined) void openArtifact(Promise.resolve(workflowResultArtifact(result)), "agent result");
+                            }
+                            else if (action === "Copy agent ID") void copyArtifact(agent.id, "agent ID");
                             else if (action === "Copy branch" && worktree) void copyArtifact(worktree.branch, "branch");
                             else if (action === "Copy worktree path" && worktree) void copyArtifact(worktree.path, "worktree path");
                             else done(`__workflow_fork__:${agent.id}`);
                           }
+                          else if (action === "Open script in editor") void openArtifact(readFile(join(store.directory, "workflow.js"), "utf8").then(workflowScriptArtifact), "workflow script");
                           else if (action === "Stop") requestStop();
                           else done(action);
                         }
@@ -2673,41 +2736,6 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
               continue;
             }
             if (actionChoice === "Refresh") continue;
-            if (actionChoice === "View script") {
-              await ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
-                const highlighted = highlightCode(view.script, "javascript");
-                let offset = 0;
-                let renderedLines: string[] = [];
-                const viewport = () => Math.max(1, tuiRows(tui) - 3 - WORKFLOW_OVERLAY_BORDER_ROWS);
-                const move = (delta: number) => {
-                  const maxOffset = Math.max(0, renderedLines.length - viewport());
-                  offset = Math.max(0, Math.min(maxOffset, offset + delta));
-                };
-                return borderWorkflowOverlay({
-                  render(width: number) {
-                    renderedLines = highlighted.flatMap((line) => line ? truncateToVisualLines(line, Number.MAX_SAFE_INTEGER, width, 0).visualLines : [""]);
-                    const maxOffset = Math.max(0, renderedLines.length - viewport());
-                    offset = Math.min(offset, maxOffset);
-                    return [
-                      theme.fg("accent", "Workflow script"),
-                      ...renderedLines.slice(offset, offset + viewport()),
-                      "",
-                      theme.fg("dim", "↑↓/pgup/pgdn scroll · esc close"),
-                    ];
-                  },
-                  invalidate() {},
-                  handleInput(data: string) {
-                    if (keybindings.matches(data, "tui.select.up")) move(-1);
-                    else if (keybindings.matches(data, "tui.select.down")) move(1);
-                    else if (keybindings.matches(data, "tui.select.pageUp")) move(-viewport());
-                    else if (keybindings.matches(data, "tui.select.pageDown")) move(viewport());
-                    else if (keybindings.matches(data, "tui.select.cancel")) done(undefined);
-                    tui.requestRender();
-                  },
-                }, theme);
-              }, { overlay: true, overlayOptions: WORKFLOW_OVERLAY_OPTIONS });
-              continue;
-            }
             const copy = view.copies.get(actionChoice);
             if (copy) { await copyArtifact(copy.value, copy.artifact); continue; }
             if (actionChoice.startsWith("Review ")) {

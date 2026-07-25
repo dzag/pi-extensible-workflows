@@ -1691,53 +1691,57 @@ void test("navigator returns to the picker after deleting a run", async () => {
   assert.equal(existsSync(oldStore.directory), false);
   assert.equal(existsSync(keepStore.directory), true);
 });
-void test("navigator opens the complete workflow script in a scrollable TUI pane", async () => {
-  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-script-viewer-"));
+void test("navigator opens the workflow script in the configured external editor", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-external-editor-"));
   const cwd = join(home, "project");
   const store = new RunStore(cwd, "session", "run", home);
   const script = ["// SCRIPT_START", ...Array.from({ length: 20 }, (_, index) => `const line${String(index)} = ${String(index)};`), "// SCRIPT_END"].join("\n");
   const snapshot = createLaunchSnapshot({ script, args: null, metadata: { name: "viewer", description: "viewer" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
   await store.create({ id: "run", workflowName: "viewer", cwd, sessionId: "session", state: "running", phase: "view", agents: [], nativeSessions: [] }, snapshot);
+  const editorPath = join(home, "fake-editor.sh");
+  const editedPath = join(home, "edited-content");
+  const openedPath = join(home, "opened-path");
+  writeFileSync(editorPath, "#!/bin/sh\ncat \"$3\" > \"$1\"\nprintf '%s' \"$3\" > \"$2\"\n", { encoding: "utf8", mode: 0o755 });
+  const previousVisual = process.env.VISUAL;
+  const previousEditor = process.env.EDITOR;
+  process.env.VISUAL = `${editorPath} ${editedPath} ${openedPath}`;
+  process.env.EDITOR = process.env.VISUAL;
+  let stops = 0;
+  let starts = 0;
+  let renders = 0;
   const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
-  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
-  let selectCalls = 0;
-  let customCalls = 0;
+  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, undefined, undefined, join(home, "agent"));
   const ctx = {
     cwd, mode: "tui", hasUI: true, sessionManager: { getSessionId: () => "session" },
     ui: {
-      notify() {}, confirm: async () => false, select: async (prompt: string, options: string[]) => { selectCalls += 1; return prompt === "Workflow actions" ? "View script" : selectCalls === 1 ? options[0] : "Close"; },
-      custom: async (factory: (tui: { terminal: { rows: number }; requestRender(): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }) => {
-        customCalls += 1;
-        let result: string | undefined;
-        const component = factory({ terminal: { rows: 8 }, requestRender() {} }, { fg: (_color, text) => text }, { matches: (data, binding) => data === binding }, (value) => { result = value; });
-        if (customCalls === 1) {
-          const dashboardLines = component.render(80);
-          const dashboard = dashboardLines.join("\n");
-          assert.match(dashboardLines[0] ?? "", /^─+$/);
-          assert.match(dashboardLines.at(-1) ?? "", /^─+$/);
-          assert.match(dashboard, /Tree/);
-          component.handleInput?.("a");
-          component.handleInput?.("tui.select.down");
-          component.handleInput?.("tui.select.down");
-          component.handleInput?.("tui.select.confirm");
-        } else if (customCalls === 2) {
-          const scriptLines = component.render(80);
-          assert.match(scriptLines[0] ?? "", /^─+$/);
-          assert.match(scriptLines.at(-1) ?? "", /^─+$/);
-          assert.match(scriptLines.join("\n"), /SCRIPT_START/);
-          for (let index = 0; index < 10; index += 1) component.handleInput?.("tui.select.pageDown");
-          assert.match(component.render(80).join("\n"), /SCRIPT_END/);
-          component.handleInput?.("tui.select.cancel");
-        } else {
-          component.handleInput?.("tui.select.cancel");
-        }
+      notify() {}, confirm: async () => false, select: async (_prompt: string, options: string[]) => options[0] ?? "Close",
+      custom: async (factory: (tui: { terminal: { rows: number }; stop(): void; start(): void; requestRender(force?: boolean): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }) => {
+        const component = factory({ terminal: { rows: 8 }, stop() { stops += 1; }, start() { starts += 1; }, requestRender() { renders += 1; } }, { fg: (_color, text) => text }, { matches: (data, binding) => data === binding }, () => {});
+        component.handleInput?.("a");
+        component.handleInput?.("tui.select.down");
+        component.handleInput?.("tui.select.down");
+        component.handleInput?.("tui.select.confirm");
+        const deadline = Date.now() + 5_000;
+        while (!existsSync(editedPath) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+        assert.ok(existsSync(editedPath), "external editor was not invoked");
+        assert.match(readFileSync(editedPath, "utf8"), /SCRIPT_START/);
+        assert.match(readFileSync(editedPath, "utf8"), /SCRIPT_END/);
+        assert.match(readFileSync(openedPath, "utf8"), /artifact.*\.js$/);
         component.dispose?.();
-        return result;
+        return undefined;
       },
     },
   };
-  await commands[0]?.handler("", ctx as never);
-  assert.equal(customCalls, 3);
+  try {
+    await commands[0]?.handler("", ctx as never);
+    assert.equal(stops, 1);
+    assert.equal(starts, 1);
+    assert.ok(renders > 0);
+    assert.equal(existsSync(join(store.directory, "workflow.js")), true);
+  } finally {
+    if (previousVisual === undefined) delete process.env.VISUAL; else process.env.VISUAL = previousVisual;
+    if (previousEditor === undefined) delete process.env.EDITOR; else process.env.EDITOR = previousEditor;
+  }
 });
 
 void test("navigator omits transcript actions outside and inside Herdr", async () => {
