@@ -3008,7 +3008,10 @@ void test("resume reloads aliases for pending and retried calls while replaying 
     assert.ok(start && command);
     await start({}, ctx);
     await command("resume run", ctx);
-    for (let attempt = 0; attempt < 1000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+    for (let attempt = 0; attempt < 1000; attempt += 1) {
+      if ((await store.load()).run.state === "completed" && events.some(({ channel }) => channel === WORKFLOW_RUN_COMPLETED_EVENT)) break;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
     const loaded = await store.load();
     assert.equal(loaded.run.state, "completed");
     assert.equal(loaded.snapshot.settings.concurrency, 2);

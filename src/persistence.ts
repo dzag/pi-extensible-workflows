@@ -263,6 +263,7 @@ export class RunStore {
     this.summaryWrite = write.catch(() => undefined);
     await write;
   }
+  private refreshSummaryBestEffort(): void { void this.refreshSummary().catch(() => undefined); }
 
   async isComplete(): Promise<boolean> {
     try { await Promise.all([access(join(this.directory, "snapshot.json")), access(join(this.directory, "journal.json")), access(join(this.directory, "ownership.json")), access(join(this.directory, "state.json"))]); return true; }
@@ -293,7 +294,7 @@ export class RunStore {
     const write = this.stateWrite.then(async () => {
       if (resolve(run.cwd) !== this.cwd || run.sessionId !== this.sessionId || run.id !== this.runId) throw new WorkflowError("INTERNAL_ERROR", "Run identity does not match its session-scoped store");
       await atomicJson(join(this.directory, "state.json"), run);
-      await this.refreshSummary();
+      this.refreshSummaryBestEffort();
     });
     this.stateWrite = write.catch(() => undefined);
     await write;
@@ -307,7 +308,7 @@ export class RunStore {
       result = await update(current);
       if (resolve(result.cwd) !== this.cwd || result.sessionId !== this.sessionId || result.id !== this.runId) throw new WorkflowError("INTERNAL_ERROR", "Run identity does not match its session-scoped store");
       await atomicJson(join(this.directory, "state.json"), result);
-      await this.refreshSummary();
+      this.refreshSummaryBestEffort();
     });
     this.stateWrite = write.catch(() => undefined);
     await write;
@@ -358,7 +359,7 @@ export class RunStore {
       journal.awaiting ??= {};
       result = await update(journal);
       await atomicJson(journalPath, journal);
-      await this.refreshSummary();
+      this.refreshSummaryBestEffort();
     });
     this.journalWrite = write.catch(() => undefined);
     await write;

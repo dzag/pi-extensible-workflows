@@ -566,3 +566,19 @@ void test("loadSummary derives from authoritative state and journal when the pro
   assert.deepEqual(current.replayablePaths, ["agent/one"]);
   assert.ok(Date.parse(current.updatedAt) >= later.getTime() - 2);
 });
+void test("authoritative state writes survive summary projection failures", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-summary-best-effort-"));
+  const cwd = join(home, "project");
+  const store = new RunStore(cwd, "session-a", "run-a", home);
+  await store.create(run(cwd), snapshot);
+  writeFileSync(join(store.directory, "journal.json"), "{\n");
+  await assert.doesNotReject(store.updateState((current) => ({ ...current, phase: "completed" })));
+  assert.equal((JSON.parse(readFileSync(join(store.directory, "state.json"), "utf8")) as { phase?: string }).phase, "completed");
+  const journalHome = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-summary-journal-best-effort-"));
+  const journalCwd = join(journalHome, "project");
+  const journalStore = new RunStore(journalCwd, "session-a", "run-a", journalHome);
+  await journalStore.create(run(journalCwd), snapshot);
+  writeFileSync(join(journalStore.directory, "state.json"), "{\n");
+  await assert.doesNotReject(journalStore.complete("agent/one", "done"));
+  assert.deepEqual((JSON.parse(readFileSync(join(journalStore.directory, "journal.json"), "utf8")) as { completed: Record<string, unknown> }).completed["agent/one"], { path: "agent/one", value: "done" });
+});
