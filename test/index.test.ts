@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import type { AgentSessionEvent, InlineExtension, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { WORKFLOW_TOOL_DESCRIPTION, WORKFLOW_TOOL_PROMPT_SNIPPET } from "../src/host.js";
 import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, disabledResources, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDiagnostics, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeAgentResourceExclusions, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resourcePatternMatches, resolveAgentResourcePolicy, resolveModelReference, resolveWorkflowSettings, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
 import { loadingRegistry } from "../src/registry.js";
 import type { NativeSession, SessionInput } from "../src/agent-execution.js";
@@ -147,6 +148,14 @@ void test("workflow call preview summarizes inline and registered functions safe
   assert.doesNotMatch(preview, /^(Phases|Steps|Agents|Models|Roles|Tools|Extensions):/m);
   assert.equal(formatWorkflowPreview({ workflow: "audit" }), "workflow audit\nRegistered function");
   assert.equal(formatWorkflowPreview({ script: "not javascript", name: "review" }), "workflow review");
+});
+void test("workflow guidance leads with the inline parallel-to-summary path", () => {
+  assert.match(WORKFLOW_TOOL_DESCRIPTION, /named inline/);
+  assert.match(WORKFLOW_TOOL_DESCRIPTION, /parallel/);
+  assert.match(WORKFLOW_TOOL_PROMPT_SNIPPET, /await.*results.*summarizing agent/);
+  assert.match(WORKFLOW_TOOL_PROMPT_SNIPPET, /background by default/);
+  assert.match(WORKFLOW_TOOL_PROMPT_SNIPPET, /foreground: true/);
+  assert.match(WORKFLOW_TOOL_PROMPT_SNIPPET, /advanced/i);
 });
 
 void test("registers the workflow tool, command, and conditional skill", async () => {

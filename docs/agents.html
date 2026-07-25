@@ -36,13 +36,13 @@
       <p class="lead">Use the workflow tools when a task benefits from explicit orchestration, parallel work, durable checkpoints, or worktree-scoped agent changes.</p>
       <section id="quick-start">
         <h2>Quick start</h2>
-        <p>Call <code>workflow</code> with an inline script or a registered function. Inline scripts require an explicit non-empty <code>name</code>; registered functions reject <code>name</code> and use their registered function name as the run name. Use <code>workflow_respond</code> only to answer a pending checkpoint or budget-adjustment proposal, using the exact name or proposal ID reported by the run. Use <code>workflow_stop</code> with the run ID to stop an active run from the current Pi session.</p>
+        <p>For most tasks, call <code>workflow</code> with a named inline <code>script</code> using this parallel fan-out and summary pattern:</p>
         <pre><code class="language-json"><span class="tok-punctuation">{</span>
-  <span class="tok-property">"name"</span><span class="tok-punctuation">:</span> <span class="tok-string">"release-check"</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">"script"</span><span class="tok-punctuation">:</span> <span class="tok-string">"phase('inspect'); return await agent('Inspect the package');"</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">"args"</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span> <span class="tok-property">"target"</span><span class="tok-punctuation">:</span> <span class="tok-string">"dist"</span> <span class="tok-punctuation">}</span>
+  <span class="tok-property">"name"</span><span class="tok-punctuation">:</span> <span class="tok-string">"review"</span><span class="tok-punctuation">,</span>
+  <span class="tok-property">"script"</span><span class="tok-punctuation">:</span> <span class="tok-string">"const findings = await parallel('review', { correctness: () =&gt; agent('Review correctness'), security: () =&gt; agent('Review security') }); return await agent(prompt('Summarize these findings:\n\n{findings}', { findings }));"</span>
 <span class="tok-punctuation">}</span></code></pre>
-        <p>Inline launches require a non-empty <code>name</code>. Registered function launches must omit <code>name</code>; they use <code>workflow</code> as the run name:</p>
+        <p>Inline launches require an explicit non-empty <code>name</code>. Await the keyed <code>parallel</code> results before interpolating them into the summarizing agent. Runs are backgrounded by default; set <code>foreground: true</code> when the final JSON value must be returned in the same tool call.</p>
+        <p><strong>Advanced:</strong> Use registered functions, <code>outputSchema</code>, budgets, checkpoints, worktrees, retry/resume, CLI export, or pipelines only when the task needs them; these capabilities remain available without complicating the default inline path.</p>
         <pre><code class="language-json"><span class="tok-punctuation">{</span>
   <span class="tok-property">"workflow"</span><span class="tok-punctuation">:</span> <span class="tok-string">"releaseCheck"</span><span class="tok-punctuation">,</span>
   <span class="tok-property">"args"</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span> <span class="tok-property">"commit"</span><span class="tok-punctuation">:</span> <span class="tok-string">"HEAD"</span> <span class="tok-punctuation">}</span>
@@ -63,13 +63,19 @@
       </section>
       <section id="patterns">
         <h2>Minimal workflow patterns</h2>
-        <h3>Development</h3>
+        <h3>Default: parallel fan-out and summary</h3>
+        <pre><code class="language-javascript"><span class="tok-keyword">const</span> findings = <span class="tok-keyword">await</span> <span class="tok-function">parallel</span>(<span class="tok-string">"review"</span>, <span class="tok-punctuation">{</span>
+  <span class="tok-property">correctness</span><span class="tok-punctuation">:</span> () <span class="tok-keyword">=&gt;</span> <span class="tok-function">agent</span>(<span class="tok-string">"Review correctness"</span>),
+  <span class="tok-property">security</span><span class="tok-punctuation">:</span> () <span class="tok-keyword">=&gt;</span> <span class="tok-function">agent</span>(<span class="tok-string">"Review security"</span>),
+<span class="tok-punctuation">}</span>);
+<span class="tok-keyword">return</span> <span class="tok-keyword">await</span> <span class="tok-function">agent</span>(<span class="tok-function">prompt</span>(<span class="tok-string">"Summarize these findings:\n\n{findings}"</span>, <span class="tok-punctuation">{</span> findings <span class="tok-punctuation">}</span>));</code></pre>
+        <h3>Advanced: development with a worktree</h3>
         <pre><code class="language-json"><span class="tok-punctuation">{</span>
   <span class="tok-property">"name"</span><span class="tok-punctuation">:</span> <span class="tok-string">"implement-feature"</span><span class="tok-punctuation">,</span>
   <span class="tok-property">"script"</span><span class="tok-punctuation">:</span> <span class="tok-string">"return await withWorktree('implementation', async ({ path, branch }) =&gt; ({ path, branch, results: await parallel('implementation', { code: () =&gt; agent('Implement the feature'), tests: () =&gt; agent('Add integration tests') }) }));"</span><span class="tok-punctuation">,</span>
   <span class="tok-property">"parentRunId"</span><span class="tok-punctuation">:</span> <span class="tok-string">"previous-terminal-run-id"</span>
 <span class="tok-punctuation">}</span></code></pre>
-        <h3>Review</h3>
+        <h3>Additional pattern: review</h3>
         <pre><code class="language-javascript"><span class="tok-keyword">const</span> reports = <span class="tok-keyword">await</span> <span class="tok-function">parallel</span>(<span class="tok-string">"review"</span>, <span class="tok-punctuation">{</span>
   <span class="tok-property">correctness</span><span class="tok-punctuation">:</span> () <span class="tok-keyword">=&gt;</span> <span class="tok-function">agent</span>(<span class="tok-string">"Review correctness and regressions"</span>),
   <span class="tok-property">security</span><span class="tok-punctuation">:</span> () <span class="tok-keyword">=&gt;</span> <span class="tok-function">agent</span>(<span class="tok-string">"Review trust and security boundaries"</span>),

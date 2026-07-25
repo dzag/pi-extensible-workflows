@@ -166,18 +166,18 @@ export function formatWorkflowPreview(args: { script?: unknown; workflow?: unkno
   return [`workflow ${name}`, typeof args.description === "string" && args.description.trim() ? args.description.trim() : ""].filter(Boolean).join("\n");
 }
 export const WORKFLOW_TOOL_LABEL = "Workflow";
-export const WORKFLOW_TOOL_DESCRIPTION = "Run a deterministic JavaScript workflow";
-export const WORKFLOW_TOOL_PROMPT_SNIPPET = "Run a deterministic, resumable JavaScript workflow that orchestrates subagents. Inline launches require an explicit non-empty name; registered function launches reject name and use workflow as the run name. Runs in the background by default; completion arrives as a follow-up message. Foreground results include the completed run ID. Use workflow_retry with an explicit failed run ID to replay completed structural operations; parentRunId only reuses named worktrees.";
+export const WORKFLOW_TOOL_DESCRIPTION = "Run a deterministic JavaScript workflow with a named inline parallel-to-summary path by default";
+export const WORKFLOW_TOOL_PROMPT_SNIPPET = "Run a deterministic, resumable JavaScript workflow. Prefer a named inline script that fans out independent work with parallel(...), awaits the keyed results before interpolating them into one summarizing agent(...), and returns. Inline launches require an explicit non-empty name; registered function launches reject name and use workflow as the run name. Advanced controls include registered functions, outputSchema, budgets, checkpoints, worktrees, retry/resume, CLI export, and pipelines. Use workflow_retry with an explicit failed run ID; parentRunId only reuses named worktrees. Runs are in the background by default; set foreground: true when the caller must wait for the final value. Foreground results include the completed run ID.";
 export const WORKFLOW_TOOL_PARAMETERS = Type.Object({
-  name: Type.Optional(Type.String({ description: "Required non-empty name for inline workflow runs; invalid for registered function launches" })),
+  name: Type.Optional(Type.String({ description: "Required non-empty name for the default inline workflow path; invalid for registered function launches" })),
   description: Type.Optional(Type.String({ description: "Optional human-readable workflow description" })),
-  script: Type.Optional(Type.String({ description: "Immutable workflow source without metadata" })),
-  workflow: Type.Optional(Type.String({ description: "Registered reusable function as an unqualified name" })),
+  script: Type.Optional(Type.String({ description: "Immutable inline workflow source; default to a named script that fans out with parallel(...) and awaits results before passing them to a summarizing agent(...)" })),
+  workflow: Type.Optional(Type.String({ description: "Advanced: registered reusable function as an unqualified name" })),
   args: Type.Optional(Type.Unknown({ description: "JSON-compatible workflow arguments" })),
-  foreground: Type.Optional(Type.Boolean({ description: "Wait for completion instead of running in the background" })),
-  concurrency: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })),
-  budget: Type.Optional(Type.Unknown({ description: "Optional aggregate soft and hard run budgets" })),
-  parentRunId: Type.Optional(Type.String({ description: "Terminal run whose named worktrees may be reused" })),
+  foreground: Type.Optional(Type.Boolean({ description: "Wait for completion instead of the default background launch" })),
+  concurrency: Type.Optional(Type.Integer({ minimum: 1, maximum: 16, description: "Advanced: optional per-run active-agent limit" })),
+  budget: Type.Optional(Type.Unknown({ description: "Advanced: optional aggregate soft and hard run budgets" })),
+  parentRunId: Type.Optional(Type.String({ description: "Advanced: terminal run whose named worktrees may be reused" })),
 });
 export const WORKFLOW_RETRY_PARAMETERS = Type.Object({ runId: Type.String({ description: "Explicit failed workflow run ID" }) });
 
