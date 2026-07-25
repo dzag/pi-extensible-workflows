@@ -108,16 +108,17 @@ function terminalProviderError(error: WorkflowError): TerminalProviderError | un
 }
 type ProviderRecoveryMarker = { providerRecoveryHandled?: boolean; providerRecovery?: AgentProviderRecovery; providerRecoveryFailed?: boolean };
 const providerContinuationPrompt = "The provider error was transient. Continue the task from your current state.";
-async function recoverTerminalProviderError(session: NativeSession, fallbackModel: ModelSpec, label: string, recovery: AgentExecutionOptions["providerErrorRecovery"], continuePrompt: () => Promise<void>): Promise<void> {
+async function recoverTerminalProviderError(session: NativeSession, fallbackModel: ModelSpec, label: string, recovery: AgentExecutionOptions["providerErrorRecovery"], continuePrompt: () => Promise<void>): Promise<boolean> {
+  let continued = false;
   for (;;) {
-    try { throwIfTerminalAssistantError(session, fallbackModel); return; }
+    try { throwIfTerminalAssistantError(session, fallbackModel); return continued; }
     catch (error) {
       const typed = error instanceof WorkflowError ? error : new WorkflowError("AGENT_FAILED", error instanceof Error ? error.message : String(error));
       const terminal = terminalProviderError(typed);
       if (!terminal || !recovery) throw error;
       let action: AgentProviderRecovery;
       try { action = await recovery({ label, ...terminal }); } catch { Object.assign(typed, { providerRecoveryHandled: true, providerRecoveryFailed: true }); throw typed; }
-      if (action === "retry") { await continuePrompt(); continue; }
+      if (action === "retry") { continued = true; await continuePrompt(); continue; }
       Object.assign(typed, { providerRecoveryHandled: true, providerRecovery: action });
       throw typed;
     }
@@ -345,6 +346,13 @@ export class WorkflowAgentExecutor {
         const activeSession = session;
         const sessionModel = setup.sessionInput.model;
         const recoverTerminal = () => recoverTerminalProviderError(activeSession, sessionModel, options.label, options.providerErrorRecovery, async () => { try { await promptWithProviderPause(activeSession, providerContinuationPrompt, remaining(options.timeoutMs, started), executionSignal, this.root.providerPause); } catch (error) { if (!hasSchemaResult()) throw error; } });
+        const promptAndRecover = async (prompt: string): Promise<void> => {
+          let promptFailed = false;
+          let promptError: unknown;
+          try { await promptWithProviderPause(activeSession, prompt, remaining(options.timeoutMs, started), executionSignal, this.root.providerPause); } catch (error) { promptFailed = true; promptError = error; }
+          const recovered = await recoverTerminal();
+          if (promptFailed && !hasSchemaResult() && !recovered) throw promptError;
+        };
         unsubscribe = activeSession.subscribe?.((event) => {
           if (event.type === "agent_start" && session?.systemPrompt !== undefined) {
             if (this.root.runStore) {
@@ -380,18 +388,21 @@ export class WorkflowAgentExecutor {
         const promptText = `${context}\n\nTask:\n${setup.prompt}${instruction ? `\n\n${instruction}` : ""}`;
         options.budget?.beforeTurn();
         turnStarted = true;
-        try { await promptWithProviderPause(session, promptText, remaining(options.timeoutMs, started), executionSignal, this.root.providerPause); } catch (error) { if (!hasSchemaResult()) throw error; }
-        await recoverTerminal();
+        await promptAndRecover(promptText);
         { const completedAccounting = accounting(session.getSessionStats()); options.budget?.afterTurn(completedAccounting, options.schema !== undefined ? hasSchemaResult() : !latestAssistantHasToolCall(session.messages)); turnStarted = false; }
         if (budgetError) throw budgetError;
         if (options.schema) {
           if (!hasSchemaResult()) {
-            try { options.budget?.beforeTurn(); turnStarted = true; await promptWithProviderPause(session, "Submit the final result now by calling workflow_result exactly once. Do not return prose.", remaining(options.timeoutMs, started), executionSignal, this.root.providerPause); { const completedAccounting = accounting(session.getSessionStats()); options.budget?.afterTurn(completedAccounting, true); turnStarted = false; } } catch (error) { if (!hasSchemaResult()) throw error; }
+            options.budget?.beforeTurn();
+            turnStarted = true;
+            await promptAndRecover("Submit the final result now by calling workflow_result exactly once. Do not return prose.");
+            { const completedAccounting = accounting(session.getSessionStats()); options.budget?.afterTurn(completedAccounting, true); turnStarted = false; }
           }
-          await recoverTerminal();
           if (!hasSchemaResult()) {
-            try { options.budget?.beforeTurn(); turnStarted = true; await promptWithProviderPause(session, "Your result was missing or invalid. Repair it by calling workflow_result exactly once with a schema-valid value.", remaining(options.timeoutMs, started), executionSignal, this.root.providerPause); { const completedAccounting = accounting(session.getSessionStats()); options.budget?.afterTurn(completedAccounting, true); turnStarted = false; } } catch (error) { if (!hasSchemaResult()) throw error; }
-            await recoverTerminal();
+            options.budget?.beforeTurn();
+            turnStarted = true;
+            await promptAndRecover("Your result was missing or invalid. Repair it by calling workflow_result exactly once with a schema-valid value.");
+            { const completedAccounting = accounting(session.getSessionStats()); options.budget?.afterTurn(completedAccounting, true); turnStarted = false; }
           }
           if (schemaResult === undefined) throw new WorkflowError("RESULT_INVALID", "Agent did not submit a valid workflow_result after one repair");
         }

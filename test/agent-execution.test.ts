@@ -327,6 +327,29 @@ void test("continues terminal provider errors in the same native session when re
   assert.equal(prompts[1], "The provider error was transient. Continue the task from your current state.");
   assert.match(prompts[2] ?? "", /Submit the final result/);
 });
+void test("recovers a terminal provider error thrown by prompt before disposing the session", async () => {
+  const messages: Array<{ role: string; content: unknown; stopReason?: string; errorMessage?: string; usage?: typeof usage }> = [terminalAssistant("THROWN_PROVIDER_ERROR")];
+  let prompts = 0;
+  let disposals = 0;
+  const executor = new WorkflowAgentExecutor(root, async () => ({
+    sessionId: "thrown-provider", sessionFile: "/sessions/thrown-provider.jsonl", messages, getSessionStats: sessionStats,
+    async prompt() {
+      prompts += 1;
+      if (prompts === 1) throw new Error("provider request failed");
+      messages[0] = assistant("done");
+    },
+    dispose() { assert.equal(disposals, 0); disposals += 1; },
+  }));
+  const result = await executor.execute("work", { label: "worker", workflowName: "flow", providerErrorRecovery: async (failure) => {
+    assert.equal(disposals, 0);
+    assert.deepEqual(failure, { label: "worker", provider: "openai", model: "gpt", error: "THROWN_PROVIDER_ERROR" });
+    return "retry";
+  } });
+  assert.equal(result.value, "done");
+  assert.equal(prompts, 2);
+  assert.equal(disposals, 1);
+  assert.deepEqual(result.attempts.map(({ attempt, sessionId }) => ({ attempt, sessionId })), [{ attempt: 1, sessionId: "thrown-provider" }]);
+});
 void test("keeps an accepted structured result when same-session continuation aborts its prompt", async () => {
   const messages: Array<{ role: string; content: unknown; stopReason?: string; errorMessage?: string; usage?: typeof usage }> = [terminalAssistant("TRANSIENT_PROVIDER_ERROR")];
   let prompts = 0;
