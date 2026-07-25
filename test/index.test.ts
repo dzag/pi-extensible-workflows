@@ -561,6 +561,21 @@ void test("workflow control tools render styled calls and compact or expanded re
     }
   }
 });
+void test("workflow control tools show error content for failed executions", () => {
+  type Rendered = { render: (width: number) => string[] };
+  type ControlTool = { name: string; renderResult?: (result: unknown, options: unknown, theme: unknown, context: unknown) => Rendered };
+  const tools: ControlTool[] = [];
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never);
+  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+  const errorText = "Control operation failed: unknown run";
+  for (const name of ["workflow_respond", "workflow_stop", "workflow_retry", "workflow_resume"]) {
+    const tool = tools.find((candidate) => candidate.name === name);
+    assert.ok(tool?.renderResult);
+    const args = name === "workflow_respond" ? { runId: "run-error", name: "approval", approved: false } : { runId: "run-error" };
+    const rendered = tool.renderResult({ content: [{ type: "text", text: errorText }], details: {} }, { expanded: false, isPartial: false }, theme, { args, lastComponent: undefined, state: {}, cwd: "/project", expanded: false, isPartial: false, isError: true }).render(120).join("\n");
+    assert.match(rendered, new RegExp(errorText));
+  }
+});
 
 void test("advertises only described effective roles in the system prompt while workflow is active", () => {
   type StartHandler = (event: { systemPrompt: string }, ctx: { cwd: string; isProjectTrusted?: () => boolean }) => { systemPrompt?: string } | undefined;

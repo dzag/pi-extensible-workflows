@@ -577,7 +577,11 @@ function workflowControlCall(name: string, args: Record<string, unknown>, theme:
   if (name === "workflow_retry") return `${controlTitle(name, theme)} ${theme.fg("accent", runId)} ${theme.fg("muted", "failed run")}`;
   return `${controlTitle(name, theme)} ${theme.fg("accent", runId)}`;
 }
-function workflowControlResult(name: string, args: Record<string, unknown>, result: WorkflowControlResult, expanded: boolean, theme: Theme): string {
+function workflowControlResult(name: string, args: Record<string, unknown>, result: WorkflowControlResult, expanded: boolean, theme: Theme, isError: boolean): string {
+  if (isError) {
+    const text = result.content?.filter(({ type }) => type === "text").map(({ text }) => text ?? "").join("\n").trim();
+    return theme.fg("error", text || `The ${name} tool failed.`);
+  }
   const value = workflowControlValue(result);
   if (!object(value)) return theme.fg("error", `The ${name} tool returned an invalid result.`);
   const runId = controlString(args.runId) ?? controlString(value.runId) ?? "(unknown)";
@@ -1789,7 +1793,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       }
     },
     renderCall(args, theme) { return styledTextBlock(workflowControlCall("workflow_respond", args, theme)); },
-    renderResult(result, options, theme, context) { return workflowCatalogBlock(workflowControlResult("workflow_respond", context.args, result, options.expanded, theme), options.expanded); },
+    renderResult(result, options, theme, context) { return workflowCatalogBlock(workflowControlResult("workflow_respond", context.args, result, options.expanded, theme, context.isError), options.expanded); },
   });
   pi.registerTool({
     name: "workflow_stop",
@@ -1805,7 +1809,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       }
     },
     renderCall(args, theme) { return styledTextBlock(workflowControlCall("workflow_stop", args, theme)); },
-    renderResult(result, options, theme, context) { return workflowCatalogBlock(workflowControlResult("workflow_stop", context.args, result, options.expanded, theme), options.expanded); },
+    renderResult(result, options, theme, context) { return workflowCatalogBlock(workflowControlResult("workflow_stop", context.args, result, options.expanded, theme, context.isError), options.expanded); },
   });
   let catalogRegistered = false;
   let sessionStarted = false;
@@ -2095,7 +2099,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       catch (error) { throw mainAgentError(error); }
     },
     renderCall(args, theme) { return styledTextBlock(workflowControlCall("workflow_retry", args, theme)); },
-    renderResult(result, options, theme, context) { return workflowCatalogBlock(workflowControlResult("workflow_retry", context.args, result, options.expanded, theme), options.expanded); },
+    renderResult(result, options, theme, context) { return workflowCatalogBlock(workflowControlResult("workflow_retry", context.args, result, options.expanded, theme, context.isError), options.expanded); },
   });
   pi.registerTool({
     name: "workflow_resume",
@@ -2107,7 +2111,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       catch (error) { throw mainAgentError(error); }
     },
     renderCall(args, theme) { return styledTextBlock(workflowControlCall("workflow_resume", args, theme)); },
-    renderResult(result, options, theme, context) { return workflowCatalogBlock(workflowControlResult("workflow_resume", context.args, result, options.expanded, theme), options.expanded); },
+    renderResult(result, options, theme, context) { return workflowCatalogBlock(workflowControlResult("workflow_resume", context.args, result, options.expanded, theme, context.isError), options.expanded); },
   });
   pi.on("session_start", async (_event, ctx) => {
     if (sessionStarted) return;
