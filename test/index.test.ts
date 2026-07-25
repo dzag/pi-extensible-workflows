@@ -964,6 +964,39 @@ void test("direct function launches enforce input and output schemas", async () 
   await assert.rejects(execute("id", { name: "needs-value", workflow: "needsValue", args: { value: "ok" }, foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   await assert.rejects(execute("id", { workflow: "badResult", args: {}, foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESULT_INVALID");
 });
+void test("registered workflow retries preserve role definitions for agent calls", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-registered-role-retry-"));
+  const agentDir = mkdtempSync(join(home, "agent-"));
+  mkdirSync(join(agentDir, "pi-extensible-workflows", "roles"), { recursive: true });
+  writeFileSync(join(agentDir, "pi-extensible-workflows", "roles", "developer.md"), "Developer role");
+  let sessions = 0;
+  const createSession = async (): Promise<NativeSession> => {
+    const attempt = ++sessions;
+    return { sessionId: `registered-role-${String(attempt)}`, sessionFile: `/sessions/registered-role-${String(attempt)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { if (attempt === 1) throw new Error("source failure"); }, steer: async () => {}, dispose() {} };
+  };
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession, agentDir);
+  registerWorkflowExtension({ version: "1.0.0", headline: "Registered role retry", description: "Registered role retry reproduction", functions: { registeredRoleRetry: { description: "Run a developer role", input: { type: "object", additionalProperties: false }, output: { type: "string" }, run: async (_input, context) => { await context.agent("work", { role: "developer", retries: 0 }); return "done"; } } } });
+  const workflow = tools.find(({ name }) => name === "workflow");
+  const retry = tools.find(({ name }) => name === "workflow_retry");
+  assert.ok(workflow && retry);
+  const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
+  await assert.rejects(workflow.execute("source", { workflow: "registeredRoleRetry", args: {}, foreground: true }, new AbortController().signal, undefined, context), WorkflowError);
+  const sourceId = (await listRunIds(home, "session", home))[0];
+  assert.ok(sourceId);
+  const source = await new RunStore(home, "session", sourceId, home).load();
+  assert.deepEqual(source.snapshot.roles, { developer: { prompt: "Developer role" } });
+  rmSync(join(agentDir, "pi-extensible-workflows", "roles", "developer.md"));
+  const started = await retry.execute("retry", { runId: sourceId }, undefined, undefined, context) as { content: Array<{ text: string }> };
+  const childId = (JSON.parse(started.content[0]?.text ?? "null") as { runId: string }).runId;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const child = (await new RunStore(home, "session", childId, home).load()).run;
+    if (child.state === "completed") return;
+    if (child.state === "failed") throw new Error(JSON.stringify(child.error));
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for ${childId} to complete`);
+});
 void test("attributes dynamic alias availability failures to the exact extension", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-alias-provenance-"));
   const agentDir = join(home, "agent");
