@@ -150,7 +150,7 @@ void test("workflow call preview summarizes inline and registered functions safe
 });
 
 void test("registers the workflow tool, command, and conditional skill", async () => {
-  const tools: Array<{ name: string; promptGuidelines?: string[]; execute: (id?: unknown, params?: unknown, signal?: unknown, update?: unknown, ctx?: unknown) => Promise<unknown> }> = [];
+  const tools: Array<{ name: string; promptGuidelines?: string[]; promptSnippet?: string; execute: (id?: unknown, params?: unknown, signal?: unknown, update?: unknown, ctx?: unknown) => Promise<unknown> }> = [];
   const commands: Array<{ name: string; options: { handler: (args: string, ctx: unknown) => Promise<void> } }> = [];
   let discover: (() => { skillPaths?: string[] } | undefined) | undefined;
   const pi = {
@@ -166,6 +166,7 @@ void test("registers the workflow tool, command, and conditional skill", async (
   const tool = tools.find(({ name }) => name === "workflow");
   assert.ok(tool);
   assert.equal(tool.promptGuidelines, undefined);
+  assert.match(tool.promptSnippet ?? "", /Recovery map: agent\(\.\.\., \{ retries \}\).*workflow_retry\(\{ runId \}\).*workflow_resume\(\{ runId, budget\? \}\).*parentRunId/);
   assert.ok(discover);
   assert.ok(discover()?.skillPaths?.some((path) => existsSync(path)));
   const skillPath = discover()?.skillPaths?.find((path) => existsSync(path));
@@ -367,7 +368,7 @@ void test("workflow_retry blocks removed dynamic aliases from native bare-model 
   assert.match(child.error.message, /Unknown model alias gpt resolved to openai\/gpt/);
   loadingRegistry().freeze();
 });
-void test("workflow_retry rejects unsupported states, foreign sources, and incompatible snapshots", async () => {
+void test("workflow_retry rejects unsupported states, routes cross-wired recovery tools, and rejects incompatible snapshots", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-retry-compatibility-"));
   const launch = createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "retry-compatibility" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] });
   const createRun = async (id: string, state: PersistedRun["state"], cwd = home, sessionId = "session") => {
@@ -379,12 +380,15 @@ void test("workflow_retry rejects unsupported states, foreign sources, and incom
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
   const retry = tools.find(({ name }) => name === "workflow_retry");
-  assert.ok(retry);
+  const resume = tools.find(({ name }) => name === "workflow_resume");
+  assert.ok(retry && resume);
   const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
   for (const [index, state] of (["completed", "stopped", "interrupted", "running", "budget_exhausted"] as const).entries()) {
     await createRun(`unsupported-${String(index)}`, state);
-    await assert.rejects(retry.execute("retry", { runId: `unsupported-${String(index)}` }, undefined, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE");
+    await assert.rejects(retry.execute("retry", { runId: `unsupported-${String(index)}` }, undefined, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE" && (state === "budget_exhausted" ? error.message.includes("workflow_resume({ runId, budget? })") : error.message.toLowerCase().includes(state.replace("_", "-"))));
   }
+  await createRun("failed", "failed");
+  await assert.rejects(resume.execute("resume-failed", { runId: "failed" }, undefined, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE" && error.message.includes("workflow_retry({ runId })"));
   await assert.rejects(retry.execute("missing", { runId: "missing" }, undefined, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE");
   await createRun("foreign-session", "failed", home, "other-session");
   await assert.rejects(retry.execute("foreign-session", { runId: "foreign-session" }, undefined, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE");
