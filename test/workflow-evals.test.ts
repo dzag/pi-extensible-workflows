@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { inspectWorkflowScript, validateWorkflowLaunch, WorkflowError } from "../src/index.js";
 import evalCaptureExtension from "../src/eval-capture-extension.js";
-import { assertEvalScriptSafe, captureEvalCase, captureValidationReports, evalExpectationErrors, extractCapturedWorkflows, extractParentOracle, findSessionFile, formatEvalSummary, INITIAL_WORKFLOW_EVAL_CASES, loadWorkflowEvalCases, matchesJsonResult, matchesJsonSchema, matchesOutputSchema, parseSemanticJudge, replayExpectationErrors, replayWorkflowScript, resolveWorkflowSkillPath, selectStaticCandidate, staticExpectationResults, runIsolatedProcess, runWorkflowEvals, type ParentOracle } from "../src/workflow-evals.js";
+import { assertEvalScriptSafe, captureEvalCase, captureValidationReports, evalExpectationErrors, extractCapturedWorkflows, extractParentOracle, extractParentToolCalls, findSessionFile, formatEvalSummary, INITIAL_WORKFLOW_EVAL_CASES, loadWorkflowEvalCases, matchesJsonResult, matchesJsonSchema, matchesOutputSchema, parseSemanticJudge, recoverySelectionErrors, replayExpectationErrors, replayWorkflowScript, resolveWorkflowSkillPath, selectStaticCandidate, staticExpectationResults, runIsolatedProcess, runWorkflowEvals, type ParentOracle } from "../src/workflow-evals.js";
 
 const schema = { type: "object", properties: { answer: { type: "number" }, label: { type: "string" } }, required: ["answer", "label"], additionalProperties: false };
 void test("defines the cheap initial evaluation matrix", () => {
@@ -120,11 +120,26 @@ void test("captures exact recovery selections without executing recovery", async
     { type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "workflow_retry", arguments: { runId: "failed-run-42" } }] } },
     { type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "workflow", arguments: { name: "borrow-worktree", script: "return true;", parentRunId: "completed-run-42" } }] } },
   ]);
-  const calls = oracle.assistantBatches.flatMap(({ parts }) => parts).filter((part) => (part as { type?: unknown }).type === "toolCall") as Array<{ name: string; arguments: unknown }>;
-  assert.deepEqual(calls.map(({ name, arguments: args }) => ({ name, arguments: args })), [
+  assert.deepEqual(extractParentToolCalls(oracle), [
     { name: "workflow_retry", arguments: { runId: "failed-run-42" } },
     { name: "workflow", arguments: { name: "borrow-worktree", script: "return true;", parentRunId: "completed-run-42" } },
   ]);
+  assert.deepEqual(recoverySelectionErrors({ id: "recovery-failed-run" }, extractParentOracle([{ type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "workflow_retry", arguments: { runId: "failed-run-42" } }] } }])), []);
+  assert.deepEqual(recoverySelectionErrors({ id: "recovery-completed-worktree" }, extractParentOracle([{ type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "workflow", arguments: { name: "borrow-worktree", script: "return true;", parentRunId: "completed-run-42" } }] } }])), []);
+});
+void test("fixture scoring rejects a recovery tool call with the wrong run ID", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-workflow-recovery-args-"));
+  const piPath = join(root, "fake-pi.mjs");
+  writeFileSync(piPath, `#!/usr/bin/env node\nimport { mkdirSync, writeFileSync } from "node:fs"; import { join } from "node:path"; const args = process.argv.slice(2); const value = name => args[args.indexOf(name) + 1]; const sessionDir = value("--session-dir"); const id = value("--session-id"); mkdirSync(sessionDir, { recursive: true }); const assistant = { role: "assistant", content: [{ type: "toolCall", name: "workflow_retry", arguments: { runId: "wrong-run" } }] }; writeFileSync(join(sessionDir, "parent.jsonl"), [{ type: "session", version: 3, id, cwd: process.cwd() }, { type: "message", message: assistant }].map(JSON.stringify).join("\\n") + "\\n");`);
+  chmodSync(piPath, 0o755);
+  try {
+    const result = await captureEvalCase({ case: { id: "recovery-failed-run", prompt: "retry failed-run-42", maxCost: 1, expectedWorkflowCalls: 0, expectations: { firstTool: "workflow_retry", firstBatchToolSequence: ["workflow_retry"], parentToolSequence: ["workflow_retry"], workflowCallCount: 0 } }, model: "fake/model", piCommand: piPath, maxCost: 1 });
+    assert.equal(result.status, "failed");
+    assert.ok(result.errors.some((error) => error.includes("failed-run-42")));
+    assert.deepEqual(recoverySelectionErrors({ id: "recovery-failed-run" }, result.oracle as ParentOracle), result.errors.filter((error) => error.includes("failed-run-42")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 void test("matches captured validation results by tool-call id and retains schema-boundary errors", () => {
