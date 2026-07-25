@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import type { AgentSessionEvent, InlineExtension, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, disabledResources, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDiagnostics, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeAgentResourceExclusions, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resourcePatternMatches, resolveAgentResourcePolicy, resolveModelReference, resolveWorkflowSettings, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
+import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, disabledResources, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDiagnostics, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeAgentResourceExclusions, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resourcePatternMatches, resolveAgentResourcePolicy, resolveModelReference, resolveWorkflowSettings, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, openWorkflowArtifact, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
 import { loadingRegistry } from "../src/registry.js";
 import type { NativeSession, SessionInput } from "../src/agent-execution.js";
 import { listRunIds } from "../src/persistence.js";
@@ -1743,7 +1743,80 @@ void test("navigator opens the workflow script in the configured external editor
     if (previousEditor === undefined) delete process.env.EDITOR; else process.env.EDITOR = previousEditor;
   }
 });
-
+void test("external artifact failures restore the TUI and remove temporary copies", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-external-editor-failure-"));
+  const editorPath = join(home, "failing-editor.sh");
+  const openedPath = join(home, "opened-path");
+  writeFileSync(editorPath, "#!/bin/sh\nprintf '%s' \"$2\" > \"$1\"\nexit 7\n", { encoding: "utf8", mode: 0o755 });
+  const events: string[] = [];
+  const tui = { stop() { events.push("stop"); }, start() { events.push("start"); }, requestRender() { events.push("render"); } };
+  const exitCode = await openWorkflowArtifact(tui, `${editorPath} ${openedPath}`, { extension: ".md", content: "read-only" });
+  assert.equal(exitCode, 7);
+  const opened = readFileSync(openedPath, "utf8");
+  assert.equal(existsSync(opened), false);
+  assert.deepEqual(events, ["stop", "start", "render"]);
+  assert.equal(await openWorkflowArtifact(tui, join(home, "missing-editor"), { extension: ".js", content: "return true;" }), null);
+  assert.deepEqual(events, ["stop", "start", "render", "stop", "start", "render"]);
+});
+void test("navigator opens a persisted top-level agent result in the external editor", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-agent-result-editor-"));
+  const cwd = join(home, "project");
+  const store = new RunStore(cwd, "session", "run", home);
+  const resultPath = "agent/reviewer/callsite%3Areviewer/occurrence%3A1";
+  const snapshot = createLaunchSnapshot({ script: "return true", args: null, metadata: { name: "agent-result" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
+  await store.create({ id: "run", workflowName: "agent-result", cwd, sessionId: "session", state: "completed", phase: "review", agents: [{ id: "agent", name: "reviewer", path: "agent", state: "completed", resultPath, structuralPath: ["reviewer"], model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 }], nativeSessions: [] }, snapshot);
+  await store.complete(resultPath, { answer: 42 });
+  const editorPath = join(home, "fake-editor.sh");
+  const editedPath = join(home, "edited-content");
+  const openedPath = join(home, "opened-path");
+  writeFileSync(editorPath, "#!/bin/sh\ncat \"$3\" > \"$1\"\nprintf '%s' \"$3\" > \"$2\"\n", { encoding: "utf8", mode: 0o755 });
+  const previousVisual = process.env.VISUAL;
+  const previousEditor = process.env.EDITOR;
+  process.env.VISUAL = `${editorPath} ${editedPath} ${openedPath}`;
+  process.env.EDITOR = process.env.VISUAL;
+  let stops = 0;
+  let starts = 0;
+  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
+  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  const ctx = {
+    cwd, mode: "tui", hasUI: true, sessionManager: { getSessionId: () => "session" },
+    ui: {
+      notify() {}, confirm: async () => false, select: async (_prompt: string, options: string[]) => options[0] ?? "Close",
+      custom: async (factory: (tui: { terminal: { rows: number }; stop(): void; start(): void; requestRender(force?: boolean): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }) => {
+        const component = factory({ terminal: { rows: 10 }, stop() { stops += 1; }, start() { starts += 1; }, requestRender() {} }, { fg: (_color, text) => text }, { matches: (data, binding) => data === binding }, () => {});
+        const phase = component.render(120).join("\n");
+        assert.doesNotMatch(phase, /Open result in editor/);
+        component.handleInput?.("tui.select.down");
+        assert.doesNotMatch(component.render(120).join("\n"), /Open result in editor/);
+        component.handleInput?.("tui.select.down");
+        component.handleInput?.("tui.select.confirm");
+        const actions = component.render(120).join("\n");
+        assert.match(actions, /Agent actions/);
+        assert.match(actions, /Open result in editor/);
+        for (let index = 0; index < 12; index += 1) {
+          if (component.render(120).join("\n").includes("→ Open result in editor")) { component.handleInput?.("tui.select.confirm"); break; }
+          component.handleInput?.("tui.select.down");
+        }
+        const deadline = Date.now() + 5_000;
+        while (!existsSync(editedPath) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+        assert.ok(existsSync(editedPath), "external editor was not invoked");
+        assert.match(readFileSync(editedPath, "utf8"), /"answer": 42/);
+        assert.match(readFileSync(openedPath, "utf8"), /artifact.*\.json$/);
+        assert.equal(existsSync(readFileSync(openedPath, "utf8")), false);
+        component.dispose?.();
+        return undefined;
+      },
+    },
+  };
+  try {
+    await commands[0]?.handler("", ctx as never);
+    assert.equal(stops, 1);
+    assert.equal(starts, 1);
+  } finally {
+    if (previousVisual === undefined) delete process.env.VISUAL; else process.env.VISUAL = previousVisual;
+    if (previousEditor === undefined) delete process.env.EDITOR; else process.env.EDITOR = previousEditor;
+  }
+});
 void test("navigator omits transcript actions outside and inside Herdr", async () => {
   const previousEnvironment = { HERDR_ENV: process.env.HERDR_ENV, HERDR_PANE_ID: process.env.HERDR_PANE_ID };
   try {
@@ -1757,7 +1830,8 @@ void test("navigator omits transcript actions outside and inside Herdr", async (
       const noAgent = new RunStore(cwd, "session", "no-agent-run", home);
       await noAgent.create({ id: "no-agent-run", workflowName: "no-agent-run", cwd, sessionId: "session", state: "completed", agents: [], nativeSessions: [{ sessionId: "native", sessionFile: join(home, "native.jsonl") }] }, snapshot);
       const withAgent = new RunStore(cwd, "session", "agent-run", home);
-      await withAgent.create({ id: "agent-run", workflowName: "agent-run", cwd, sessionId: "session", state: "completed", agents: [{ id: "agent", name: "agent", path: "agent", state: "completed", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1, attemptDetails: [{ attempt: 1, sessionId: "native-agent", sessionFile: join(home, "agent.jsonl"), accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } }] }], nativeSessions: [] }, snapshot);
+      await withAgent.create({ id: "agent-run", workflowName: "agent-run", cwd, sessionId: "session", state: "completed", agents: [{ id: "agent", name: "agent", path: "agent", state: "completed", resultPath: "agent/result", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1, attemptDetails: [{ attempt: 1, sessionId: "native-agent", sessionFile: join(home, "agent.jsonl"), accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } }] }], nativeSessions: [] }, snapshot);
+      await withAgent.complete("agent/result", { done: true });
       const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
       workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
       const dashboardActions: string[][] = [];
@@ -1791,6 +1865,7 @@ void test("navigator omits transcript actions outside and inside Herdr", async (
       assert.equal(agentActions.length, 1);
       const selectedAgentActions = agentActions[0];
       assert.ok(selectedAgentActions);
+      assert.equal(selectedAgentActions.includes("Open result in editor"), false);
       assert.equal(selectedAgentActions.includes("Fork as Pi session in pane"), inHerdr);
       assert.ok(selectedAgentActions.includes("Copy agent ID"));
       await noAgent.delete(true);
@@ -1898,6 +1973,22 @@ void test("navigator bulk deletes only failed runs after confirmation", async ()
   assert.equal(existsSync(failedArtifact), false);
   for (const store of stores.slice(2)) assert.equal(existsSync(store.directory), true);
   assert.ok(notifications.some((message) => message.includes("Deleted all failed workflow runs.")));
+});
+void test("navigator remains usable when retry provenance is unavailable", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-navigator-missing-retry-source-"));
+  const cwd = join(home, "project");
+  const snapshot = createLaunchSnapshot({ script: "return true", args: null, metadata: { name: "broken-retry" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
+  const store = new RunStore(cwd, "session", "broken-retry", home);
+  await store.create({ id: "broken-retry", workflowName: "broken-retry", cwd, sessionId: "session", state: "failed", retry: { sourceRunId: "deleted-source", lineageRootRunId: "broken-retry", completedPaths: [], incompletePaths: [], namedWorktrees: [] }, agents: [], nativeSessions: [] }, snapshot);
+  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
+  const selections: string[][] = [];
+  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  const ctx = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "session" }, ui: { notify() {}, confirm: async () => false, select: async (prompt: string, options: string[]) => { selections.push(options); return prompt === "Workflows\n" ? options[0] ?? "Close" : "Close"; } } };
+  const command = commands[0]?.handler;
+  assert.ok(command);
+  await assert.doesNotReject(command("", ctx as never));
+  assert.ok(selections.length >= 2);
+  assert.ok(selections[1]?.includes("Delete"));
 });
 
 void test("navigator reviews each pending checkpoint before answering", async () => {

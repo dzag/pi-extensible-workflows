@@ -1,10 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
@@ -18,6 +16,7 @@ import { asWorkflowError, aliasDrift, createLaunchSnapshot, deepFreeze, errorCod
 import { launchScriptForSnapshot, loadAgentDefinitions, preflight, resolveAgentResourcePolicy, resolveWorkflowSettings, saveModelAliases, validateAgentOptions, validateCheckpoint, validateModelAliasAvailability, validateShellOptions, validateWorkflowLaunchWithRegistry, workflowProjectSettingsPath, workflowPrompt, workflowSettingsPath } from "./validation.js";
 import { beginWorkflowExtensionLoading, loadingRegistry, resetWorkflowRegistry, type WorkflowRegistryApi } from "./registry.js";
 import { agentIdentityPath, agentWorktree, encoded, executeShellCommand, persistActiveAgentAttempt, persistAgentAttempts, readShellResult, runWorkflow, shellIdentityPath } from "./execution.js";
+import { openWorkflowArtifact, workflowResultArtifact, workflowScriptArtifact, type WorkflowArtifact } from "./workflow-artifacts.js";
 import { ERROR_CODES, LAUNCH_SNAPSHOT_IDENTITY_VERSION, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentOptions, type AgentRecord, type AgentResourcePolicy, type BudgetApprovalRequest, type BudgetEvent, type JsonValue, type LaunchSnapshot, type ModelSpec, type RunState, type ShellIdentity, type ShellOptions, type ShellResult, type WorkflowBridge, type WorkflowCatalogFunction, type WorkflowCatalogIndex, type WorkflowCatalogVariable, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowFailureAgent, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowExecution, type WorkflowMetadata, type WorkflowModelAliasResolverContext, type WorkflowRetryProvenance, type WorkflowRunContext, type WorkflowSettings, type WorkflowSettingsResolution, type WorkflowSiblingAgent, type WorkflowWorktreeReference } from "./types.js";
 const SETTLED_AGENT_STATES: ReadonlySet<import("./types.js").AgentState> = new Set(["completed", "failed", "cancelled"]);
 const INTERNAL_WORKFLOW_TOOLS: readonly string[] = ["workflow", "workflow_respond", "workflow_stop", "workflow_resume", "workflow_retry", "workflow_catalog"];
@@ -168,9 +167,6 @@ export function formatWorkflowPreview(args: { script?: unknown; workflow?: unkno
   if (typeof args.script !== "string" || !args.script.trim()) return `workflow ${name}${registeredName ? "\nRegistered function" : ""}`;
   return [`workflow ${name}`, typeof args.description === "string" && args.description.trim() ? args.description.trim() : ""].filter(Boolean).join("\n");
 }
-export interface WorkflowArtifact { extension: ".js" | ".json" | ".md"; content: string }
-export function workflowScriptArtifact(script: string): WorkflowArtifact { return { extension: ".js", content: script }; }
-export function workflowResultArtifact(value: JsonValue): WorkflowArtifact { return typeof value === "string" ? { extension: ".md", content: value } : { extension: ".json", content: `${JSON.stringify(value, null, 2)}\n` }; }
 export const WORKFLOW_TOOL_LABEL = "Workflow";
 export const WORKFLOW_TOOL_DESCRIPTION = "Run a deterministic JavaScript workflow";
 export const WORKFLOW_TOOL_PROMPT_SNIPPET = "Run a deterministic, resumable JavaScript workflow that orchestrates subagents. Inline launches require an explicit non-empty name; registered function launches reject name and use workflow as the run name. Runs in the background by default; completion arrives as a follow-up message. Foreground results include the completed run ID. Use workflow_retry with an explicit failed run ID to replay completed structural operations; parentRunId only reuses named worktrees.";
@@ -1377,29 +1373,6 @@ function keybindingKeys(keybindings: unknown, name: string): readonly string[] |
   const getKeys = object(keybindings) ? asFn(keybindings.getKeys) as NonNullable<KeybindingsHostCapabilities["getKeys"]> | undefined : undefined;
   return getKeys ? getKeys.call(keybindings, name) : undefined;
 }
-type WorkflowTui = { stop(): void; start(): void; requestRender(force?: boolean): void };
-async function spawnWorkflowEditor(command: string, path: string): Promise<number | null> {
-  const [editor, ...editorArgs] = command.split(" ");
-  if (!editor) return null;
-  return new Promise((resolve) => {
-    let child;
-    try { child = spawn(editor, [...editorArgs, path], { stdio: "inherit", shell: process.platform === "win32" }); }
-    catch { resolve(null); return; }
-    child.once("error", () => { resolve(null); });
-    child.once("close", (code) => { resolve(code); });
-  });
-}
-async function openWorkflowArtifact(tui: WorkflowTui, command: string, artifact: WorkflowArtifact): Promise<number | null> {
-  const directory = await mkdtemp(join(tmpdir(), "pi-workflow-editor-"));
-  const path = join(directory, `artifact${artifact.extension}`);
-  try {
-    await writeFile(path, artifact.content, { encoding: "utf8", mode: 0o600 });
-    tui.stop();
-    try { return await spawnWorkflowEditor(command, path); }
-    finally { tui.start(); tui.requestRender(true); }
-  }
-  finally { await rm(directory, { recursive: true, force: true }); }
-}
 
 export default function workflowExtension(pi: ExtensionAPI, home?: string, clipboard = copyToClipboard, createSession: SessionFactory = createNativeAgentSession, agentDir?: string) {
   beginWorkflowExtensionLoading();
@@ -1612,7 +1585,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         let effective: { model: ModelSpec; requestedModel?: string; tools: readonly string[] };
         try { effective = run.executor.resolve(requested); }
         catch { effective = previous ? { model: previous.model, ...(previous.requestedModel ? { requestedModel: previous.requestedModel } : {}), tools: previous.tools } : { model: node.options.model ? modelSpec(node.options.model, run.model) : { ...run.model, ...(node.options.thinking ? { thinking: node.options.thinking } : {}) }, ...(node.options.model ? { requestedModel: node.options.model } : {}), tools: node.options.tools }; }
-        const resultPath = node.options.agentIdentity ? agentIdentityPath(node.options.agentIdentity) : undefined;
+        const resultPath = !node.parentId && node.options.agentIdentity ? agentIdentityPath(node.options.agentIdentity) : undefined;
         return { id: node.id, name: node.label, ...(node.options.requestedLabel ? { label: node.options.requestedLabel } : {}), path: node.id, state: node.state, ...(node.parentId ? { parentId: node.parentId } : {}), structuralPath: [...(node.options.agentIdentity?.structuralPath ?? [])], ...(resultPath ? { resultPath } : {}), ...(node.options.parentBreadcrumb ? { parentBreadcrumb: node.options.parentBreadcrumb } : {}), ...(node.options.worktreeOwner ? { worktreeOwner: node.options.worktreeOwner } : {}), ...(node.options.role ? { role: node.options.role } : {}), ...(effective.requestedModel ? { requestedModel: effective.requestedModel } : {}), model: effective.model, tools: effective.tools, attempts: previous?.attempts ?? 0, ...(previous?.attemptDetails ? { attemptDetails: previous.attemptDetails } : {}), ...(previous?.accounting ? { accounting: previous.accounting } : {}), ...(previous?.toolCalls ? { toolCalls: previous.toolCalls } : {}), ...(previous?.activity ? { activity: previous.activity } : {}) };
       });
       return { ...current, agents };
@@ -2434,12 +2407,11 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             const loaded = await store.load();
             const checkpoints = await store.awaitingCheckpoints();
             const worktrees = await store.worktrees();
-            const completedOperations = await store.replayableOperations();
+            const completedOperations = ctx.mode === "tui" ? await store.replayableOperations().catch(() => []) : [];
             const agentResults = new Map<string, JsonValue>();
             for (const agent of loaded.run.agents) {
-              if (agent.state !== "completed") continue;
-              const prefix = `${operationPath("agent", ...(agent.structuralPath ?? []))}/`;
-              const operation = (agent.resultPath ? completedOperations.find((candidate) => candidate.path === agent.resultPath) : undefined) ?? completedOperations.find((candidate) => candidate.path.startsWith(prefix));
+              if (agent.state !== "completed" || agent.parentId || !agent.resultPath) continue;
+              const operation = completedOperations.find((candidate) => candidate.path === agent.resultPath);
               if (operation) agentResults.set(agent.id, operation.value);
             }
             const actions = new Map<string, string>();
@@ -2482,7 +2454,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             return [
               ...(agent.attemptDetails?.length && herdrPaneId() ? ["Fork as Pi session in pane"] : []),
               ...(worktree ? ["Copy branch", "Copy worktree path"] : []),
-              ...(dashboard.agentResults.has(agent.id) ? ["Open result in editor"] : []),
+              ...(ctx.mode === "tui" && dashboard.agentResults.has(agent.id) ? ["Open result in editor"] : []),
               "Copy agent ID",
               "Back",
             ];
