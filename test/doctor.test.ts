@@ -233,7 +233,7 @@ void test("package bin and CLI expose doctor and inspector commands", async () =
   assert.equal(inspected, "session-a");
   output = "";
   assert.equal(await runCli([], {}, (text) => { output += text; }), 1);
-  assert.equal(output, "Usage: pi-extensible-workflows doctor | inspect [session-id] | transcript <session-file> | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force]\n");
+  assert.equal(output, "Usage: pi-extensible-workflows doctor | inspect [session-id] [--json|--summary] | transcript <session-file> | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force]\n");
   const bin = join(paths.root, "bin", "pi-extensible-workflows");
   mkdirSync(join(paths.root, "bin"), { recursive: true });
   symlinkSync(join(process.cwd(), "dist", "src", "cli.js"), bin);
@@ -339,6 +339,14 @@ void test("CLI validates registered function output schemas", () => {
   assert.match(result.stderr, /Invalid output from cliBadOutput|invalid output/i);
 });
 
+void test("headless CLI reports the run ID when execution fails", () => {
+  const paths = fixture();
+  const result = runIsolatedCli(paths, `cliFail: { description: "Fail", input: { type: "object", additionalProperties: false }, output: { type: "string" }, run: () => { throw new Error("boom"); } }`, ["run", "cliFail"]);
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /Run ID: [0-9a-f-]+/);
+});
+
 void test("CLI progress stays on stderr and the final result stays on stdout", async () => {
   registerCliExtension();
   const paths = fixture();
@@ -348,6 +356,7 @@ void test("CLI progress stays on stderr and the final result stays on stdout", a
   assert.equal(exit, 0);
   assert.equal(stdout, '{"issue":7}\n');
   assert.match(stderr, /Workflow: cliEcho/);
+  assert.match(stderr, /Run ID: [0-9a-f-]+/);
   assert.equal(stderr.includes("\u001b["), false);
 });
 void test("CLI TTY progress repaints and respects terminal width", async () => {

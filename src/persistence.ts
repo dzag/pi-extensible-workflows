@@ -5,7 +5,7 @@ import { access, link, mkdir, open, readFile, readdir, rename, rm, stat, writeFi
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
-import type { BudgetApprovalRequest, JsonValue, LaunchSnapshot, RunRecord, WorkflowRunEvent } from "./types.js";
+import type { BudgetApprovalRequest, JsonValue, LaunchSnapshot, RunRecord, WorkflowBudgetUsage, WorkflowRunEvent } from "./types.js";
 import type { OwnershipRecord } from "./agent-execution.js";
 import { WorkflowError } from "./types.js";
 import { loadLaunchSnapshot } from "./utils.js";
@@ -13,11 +13,24 @@ import { loadLaunchSnapshot } from "./utils.js";
 export interface NativeSessionReference { sessionId: string; sessionFile: string }
 export interface EffectiveSystemPrompt { sessionId: string; attempt: number; turn: number; sha256: string; prompt: string }
 export interface PersistedRun extends RunRecord { nativeSessions: readonly NativeSessionReference[] }
+export interface RunSummaryAgent { id: string; name: string; label?: string; state: string; role?: string; attempts: number }
+export interface RunSummaryArtifacts { runDirectory: string; statePath: string; journalPath: string; snapshotPath: string; workflowPath: string; resultPath: string; summaryPath: string }
+export interface RunSummary { schemaVersion: 1; runId: string; sessionId: string; workflowName: string; state: RunRecord["state"]; createdAt: string; updatedAt: string; terminalAt?: string; usage: WorkflowBudgetUsage; agents: readonly RunSummaryAgent[]; error?: RunRecord["error"]; failedAt?: string; replayablePaths: readonly string[]; incompletePaths: readonly string[]; artifacts: RunSummaryArtifacts }
 export interface CompletedOperation { path: string; value: JsonValue }
 export interface AwaitingCheckpoint { path: string; name: string; prompt: string; context: JsonValue }
 export type PendingWorkflowDecision = BudgetApprovalRequest
 export type PersistedOwnershipNode = OwnershipRecord
 type Journal = { completed: Record<string, CompletedOperation>; awaiting?: Record<string, AwaitingCheckpoint>; decisions?: Record<string, PendingWorkflowDecision> };
+const TERMINAL_SUMMARY_STATES = new Set(["completed", "failed", "stopped"]);
+const EMPTY_USAGE: WorkflowBudgetUsage = { tokens: 0, costUsd: 0, durationMs: 0, agentLaunches: 0 };
+function summaryArtifacts(directory: string): RunSummaryArtifacts { return { runDirectory: directory, statePath: join(directory, "state.json"), journalPath: join(directory, "journal.json"), snapshotPath: join(directory, "snapshot.json"), workflowPath: join(directory, "workflow.js"), resultPath: join(directory, "result.json"), summaryPath: join(directory, "summary.json") }; }
+function summaryFromRun(run: PersistedRun, directory: string, journal: Journal, previous: Partial<RunSummary> | undefined, fallbackCreatedAt: string, now = new Date().toISOString()): RunSummary {
+  const createdAt = typeof previous?.createdAt === "string" ? previous.createdAt : fallbackCreatedAt;
+  const failedAt = run.failedAt ?? run.error?.failedAt;
+  const replayablePaths = [...new Set([...(run.retry?.completedPaths ?? []), ...Object.keys(journal.completed)])];
+  const incompletePaths = [...new Set([...(run.retry?.incompletePaths ?? []), ...(failedAt ? [failedAt] : [])])];
+  return { schemaVersion: 1, runId: run.id, sessionId: run.sessionId, workflowName: run.workflowName, state: run.state, createdAt, updatedAt: now, ...(previous?.terminalAt || TERMINAL_SUMMARY_STATES.has(run.state) ? { terminalAt: previous?.terminalAt ?? now } : {}), usage: { ...EMPTY_USAGE, ...(run.usage ?? {}) }, agents: run.agents.map(({ id, name, label, state, role, attempts }) => ({ id, name, ...(label ? { label } : {}), state, ...(role ? { role } : {}), attempts })), ...(run.error ? { error: run.error } : {}), ...(failedAt ? { failedAt } : {}), replayablePaths, incompletePaths, artifacts: summaryArtifacts(directory) };
+}
 export interface WorktreeReference { owner: string; path: string; branch: string; cwd: string; base: string }
 export interface BorrowedWorktreeBinding { name: string; sourceRunId: string; owner: string }
 
@@ -40,6 +53,15 @@ export function projectSessionsDirectory(cwd: string, home = homedir()): string 
 }
 export function runsDirectory(cwd: string, sessionId: string, home = homedir()): string {
   return join(projectSessionsDirectory(cwd, home), safePart(sessionId), "runs");
+}
+export async function listPersistedSessionIds(cwd: string, home = homedir()): Promise<string[]> {
+  try {
+    const entries = await readdir(projectSessionsDirectory(cwd, home), { withFileTypes: true });
+    return entries.filter((entry) => entry.isDirectory() && !entry.name.startsWith(".")).map(({ name }) => name);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
 }
 
 const SESSION_OWNER_FILE = "owner.json";
@@ -197,6 +219,7 @@ export class RunStore {
   private journalWrite: Promise<void> = Promise.resolve();
   // ponytail: serializes one RunStore instance; cross-process run sharing remains unsupported.
   private stateWrite: Promise<void> = Promise.resolve();
+  private summaryWrite: Promise<void> = Promise.resolve();
   private worktreeWrite: Promise<void> = Promise.resolve();
   private borrowedWorktreeWrite: Promise<void> = Promise.resolve();
   private snapshotWrite: Promise<void> = Promise.resolve();
@@ -222,12 +245,25 @@ export class RunStore {
       await atomicJson(join(temporary, "borrowed-worktrees.json"), []);
       await atomicJson(join(temporary, "state.json"), run);
       await atomicJson(join(temporary, "system-prompts.json"), { version: 1, entries: [] });
+      await atomicJson(join(temporary, "summary.json"), summaryFromRun(run, this.directory, { completed: {} }, undefined, new Date().toISOString()));
       await rename(temporary, this.directory);
     } catch (error) {
       await rm(temporary, { recursive: true, force: true });
       throw error;
     }
   }
+  private async refreshSummary(): Promise<void> {
+    const write = this.summaryWrite.then(async () => {
+      const run = await json<PersistedRun>(join(this.directory, "state.json"));
+      const journal = await json<Journal>(join(this.directory, "journal.json"));
+      const previous = await json<Partial<RunSummary>>(join(this.directory, "summary.json")).catch(() => undefined);
+      const fallbackCreatedAt = await stat(join(this.directory, "state.json")).then((value) => new Date(value.mtimeMs).toISOString());
+      await atomicJson(join(this.directory, "summary.json"), summaryFromRun(run, this.directory, journal, previous, fallbackCreatedAt));
+    });
+    this.summaryWrite = write.catch(() => undefined);
+    await write;
+  }
+  private refreshSummaryBestEffort(): void { void this.refreshSummary().catch(() => undefined); }
 
   async isComplete(): Promise<boolean> {
     try { await Promise.all([access(join(this.directory, "snapshot.json")), access(join(this.directory, "journal.json")), access(join(this.directory, "ownership.json")), access(join(this.directory, "state.json"))]); return true; }
@@ -240,11 +276,25 @@ export class RunStore {
     if (resolve(run.cwd) !== this.cwd || run.sessionId !== this.sessionId || run.id !== this.runId) throw new WorkflowError("RESUME_INCOMPATIBLE", "Persisted run belongs to another cwd or Pi session");
     return { run, snapshot: loadLaunchSnapshot(await json<LaunchSnapshot>(join(this.directory, "snapshot.json"))) };
   }
+  async loadSummary(): Promise<RunSummary> {
+    await this.stateWrite;
+    await this.journalWrite;
+    await this.summaryWrite;
+    const run = await json<PersistedRun>(join(this.directory, "state.json"));
+    const journal = await json<Journal>(join(this.directory, "journal.json"));
+    const previous = await json<RunSummary>(join(this.directory, "summary.json")).catch(() => undefined);
+    const [stateStat, journalStat] = await Promise.all([stat(join(this.directory, "state.json")), stat(join(this.directory, "journal.json"))]);
+    const fallbackCreatedAt = new Date(stateStat.mtimeMs).toISOString();
+    const previousUpdatedAt = previous?.updatedAt === undefined ? Number.NaN : Date.parse(previous.updatedAt);
+    const updatedAt = new Date(Math.max(stateStat.mtimeMs, journalStat.mtimeMs, Number.isNaN(previousUpdatedAt) ? 0 : previousUpdatedAt)).toISOString();
+    return summaryFromRun(run, this.directory, journal, previous, fallbackCreatedAt, updatedAt);
+  }
 
   async saveState(run: PersistedRun): Promise<void> {
     const write = this.stateWrite.then(async () => {
       if (resolve(run.cwd) !== this.cwd || run.sessionId !== this.sessionId || run.id !== this.runId) throw new WorkflowError("INTERNAL_ERROR", "Run identity does not match its session-scoped store");
       await atomicJson(join(this.directory, "state.json"), run);
+      this.refreshSummaryBestEffort();
     });
     this.stateWrite = write.catch(() => undefined);
     await write;
@@ -258,6 +308,7 @@ export class RunStore {
       result = await update(current);
       if (resolve(result.cwd) !== this.cwd || result.sessionId !== this.sessionId || result.id !== this.runId) throw new WorkflowError("INTERNAL_ERROR", "Run identity does not match its session-scoped store");
       await atomicJson(join(this.directory, "state.json"), result);
+      this.refreshSummaryBestEffort();
     });
     this.stateWrite = write.catch(() => undefined);
     await write;
@@ -308,6 +359,7 @@ export class RunStore {
       journal.awaiting ??= {};
       result = await update(journal);
       await atomicJson(journalPath, journal);
+      this.refreshSummaryBestEffort();
     });
     this.journalWrite = write.catch(() => undefined);
     await write;

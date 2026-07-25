@@ -96,6 +96,8 @@ function mainAgentError(error: unknown): WorkflowError {
   Object.assign(presented, typed);
   return presented;
 }
+function workflowFailedAt(error: unknown): string | undefined { return object(error) && typeof error.failedAt === "string" && error.failedAt ? error.failedAt : undefined; }
+function persistedFailure(run: PersistedRun, error: WorkflowError): PersistedRun { const failedAt = workflowFailedAt(error); return { ...run, error: { code: error.code, message: error.message, ...(failedAt ? { failedAt } : {}) }, ...(failedAt ? { failedAt } : {}) }; }
 
 export class RunLifecycle {
   #state: RunState;
@@ -1615,7 +1617,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     if (next !== "pausing") budget.transition(next);
     const persisted = await persistRunState(store, metadata, (current) => {
       const nextRun = { ...current, state: next, ...budget.snapshot() };
-      if (next === "running" || next === "completed") delete nextRun.error;
+      if (next === "running" || next === "completed") { delete nextRun.error; delete nextRun.failedAt; }
       return nextRun;
     });
     await eventPublisher.runState(store, metadata, previous, next, reason);
@@ -1961,7 +1963,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     try { variables = await resolveWorkflowVariables(runContext, controller, registry); }
     catch (error) {
       const typed = asWorkflowError(error);
-      if (!HARD_TERMINAL_RUN_STATES.has(run.lifecycle.state)) { await run.lifecycle.terminal("failed", typed.code).catch(() => undefined); const persisted = await persistRunState(run.store, run.metadata, (current) => ({ ...current, error: { code: typed.code, message: typed.message } })); await eventPublisher.runFailed(run.store, run.metadata, typed, run.lifecycle.state === "interrupted" ? "interrupted" : "failed"); run.update?.(workflowToolUpdate(persisted)); if (!["stopped", "interrupted", "budget_exhausted"].includes(run.lifecycle.state)) await createWorkflowFailureDiagnostics(run.store, run.metadata, typed, persisted).then((diagnostic) => { deliverFailure(pi, diagnostic); }).catch(() => undefined); }
+      if (!HARD_TERMINAL_RUN_STATES.has(run.lifecycle.state)) { await run.lifecycle.terminal("failed", typed.code).catch(() => undefined); const persisted = await persistRunState(run.store, run.metadata, (current) => persistedFailure({ ...current }, typed)); await eventPublisher.runFailed(run.store, run.metadata, typed, run.lifecycle.state === "interrupted" ? "interrupted" : "failed"); run.update?.(workflowToolUpdate(persisted)); if (!["stopped", "interrupted", "budget_exhausted"].includes(run.lifecycle.state)) await createWorkflowFailureDiagnostics(run.store, run.metadata, typed, persisted).then((diagnostic) => { deliverFailure(pi, diagnostic); }).catch(() => undefined); }
       await cleanupTerminalRun(run.store.runId);
       throw typed;
     }
@@ -1980,7 +1982,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       await scheduler.flush();
       const typed = error instanceof WorkflowError ? error : new WorkflowError(errorCode(error) ?? "INTERNAL_ERROR", errorText(error));
       if (!["stopped", "interrupted", "budget_exhausted"].includes(run.lifecycle.state)) await run.lifecycle.terminal(typed.code === "BUDGET_EXHAUSTED" ? "budget_exhausted" : "failed", typed.code);
-      const persisted = await persistRunState(run.store, run.metadata, (current) => ({ ...current, ...run.budget.snapshot(), error: { code: typed.code, message: typed.message } }));
+      const persisted = await persistRunState(run.store, run.metadata, (current) => persistedFailure({ ...current, ...run.budget.snapshot() }, typed));
       const state = run.lifecycle.state === "stopped" || run.lifecycle.state === "interrupted" || run.lifecycle.state === "budget_exhausted" ? run.lifecycle.state : "failed";
       if (state === "failed") retryReservations.delete(persisted.retry?.lineageRootRunId ?? run.store.runId);
       await eventPublisher.runFailed(run.store, run.metadata, typed, state);
@@ -2271,7 +2273,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         await scheduler.flush();
         const typed = error instanceof WorkflowError ? error : new WorkflowError("INTERNAL_ERROR", String(error));
         if (!["stopped", "interrupted", "budget_exhausted"].includes(lifecycle.state)) await lifecycle.terminal(typed.code === "CANCELLED" ? "stopped" : typed.code === "BUDGET_EXHAUSTED" ? "budget_exhausted" : "failed", typed.code);
-        const persisted = await persistRunState(store, checked.metadata, (current) => ({ ...current, ...budgetRuntime.snapshot(), error: { code: typed.code, message: typed.message } }));
+        const persisted = await persistRunState(store, checked.metadata, (current) => persistedFailure({ ...current, ...budgetRuntime.snapshot() }, typed));
         const state = lifecycle.state === "stopped" || lifecycle.state === "interrupted" || lifecycle.state === "budget_exhausted" ? lifecycle.state : "failed";
         await eventPublisher.runFailed(store, checked.metadata, typed, state);
         const diagnostic = await createWorkflowFailureDiagnostics(store, checked.metadata, typed, persisted);

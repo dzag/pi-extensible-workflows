@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { SessionEntry, SessionInfo } from "@earendil-works/pi-coding-agent";
 import { createLaunchSnapshot, inspectWorkflowScript } from "../src/index.js";
+import { runCli } from "../src/cli.js";
 import { RunStore } from "../src/persistence.js";
 import { loadSessionReport, matchSession, renderInspector, resolveSession, transcriptLines, type InspectorViewState } from "../src/session-inspector.js";
 
@@ -232,4 +233,26 @@ void test("renders active transcript entries with message roles and content", ()
   assert.match(rendered, /\[user\][\s\S]*Inspect the API/);
   assert.match(rendered, /\[assistant\][\s\S]*Tool call: read[\s\S]*src\/api\.ts/);
   assert.match(rendered, /\[toolResult: read\][\s\S]*API source/);
+});
+void test("non-TTY inspection discovers persisted runs without a transcript", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-inspect-summary-"));
+  const cwd = join(home, "project");
+  const sessionId = "session-persisted";
+  const store = new RunStore(cwd, sessionId, "run-persisted", home);
+  await store.create({ id: "run-persisted", workflowName: "persisted", cwd, sessionId, state: "completed", agents: [], nativeSessions: [] }, createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "persisted" }, settings: { concurrency: 1 }, models: [], tools: [], agentTypes: [], schemas: [] }));
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    let json = "";
+    assert.equal(await runCli(["inspect", sessionId, "--json"], { cwd, isTTY: false }, (text) => { json += text; }), 0);
+    const parsed = JSON.parse(json) as { sessionId: string; runs: Array<{ runId: string; workflowName: string; state: string }> };
+    assert.equal(parsed.sessionId, sessionId);
+    assert.deepEqual(parsed.runs.map(({ runId, workflowName, state }) => ({ runId, workflowName, state })), [{ runId: "run-persisted", workflowName: "persisted", state: "completed" }]);
+    let concise = "";
+    assert.equal(await runCli(["inspect", sessionId, "--summary"], { cwd, isTTY: false }, (text) => { concise += text; }), 0);
+    assert.match(concise, /run-persisted/);
+    assert.match(concise, /persisted.*completed/);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+  }
 });

@@ -11,7 +11,7 @@ import { acquireSessionLease, hasLiveSessionLease, projectSessionsDirectory, Run
 const TERMINAL_STATES = new Set<RunState>(["completed", "failed", "stopped"]);
 const DAY_MS = 24 * 60 * 60 * 1000;
 const REQUIRED_RUN_FILES = ["workflow.js", "state.json", "snapshot.json", "journal.json", "ownership.json", "worktrees.json", "borrowed-worktrees.json", "system-prompts.json"] as const;
-const OPTIONAL_RUN_FILES = new Set(["result.json"]);
+const OPTIONAL_RUN_FILES = new Set(["result.json", "summary.json"]);
 const RUN_DIRECTORIES = new Set(["worktrees"]);
 const RUN_FILES = new Set<string>([...REQUIRED_RUN_FILES, ...OPTIONAL_RUN_FILES]);
 const AGENT_STATES = new Set(["queued", "running", "waiting_for_child", "paused", "retrying", "completed", "failed", "cancelled"]);
@@ -74,6 +74,7 @@ function validateRunRecord(run: PersistedRun): void {
   }
   for (const [index, session] of (value.nativeSessions as unknown[]).entries()) if (!object(session) || typeof session.sessionId !== "string" || !session.sessionId || typeof session.sessionFile !== "string" || !session.sessionFile) throw new Error(`nativeSessions[${String(index)}] is invalid`);
   optionalString(value.parentRunId, "Persisted parent run");
+  optionalString(value.failedAt, "Persisted failed path");
   if (value.retry !== undefined) {
     if (!object(value.retry) || typeof value.retry.sourceRunId !== "string" || !value.retry.sourceRunId || typeof value.retry.lineageRootRunId !== "string" || !value.retry.lineageRootRunId) throw new Error("Persisted retry provenance is invalid");
     const sourceRunId = value.retry.sourceRunId;
