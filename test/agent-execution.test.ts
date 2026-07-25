@@ -44,6 +44,16 @@ void test("passes role prompt as system append, not task text", async () => {
   assert.match(prompt, /Task:\nDo work/);
 });
 
+void test("uses a role body as the full system prompt when requested", async () => {
+  const roleRoot: AgentExecutionRoot = { ...root, agentDefinitions: { ...root.agentDefinitions, override: { prompt: "Replace the system prompt", model: "anthropic/opus", thinking: "high", tools: ["read"], overrideSystemPrompt: true } } };
+  let input: unknown;
+  const executor = new WorkflowAgentExecutor(roleRoot, async (sessionInput) => { input = sessionInput; return { sessionId: "override", sessionFile: "/sessions/override.jsonl", messages: [assistant("done")], getSessionStats: sessionStats, prompt: async () => {}, dispose() {} }; });
+  assert.deepEqual(executor.resolve({ label: "worker", workflowName: "flow", role: "override" }), { model: { provider: "anthropic", model: "opus", thinking: "high" }, tools: ["read"], systemPrompt: "Replace the system prompt", systemPromptAppend: "" });
+  await executor.execute("Do work", { label: "worker", workflowName: "flow", role: "override" });
+  assert.equal((input as { systemPrompt?: string }).systemPrompt, "Replace the system prompt");
+  assert.equal((input as { systemPromptAppend?: string }).systemPromptAppend, "");
+});
+
 void test("persists the effective role system prompt emitted for the native turn", async () => {
   const saved: Array<{ sessionId: string; attempt: number; turn: number; prompt: string }> = [];
   let listener: ((event: AgentSessionEvent) => void) | undefined;
@@ -858,6 +868,53 @@ void test("filters disabled native extensions before factories and skills before
   const parent = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-parent" });
   assert.match(parent.systemPrompt ?? "", /disabled-skill/);
   parent.dispose();
+});
+
+void test("treats role system prompt bodies as literal content", async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-literal-system-prompt-"));
+  const agentDir = join(rootDir, "agent");
+  const cwd = join(rootDir, "project");
+  mkdirSync(join(agentDir, "extensions"), { recursive: true });
+  mkdirSync(cwd, { recursive: true });
+  writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: {} }));
+  writeFileSync(join(agentDir, "auth.json"), "{}");
+  const promptBody = join(rootDir, "prompt-body");
+  writeFileSync(promptBody, "This file must not be loaded as the prompt body.");
+  const session = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "literal-system-prompt", systemPrompt: promptBody });
+  try {
+    assert.ok(session.systemPrompt?.startsWith(promptBody));
+    assert.doesNotMatch(session.systemPrompt ?? "", /This file must not be loaded/);
+  } finally {
+    session.dispose();
+  }
+});
+void test("loads workflow SYSTEM.md with project trust and precedence", async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-system-prompt-"));
+  const agentDir = join(rootDir, "agent");
+  const cwd = join(rootDir, "project");
+  const previousHome = process.env.HOME;
+  process.env.HOME = rootDir;
+  try {
+    mkdirSync(join(agentDir, "extensions"), { recursive: true });
+    mkdirSync(join(cwd, ".pi", "pi-extensible-workflows"), { recursive: true });
+    mkdirSync(join(rootDir, ".pi", "pi-extensible-workflows"), { recursive: true });
+    writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: {} }));
+    writeFileSync(join(agentDir, "auth.json"), "{}");
+    writeFileSync(join(rootDir, ".pi", "pi-extensible-workflows", "SYSTEM.md"), "Global workflow system");
+    writeFileSync(join(cwd, ".pi", "pi-extensible-workflows", "SYSTEM.md"), "Project workflow system");
+    const policy = (projectTrusted: boolean): AgentResourcePolicy => ({ globalSettingsPath: "/workflow/settings.json", projectSettingsPath: "/project/.pi/pi-extensible-workflows/settings.json", projectTrusted, global: { skills: [], extensions: [] }, project: { skills: [], extensions: [] }, effective: { skills: [], extensions: [] }, unmatchedSkills: [], unmatchedExtensions: [] });
+    const untrusted = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "system-untrusted", systemPromptAppend: "Role append", resourcePolicy: policy(false) });
+    assert.match(untrusted.systemPrompt ?? "", /Global workflow system/);
+    assert.doesNotMatch(untrusted.systemPrompt ?? "", /Project workflow system/);
+    assert.match(untrusted.systemPrompt ?? "", /Role append/);
+    untrusted.dispose();
+    const trusted = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "system-trusted", resourcePolicy: policy(true) });
+    assert.match(trusted.systemPrompt ?? "", /Project workflow system/);
+    assert.doesNotMatch(trusted.systemPrompt ?? "", /Global workflow system/);
+    trusted.dispose();
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+  }
 });
 void test("applies ordered minimatch resource exclusions and records concrete matches", async () => {
   const rootDir = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-resource-globs-"));

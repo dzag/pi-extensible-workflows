@@ -2673,6 +2673,14 @@ void test("strict role frontmatter rejects malformed metadata", () => {
   ];
   for (const content of invalid) assert.throws(() => parseRoleMarkdown(content, true), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
 });
+
+void test("accepts role system prompt override metadata", () => {
+  for (const key of ["overrideSystemPrompt", "override_system_prompt", "is_system_prompt"]) {
+    assert.deepEqual(parseRoleMarkdown(`---\n${key}: true\n---\nbody`, true), { prompt: "body", overrideSystemPrompt: true });
+  }
+  assert.deepEqual(parseRoleMarkdown("---\noverrideSystemPrompt: false\n---\nbody", true), { prompt: "body", overrideSystemPrompt: false });
+  assert.throws(() => parseRoleMarkdown("---\noverrideSystemPrompt: yes\n---\nbody", true), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+});
 void test("strict role resource exclusions normalize relative and portable paths", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-role-resources-"));
   const rolePath = join(root, "roles", "reviewer.md");

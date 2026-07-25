@@ -1,4 +1,5 @@
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
@@ -16,7 +17,7 @@ export interface AgentBudgetHooks {
   afterTurn(accounting: AgentAccounting, final: boolean): void;
   instruction(): string | undefined;
 }
-export interface AgentDefinition { prompt?: string; description?: string; model?: string; thinking?: ThinkingLevel; tools?: readonly string[]; disabledAgentResources?: AgentResourceExclusions }
+export interface AgentDefinition { prompt?: string; description?: string; model?: string; thinking?: ThinkingLevel; tools?: readonly string[]; overrideSystemPrompt?: boolean; disabledAgentResources?: AgentResourceExclusions }
 export interface AgentProviderFailure { label: string; provider: string; model: string; error: string }
 export type AgentProviderRecovery = "retry" | "abort" | { model: string };
 export interface AgentExecutionOptions {
@@ -129,9 +130,18 @@ function accounting(stats: ReturnType<NativeSession["getSessionStats"]>): AgentA
   return { input: stats.tokens.input, output: stats.tokens.output, cacheRead: stats.tokens.cacheRead, cacheWrite: stats.tokens.cacheWrite, cost: stats.cost };
 }
 function canonicalSourcePath(path: string): string { try { return realpathSync(path); } catch { return resolve(path); } }
+const WORKFLOW_DIRECTORY = "pi-extensible-workflows";
+function workflowSystemPromptPath(cwd: string, agentDir: string, projectTrusted: boolean): string | undefined {
+  const projectPath = join(cwd, ".pi", WORKFLOW_DIRECTORY, "SYSTEM.md");
+  if (projectTrusted && existsSync(projectPath)) return projectPath;
+  const globalPaths = [join(homedir(), ".pi", WORKFLOW_DIRECTORY, "SYSTEM.md"), join(agentDir, WORKFLOW_DIRECTORY, "SYSTEM.md")];
+  return globalPaths.find((path) => existsSync(path));
+}
 
 export async function createNativeAgentSession(input: SessionInput): Promise<NativeSession> {
   const agentDir = input.agentDir ?? getAgentDir();
+  const systemPromptSource = workflowSystemPromptPath(input.cwd, agentDir, input.resourcePolicy?.projectTrusted ?? true);
+  const systemPromptOptions = input.systemPrompt !== undefined ? { systemPromptOverride: () => input.systemPrompt } : systemPromptSource !== undefined ? { systemPrompt: systemPromptSource } : {};
   const manager = input.agentDir ? SessionManager.create(input.cwd, join(agentDir, "sessions")) : SessionManager.create(input.cwd);
   manager.appendSessionInfo(input.sessionLabel);
   const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") });
@@ -172,10 +182,11 @@ export async function createNativeAgentSession(input: SessionInput): Promise<Nat
         return { ...base, skills: base.skills.filter(({ name }) => !disabledSkills.has(name)) };
       },
       ...(input.systemPromptAppend ? { appendSystemPromptOverride: (base) => [...base, input.systemPromptAppend ?? ""] } : {}),
+      ...systemPromptOptions,
     });
     await resourceLoader.reload();
-  } else if (input.systemPromptAppend || input.extensionFactories?.length) {
-    resourceLoader = new DefaultResourceLoader({ cwd: input.cwd, agentDir, ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}), ...(input.systemPromptAppend ? { appendSystemPromptOverride: (base) => [...base, input.systemPromptAppend ?? ""] } : {}) });
+  } else if (input.systemPrompt !== undefined || systemPromptSource !== undefined || input.systemPromptAppend || input.extensionFactories?.length) {
+    resourceLoader = new DefaultResourceLoader({ cwd: input.cwd, agentDir, ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}), ...systemPromptOptions, ...(input.systemPromptAppend ? { appendSystemPromptOverride: (base) => [...base, input.systemPromptAppend ?? ""] } : {}) });
     await resourceLoader.reload();
   }
   const { session } = await createAgentSession({ ...(input.options ?? {}), cwd: input.cwd, agentDir, modelRuntime, model, ...(settingsManager ? { settingsManager } : {}), ...(input.model.thinking ? { thinkingLevel: input.model.thinking } : {}), tools, ...(customTools.length ? { customTools } : {}), ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}), ...(resourceLoader ? { resourceLoader } : {}), sessionManager: manager });
@@ -217,13 +228,13 @@ function fallbackSetupContext(root: AgentExecutionRoot, options: AgentExecutionO
 function resourcePolicySummary(policy: AgentResourcePolicy): NonNullable<AgentSetupSummary["disabledAgentResources"]> {
   return { skills: [...policy.effective.skills], extensions: [...policy.effective.extensions], excludedSkills: [...(policy.excludedSkills ?? [])], excludedExtensions: [...(policy.excludedExtensions ?? [])], unmatchedSkills: [...policy.unmatchedSkills], unmatchedExtensions: [...policy.unmatchedExtensions] };
 }
-async function prepareAgentSetup(root: AgentExecutionRoot, createSession: SessionFactory, task: string, options: AgentExecutionOptions, resolved: { model: ModelSpec; tools: readonly string[]; systemPromptAppend: string }, cwd: string, attempt: number, signal: AbortSignal | undefined, customTools: readonly ToolDefinition[], resultTool: ToolDefinition | undefined): Promise<{ setup: AgentSetup; summary: AgentSetupSummary }> {
+async function prepareAgentSetup(root: AgentExecutionRoot, createSession: SessionFactory, task: string, options: AgentExecutionOptions, resolved: { model: ModelSpec; tools: readonly string[]; systemPrompt?: string; systemPromptAppend: string }, cwd: string, attempt: number, signal: AbortSignal | undefined, customTools: readonly ToolDefinition[], resultTool: ToolDefinition | undefined): Promise<{ setup: AgentSetup; summary: AgentSetupSummary }> {
   const setupSignal = signal ?? root.runContext?.signal ?? new AbortController().signal;
   const baselineOptions = structuredClone(options.agentOptions ?? {});
   const baseResourcePolicy = await root.agentResourcePolicy?.();
   const roleExclusions = options.role ? root.agentDefinitions?.[options.role]?.disabledAgentResources : undefined;
   const resourcePolicy = baseResourcePolicy && roleExclusions ? { ...baseResourcePolicy, effective: mergeAgentResourceExclusions(baseResourcePolicy.effective, roleExclusions) } : baseResourcePolicy;
-  const sessionInput: SessionInput = { cwd, model: { ...resolved.model }, tools: [...resolved.tools], sessionLabel: `${options.workflowName}:${options.label}:attempt-${String(attempt)}`, ...(root.agentDir ? { agentDir: root.agentDir } : {}), ...(customTools.length ? { customTools: [...customTools] } : {}), ...(resultTool ? { resultTool } : {}), systemPromptAppend: resolved.systemPromptAppend, ...(resourcePolicy ? { resourcePolicy } : {}), options: structuredClone(baselineOptions) };
+  const sessionInput: SessionInput = { cwd, model: { ...resolved.model }, tools: [...resolved.tools], sessionLabel: `${options.workflowName}:${options.label}:attempt-${String(attempt)}`, ...(root.agentDir ? { agentDir: root.agentDir } : {}), ...(customTools.length ? { customTools: [...customTools] } : {}), ...(resultTool ? { resultTool } : {}), ...(resolved.systemPrompt !== undefined ? { systemPrompt: resolved.systemPrompt } : {}), systemPromptAppend: resolved.systemPromptAppend, ...(resourcePolicy ? { resourcePolicy } : {}), options: structuredClone(baselineOptions) };
   const setup: AgentSetup = { prompt: task, options: sessionInput.options ?? {}, sessionInput, createSession };
   const base = fallbackSetupContext(root, options, setupSignal);
   const context = Object.freeze({ run: base.run, identity: base.identity, attempt, signal: setupSignal });
@@ -248,7 +259,7 @@ export class WorkflowAgentExecutor {
   constructor(private readonly root: AgentExecutionRoot, private readonly createSession: SessionFactory = createNativeAgentSession) {}
   setRunContext(runContext: Readonly<WorkflowRunContext>): void { this.root.runContext = runContext; }
 
-  resolve(options: AgentExecutionOptions, inheritedTools?: readonly string[]): { model: ModelSpec; requestedModel?: string; tools: readonly string[]; systemPromptAppend: string } {
+  resolve(options: AgentExecutionOptions, inheritedTools?: readonly string[]): { model: ModelSpec; requestedModel?: string; tools: readonly string[]; systemPrompt?: string; systemPromptAppend: string } {
     const role = options.role;
     const definition = role ? this.root.agentDefinitions?.[role] : undefined;
     if (role && !definition) throw new WorkflowError("UNKNOWN_AGENT_TYPE", `Unknown agent role: ${role}`);
@@ -264,7 +275,8 @@ export class WorkflowAgentExecutor {
     const model = options.modelOverride ?? parseModel(requestedModel, this.root.model, options.thinking ?? (aliasThinking === undefined ? definition?.thinking : undefined), this.root.modelAliases, this.root.knownModels ?? this.root.availableModels, this.root.settingsPath);
     const availableModels = this.root.knownModels ?? this.root.availableModels ?? new Set([modelCapability(this.root.model)]);
     if (!availableModels.has(modelCapability(model))) throw new WorkflowError("UNKNOWN_MODEL", `Unknown model${requestedModel ? ` ${requestedModel} resolved to ${modelCapability(model)}` : ""}${this.root.settingsPath ? ` (settings: ${this.root.settingsPath})` : ""}`);
-    return { model, ...(alias && requestedModel ? { requestedModel } : {}), tools: [...requested], systemPromptAppend: definition?.prompt ?? "" };
+    const overrideSystemPrompt = definition?.overrideSystemPrompt === true;
+    return { model, ...(alias && requestedModel ? { requestedModel } : {}), tools: [...requested], ...(overrideSystemPrompt ? { systemPrompt: definition.prompt ?? "" } : {}), systemPromptAppend: overrideSystemPrompt ? "" : definition?.prompt ?? "" };
   }
 
   async execute(task: string, options: AgentExecutionOptions, signal?: AbortSignal, customTools: readonly ToolDefinition[] = [], setSteer?: (handler: (message: string) => void | Promise<void>) => void, beforeRetry?: () => void): Promise<AgentExecutionResult> {
