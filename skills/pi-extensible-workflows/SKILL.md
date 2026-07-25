@@ -24,9 +24,8 @@ return await agent(
 
 Await `parallel(...)` or `pipeline(...)` results before interpolation. Runs are backgrounded by default; set the tool-call `foreground: true` when the caller must wait for the final value.
 
-## Advanced capabilities
+## Runtime and safety rules
 
-Registered functions, `outputSchema`, budgets, checkpoints, worktrees, retry/resume, CLI export, and `pipeline(...)` remain available for workflows that need them. Treat these as advanced controls rather than requirements for the default inline path.
 
 Inline launches require a non-empty `name`. Registered function launches must omit `name`; they use `workflow` as the run name:
 
@@ -51,6 +50,10 @@ if (testRes.exitCode === 0) {
 ```
 
 Most of the times using `shell()` to perform mutations is an antipattern. Use it mainly for verifications or idempotent actions.
+
+## Advanced capabilities
+
+Registered functions, `outputSchema`, budgets, checkpoints, worktrees, retry/resume, CLI export, and `pipeline(...)` remain available for workflows that need them. Treat these as advanced controls rather than requirements for the default inline path.
 
 ## `agent()` options
 

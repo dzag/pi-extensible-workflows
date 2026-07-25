@@ -157,6 +157,20 @@ void test("workflow guidance leads with the inline parallel-to-summary path", ()
   assert.match(WORKFLOW_TOOL_PROMPT_SNIPPET, /foreground: true/);
   assert.match(WORKFLOW_TOOL_PROMPT_SNIPPET, /advanced/i);
 });
+void test("agent quick-start keeps the default launch as valid JSON and workflow source", () => {
+  const source = readFileSync(resolve(process.cwd(), "docs/agents.html"), "utf8");
+  const block = /<section id="quick-start">[\s\S]*?<pre><code class="language-json">([\s\S]*?)<\/code><\/pre>/.exec(source)?.[1];
+  assert.ok(block);
+  const json = block.replace(/<[^>]*>/g, "").replace(/&gt;/g, ">").replace(/&lt;/g, "<").replace(/&amp;/g, "&");
+  const launch = JSON.parse(json) as { [key: string]: unknown; name?: unknown; script?: unknown };
+  assert.deepEqual(Object.keys(launch).sort(), ["name", "script"]);
+  const { name, script } = launch;
+  if (typeof name !== "string" || typeof script !== "string") throw new Error("Quick-start launch must define name and script");
+  assert.match(script, /await parallel/);
+  assert.match(script, /await agent\(prompt/);
+  assert.doesNotMatch(script, /withWorktree|outputSchema|budget|checkpoint|workflow/);
+  assert.doesNotThrow(() => preflight(script, { models: new Set(), tools: new Set(), agentTypes: new Set() }, [], { name }));
+});
 
 void test("registers the workflow tool, command, and conditional skill", async () => {
   const tools: Array<{ name: string; promptGuidelines?: string[]; execute: (id?: unknown, params?: unknown, signal?: unknown, update?: unknown, ctx?: unknown) => Promise<unknown> }> = [];
