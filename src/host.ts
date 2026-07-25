@@ -2681,7 +2681,6 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                       ctx.ui.notify(`Cannot open ${label}: ${error instanceof Error ? error.message : String(error)}`, "warning");
                     } finally {
                       editorRunning = false;
-                      tui.requestRender(true);
                     }
                   };
                   const updateDashboard = async () => {
