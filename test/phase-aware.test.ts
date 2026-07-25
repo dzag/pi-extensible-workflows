@@ -116,6 +116,21 @@ void test("phase dashboard keeps wide and narrow content within bounds while ret
   assert.match(narrow, /Selected phase: review/);
 });
 
+void test("phase dashboard shows agent accounting breakdown only when measured", () => {
+  const render = (accounting?: AgentRecord["accounting"]): string => formatWorkflowPhaseDashboard(run("running", [{ ...agent("worker", "running"), ...(accounting ? { accounting } : {}) }], [{ phase: "review", afterAgent: 0 }]), snapshot(["review"]), 120, { detailsOnly: true, agentId: "worker" }).join("\n");
+
+  const measured = render({ input: 90_100, output: 12_200, cacheRead: 26_100, cacheWrite: 0, cost: 0.43 });
+  assert.match(measured, /Tokens: 128\.4k \(in=90\.1k out=12\.2k cache-read=26\.1k cache-write=0\)/);
+  assert.match(measured, /Cost: \$0\.43/);
+
+  const missing = render();
+  assert.doesNotMatch(missing, /Tokens:|Cost:/);
+
+  const free = render({ input: 1, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0 });
+  assert.match(free, /Tokens: 3 \(in=1 out=2 cache-read=0 cache-write=0\)/);
+  assert.match(free, /Cost: \$0\.00/);
+});
+
 void test("phase and agent selections survive read-model polling", () => {
   const before = buildWorkflowPhaseModel(run("running", [agent("one")], [{ phase: "build", afterAgent: 0 }]), ["build", "review"]);
   const selected = preserveWorkflowPhaseSelection(before, { phaseId: "build#1", agentId: "one" });

@@ -814,11 +814,19 @@ function formatAgentActivity(agent: AgentRecord, spinner: string, styles: Workfl
   return label ? `${styles.accent(spinner)} ${styles.dim(label)}` : "";
 }
 
-function formatAccounting(accounting: NonNullable<AgentRecord["accounting"]>): string {
-  const total = accounting.input + accounting.output + accounting.cacheRead + accounting.cacheWrite;
-  return `${new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(total).toLowerCase()} tok`;
+function formatAccountingValue(value: number): string {
+  return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value).toLowerCase();
 }
 
+function formatAccounting(accounting: NonNullable<AgentRecord["accounting"]>): string {
+  const total = accounting.input + accounting.output + accounting.cacheRead + accounting.cacheWrite;
+  return `${formatAccountingValue(total)} tok`;
+}
+
+function formatAgentAccounting(accounting: NonNullable<AgentRecord["accounting"]>): string[] {
+  const total = accounting.input + accounting.output + accounting.cacheRead + accounting.cacheWrite;
+  return [`Tokens: ${formatAccountingValue(total)} (in=${formatAccountingValue(accounting.input)} out=${formatAccountingValue(accounting.output)} cache-read=${formatAccountingValue(accounting.cacheRead)} cache-write=${formatAccountingValue(accounting.cacheWrite)})`, `Cost: $${accounting.cost.toFixed(2)}`];
+}
 
 export function formatNavigatorDashboard(run: PersistedRun, checkpoints: readonly AwaitingCheckpoint[], worktrees: readonly WorktreeReference[]): string {
   void worktrees;
@@ -938,7 +946,7 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
     const agent = node.agent;
     if (!agent) return [styles.muted("Agent details are unavailable")];
     const byId = new Map(run.agents.map((candidate) => [candidate.id, candidate]));
-    const result = [styles.bold(`Selected agent: ${agentBreadcrumb(agent, byId, true)}`), `State: ${phaseStyle(agent.state)(agent.state)}`, `Structural path: ${agent.structuralPath?.join(" > ") || "(root)"}`, `Model: ${agent.model.provider}/${agent.model.model}${agent.model.thinking ? `:${agent.model.thinking}` : ""}`, `Role: ${agent.role ?? "(none)"}`, `Tools: ${agent.tools.join(", ") || "(none)"}`, `Attempts: ${String(agent.attempts)}`, ...(selection.actions ? [] : [styles.muted("enter for agent actions")])];
+    const result = [styles.bold(`Selected agent: ${agentBreadcrumb(agent, byId, true)}`), `State: ${phaseStyle(agent.state)(agent.state)}`, `Structural path: ${agent.structuralPath?.join(" > ") || "(root)"}`, `Model: ${agent.model.provider}/${agent.model.model}${agent.model.thinking ? `:${agent.model.thinking}` : ""}`, `Role: ${agent.role ?? "(none)"}`, `Tools: ${agent.tools.join(", ") || "(none)"}`, `Attempts: ${String(agent.attempts)}`, ...(agent.accounting ? formatAgentAccounting(agent.accounting) : []), ...(selection.actions ? [] : [styles.muted("enter for agent actions")])];
     const error = agent.attemptDetails?.at(-1)?.error;
     if (error) result.push(styles.error(`Error: ${error.code}: ${error.message}`));
     if (agent.activity) result.push(`Activity: ${agent.activity.text}`);
