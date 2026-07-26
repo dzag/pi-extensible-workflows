@@ -181,6 +181,11 @@ void test("agent actions render inside the details column beside the tree", () =
   assert.ok(lines.some((line) => line.includes("Agent actions")), "expected the actions title");
   assert.ok(!lines.some((line) => line.includes("enter for agent actions")), "hint should disappear once actions are open");
 });
+void test("phase dashboard keeps system prompts out of agent details", () => {
+  const current = run("running", [{ ...agent("api"), systemPrompt: "PRIVATE SYSTEM PROMPT" }], [{ phase: "review", afterAgent: 0 }]);
+  const rendered = formatWorkflowPhaseDashboard(current, snapshot(["review"]), 120, { detailsOnly: true, agentId: "api" }).join("\n");
+  assert.doesNotMatch(rendered, /System prompt:|PRIVATE SYSTEM PROMPT/);
+});
 
 void test("phase tree preserves parent nesting across different structural paths", () => {
   const current = run("running", [
