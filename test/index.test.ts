@@ -1489,33 +1489,47 @@ void test("TUI navigator exposes agent-scoped worktree actions without transcrip
         assert.match(rendered, /issues/);
         assert.match(rendered, /issue-65/);
         assert.doesNotMatch(rendered, /Agents\.\.\.|copy-owner|Copy branch|Copy worktree path/);
+        const selectedTreeRow = (): string => component.render(80).find((line) => line.startsWith("→")) ?? "";
+        const initialTreeRow = selectedTreeRow();
+        component.handleInput?.("l");
+        assert.notEqual(selectedTreeRow(), initialTreeRow);
+        component.handleInput?.("h");
+        assert.notEqual(selectedTreeRow(), initialTreeRow);
+        component.handleInput?.("h");
+        assert.equal(selectedTreeRow(), initialTreeRow);
+        component.handleInput?.("l");
+        component.handleInput?.("l");
         // Drive action menus by label so the assertions do not depend on which
         // optional actions the environment offers (fork needs herdr).
         const chooseAction = (label: string): void => {
           for (let step = 0; step < 12; step += 1) {
             if (component.render(80).join("\n").includes(`→ ${label}`)) { component.handleInput?.("tui.select.confirm"); return; }
-            component.handleInput?.("tui.select.down");
+            component.handleInput?.("j");
           }
           throw new Error(`action not reachable: ${label}`);
         };
         if (customCalls === 1) {
           // Select the agent node, then open its actions inline (no separate picker).
-          component.handleInput?.("tui.select.down");
-          component.handleInput?.("tui.select.down");
-          component.handleInput?.("tui.select.down");
+          component.handleInput?.("j");
+          component.handleInput?.("j");
           component.handleInput?.("tui.select.confirm");
           const withActions = component.render(80).join("\n");
           assert.match(withActions, /Agent actions/);
           assert.match(withActions, /Copy branch/);
           assert.match(withActions, /issue-65/, "tree must stay visible beside the actions");
+          const selectedActionRow = (): string => component.render(80).join("\n").split("\n").find((line) => line.includes("| →")) ?? "";
+          const firstActionRow = selectedActionRow();
+          component.handleInput?.("j");
+          component.handleInput?.("k");
+          assert.equal(selectedActionRow(), firstActionRow);
           chooseAction("Copy branch");
           chooseAction("Copy worktree path");
           chooseAction("Copy agent ID");
           chooseAction("Back");
           // Back at the tree: climb to the run root so run-level actions apply.
-          component.handleInput?.("tui.editor.cursorLeft");
-          component.handleInput?.("tui.editor.cursorLeft");
-          component.handleInput?.("tui.editor.cursorLeft");
+          component.handleInput?.("h");
+          component.handleInput?.("h");
+          component.handleInput?.("h");
           component.handleInput?.("a");
           chooseAction("Copy run path");
         } else if (customCalls === 2) {
@@ -2261,7 +2275,7 @@ void test("navigator reviews each pending checkpoint before answering", async ()
           assert.match(review, /Name: second/);
           assert.match(review, /Review the second artifact\?/);
           assert.match(review, /Context:\s*null/);
-          component.handleInput?.("tui.select.down");
+          component.handleInput?.("j");
           component.handleInput?.("tui.select.confirm");
           pendingAfterCancel = (await store.awaitingCheckpoints()).length;
         } else if (customCalls === 5) {

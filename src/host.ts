@@ -1528,6 +1528,15 @@ function keybindingKeys(keybindings: unknown, name: string): readonly string[] |
   const getKeys = object(keybindings) ? asFn(keybindings.getKeys) as NonNullable<KeybindingsHostCapabilities["getKeys"]> | undefined : undefined;
   return getKeys ? getKeys.call(keybindings, name) : undefined;
 }
+type WorkflowKeybindings = { matches(data: string, binding: string): boolean };
+const WORKFLOW_VIM_KEYS: Readonly<Record<string, string>> = { "tui.select.up": "k", "tui.select.down": "j", "tui.editor.cursorLeft": "h", "tui.editor.cursorRight": "l" };
+function workflowKeyMatches(keybindings: WorkflowKeybindings, data: string, binding: string): boolean { return keybindings.matches(data, binding) || WORKFLOW_VIM_KEYS[binding] === data; }
+function workflowKeyLabel(keybindings: unknown, binding: string, fallback: string, labels: Readonly<Record<string, string>>): string {
+  const keys = keybindingKeys(keybindings, binding);
+  const configured = keys?.length ? keys.map((key) => labels[key] ?? key) : [fallback];
+  const vim = WORKFLOW_VIM_KEYS[binding];
+  return [...new Set(vim ? [...configured, vim] : configured)].join("/");
+}
 
 export default function workflowExtension(pi: ExtensionAPI, home?: string, clipboard = copyToClipboard, createSession: SessionFactory = createNativeAgentSession, agentDir?: string, additionalSkillPaths: readonly string[] = []) {
   beginWorkflowExtensionLoading();
@@ -2841,10 +2850,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                   let expandedNodeIds = new Set(initialSelection.expandedNodeIds ?? workflowPhaseTreeInitialExpanded(tree));
                   const terminalRows = () => Math.max(1, tuiRows(tui) - WORKFLOW_PANEL_FOOTER_ROWS);
                   const keyLabels: Record<string, string> = { up: "↑", down: "↓", left: "←", right: "→", pageUp: "pgup", pageDown: "pgdn" };
-                  const keyLabel = (binding: string, fallback: string) => {
-                    const keys = keybindingKeys(keybindings, binding);
-                    return keys?.length ? keys.map((key) => keyLabels[key] ?? key).join("/") : fallback;
-                  };
+                  const keyLabel = (binding: string, fallback: string) => workflowKeyLabel(keybindings, binding, fallback, keyLabels);
                   const selectedAgentRecord = (): AgentRecord | undefined => {
                     const node = selectedNodeId ? tree.byId.get(selectedNodeId) : tree.nodes[0];
                     return node?.kind === "agent" && node.agentId ? view.agents.find((agent) => agent.id === node.agentId) : undefined;
@@ -2956,12 +2962,12 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                       if (!actionMode && (data === "a" || data === "A")) { actionMode = true; actionIndex = 0; dashboardOffset = 0; tui.requestRender(); return; }
                       if (actionMode) {
                         const options = actionOptions();
-                        if (keybindings.matches(data, "tui.select.cancel")) { actionMode = false; dashboardOffset = 0; tui.requestRender(); return; }
-                        if (keybindings.matches(data, "tui.select.up")) actionIndex = (actionIndex + options.length - 1) % options.length;
-                        else if (keybindings.matches(data, "tui.select.down")) actionIndex = (actionIndex + 1) % options.length;
-                        else if (keybindings.matches(data, "tui.select.pageUp")) dashboardOffset = Math.max(0, dashboardOffset - Math.max(1, terminalRows() - 1));
-                        else if (keybindings.matches(data, "tui.select.pageDown")) dashboardOffset += Math.max(1, terminalRows() - 1);
-                        else if (keybindings.matches(data, "tui.select.confirm")) {
+                        if (workflowKeyMatches(keybindings, data, "tui.select.cancel")) { actionMode = false; dashboardOffset = 0; tui.requestRender(); return; }
+                        if (workflowKeyMatches(keybindings, data, "tui.select.up")) actionIndex = (actionIndex + options.length - 1) % options.length;
+                        else if (workflowKeyMatches(keybindings, data, "tui.select.down")) actionIndex = (actionIndex + 1) % options.length;
+                        else if (workflowKeyMatches(keybindings, data, "tui.select.pageUp")) dashboardOffset = Math.max(0, dashboardOffset - Math.max(1, terminalRows() - 1));
+                        else if (workflowKeyMatches(keybindings, data, "tui.select.pageDown")) dashboardOffset += Math.max(1, terminalRows() - 1);
+                        else if (workflowKeyMatches(keybindings, data, "tui.select.confirm")) {
                           const action = options[actionIndex];
                           const agent = selectedAgentRecord();
                           if (!action || action === "Back") { actionMode = false; dashboardOffset = 0; }
@@ -2984,30 +2990,30 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                         return;
                       }
                       const current = selectedNodeId ? tree.byId.get(selectedNodeId) : tree.nodes[0];
-                      if (keybindings.matches(data, "tui.select.cancel")) {
+                      if (workflowKeyMatches(keybindings, data, "tui.select.cancel")) {
                         if (narrow && detailsMode) { detailsMode = false; selectionNeedsScroll = true; } else done("Back");
                       } else if (narrow && detailsMode) {
-                        if (keybindings.matches(data, "tui.select.pageUp")) dashboardOffset = Math.max(0, dashboardOffset - Math.max(1, terminalRows() - 1));
-                        else if (keybindings.matches(data, "tui.select.pageDown")) dashboardOffset += Math.max(1, terminalRows() - 1);
-                        else if (keybindings.matches(data, "tui.select.confirm")) {
+                        if (workflowKeyMatches(keybindings, data, "tui.select.pageUp")) dashboardOffset = Math.max(0, dashboardOffset - Math.max(1, terminalRows() - 1));
+                        else if (workflowKeyMatches(keybindings, data, "tui.select.pageDown")) dashboardOffset += Math.max(1, terminalRows() - 1);
+                        else if (workflowKeyMatches(keybindings, data, "tui.select.confirm")) {
                           if (current?.kind === "agent" && current.agentId) { actionMode = true; actionIndex = 0; }
                           else if (current?.children.length) { if (expandedNodeIds.has(current.id)) expandedNodeIds.delete(current.id); else expandedNodeIds.add(current.id); }
                         }
-                      } else if (keybindings.matches(data, "tui.editor.cursorLeft")) {
+                      } else if (workflowKeyMatches(keybindings, data, "tui.editor.cursorLeft")) {
                         const next = navigateWorkflowPhaseTree(tree, selectedNodeId, expandedNodeIds, "left");
                         selectedNodeId = next.nodeId; expandedNodeIds = new Set(next.expandedNodeIds); selectionNeedsScroll = true;
-                      } else if (keybindings.matches(data, "tui.editor.cursorRight")) {
+                      } else if (workflowKeyMatches(keybindings, data, "tui.editor.cursorRight")) {
                         const next = navigateWorkflowPhaseTree(tree, selectedNodeId, expandedNodeIds, "right");
                         selectedNodeId = next.nodeId; expandedNodeIds = new Set(next.expandedNodeIds); selectionNeedsScroll = true;
-                      } else if (keybindings.matches(data, "tui.select.up")) {
+                      } else if (workflowKeyMatches(keybindings, data, "tui.select.up")) {
                         const next = navigateWorkflowPhaseTree(tree, selectedNodeId, expandedNodeIds, "up");
                         selectedNodeId = next.nodeId; selectionNeedsScroll = true;
-                      } else if (keybindings.matches(data, "tui.select.down")) {
+                      } else if (workflowKeyMatches(keybindings, data, "tui.select.down")) {
                         const next = navigateWorkflowPhaseTree(tree, selectedNodeId, expandedNodeIds, "down");
                         selectedNodeId = next.nodeId; selectionNeedsScroll = true;
-                      } else if (keybindings.matches(data, "tui.select.pageUp")) dashboardOffset = Math.max(0, dashboardOffset - Math.max(1, terminalRows() - 1));
-                      else if (keybindings.matches(data, "tui.select.pageDown")) dashboardOffset += Math.max(1, terminalRows() - 1);
-                      else if (keybindings.matches(data, "tui.select.confirm")) {
+                      } else if (workflowKeyMatches(keybindings, data, "tui.select.pageUp")) dashboardOffset = Math.max(0, dashboardOffset - Math.max(1, terminalRows() - 1));
+                      else if (workflowKeyMatches(keybindings, data, "tui.select.pageDown")) dashboardOffset += Math.max(1, terminalRows() - 1);
+                      else if (workflowKeyMatches(keybindings, data, "tui.select.confirm")) {
                         if (narrow) detailsMode = true;
                         else if (current?.kind === "agent" && current.agentId) { actionMode = true; actionIndex = 0; }
                         else if (current?.children.length) { if (expandedNodeIds.has(current.id)) expandedNodeIds.delete(current.id); else expandedNodeIds.add(current.id); }
@@ -3058,7 +3064,9 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                     const currentLayout = layout();
                     const maxOffset = Math.max(0, renderedLines.length - currentLayout.contentViewport);
                     offset = Math.min(offset, maxOffset);
-                    const hint = truncateToVisualLines(theme.fg("dim", "↑↓/pgup/pgdn scroll · enter select · esc cancel"), Number.MAX_SAFE_INTEGER, width, 1).visualLines[0] ?? "";
+                    const keyLabels: Record<string, string> = { up: "↑", down: "↓", left: "←", right: "→", pageUp: "pgup", pageDown: "pgdn" };
+                    const keyLabel = (binding: string, fallback: string) => workflowKeyLabel(keybindings, binding, fallback, keyLabels);
+                    const hint = truncateToVisualLines(theme.fg("dim", `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")}/pgup/pgdn scroll · enter select · esc cancel`), Number.MAX_SAFE_INTEGER, width, 1).visualLines[0] ?? "";
                     const controls = currentLayout.compactControls
                       ? [options.map((option, index) => `${index === selectedIndex ? "[" : " "}${option}${index === selectedIndex ? "]" : " "}`).join(" ")]
                       : options.map((option, index) => `${index === selectedIndex ? "→ " : "  "}${option}`);
@@ -3072,12 +3080,12 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                   },
                   invalidate() {},
                   handleInput(data: string) {
-                    if (keybindings.matches(data, "tui.select.up")) selectedIndex = (selectedIndex + options.length - 1) % options.length;
-                    else if (keybindings.matches(data, "tui.select.down")) selectedIndex = (selectedIndex + 1) % options.length;
-                    else if (keybindings.matches(data, "tui.select.pageUp")) move(-layout().contentViewport);
-                    else if (keybindings.matches(data, "tui.select.pageDown")) move(layout().contentViewport);
-                    else if (keybindings.matches(data, "tui.select.confirm")) done(options[selectedIndex] === "Cancel" ? undefined : options[selectedIndex] as "Approve" | "Reject");
-                    else if (keybindings.matches(data, "tui.select.cancel")) done(undefined);
+                    if (workflowKeyMatches(keybindings, data, "tui.select.up")) selectedIndex = (selectedIndex + options.length - 1) % options.length;
+                    else if (workflowKeyMatches(keybindings, data, "tui.select.down")) selectedIndex = (selectedIndex + 1) % options.length;
+                    else if (workflowKeyMatches(keybindings, data, "tui.select.pageUp")) move(-layout().contentViewport);
+                    else if (workflowKeyMatches(keybindings, data, "tui.select.pageDown")) move(layout().contentViewport);
+                    else if (workflowKeyMatches(keybindings, data, "tui.select.confirm")) done(options[selectedIndex] === "Cancel" ? undefined : options[selectedIndex] as "Approve" | "Reject");
+                    else if (workflowKeyMatches(keybindings, data, "tui.select.cancel")) done(undefined);
                     tui.requestRender();
                   },
                 }, theme);
