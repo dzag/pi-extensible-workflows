@@ -51,6 +51,12 @@ const cliExtension: WorkflowExtension = {
       output: { type: "object", properties: { issue: { type: "integer" } }, required: ["issue"], additionalProperties: false },
       run: (input) => ({ issue: input.issue as JsonValue }),
     },
+    cliRuntime: {
+      description: "Runtime progress",
+      input: { type: "object", additionalProperties: false },
+      output: { type: "boolean" },
+      run: async () => { await new Promise<void>((resolve) => setTimeout(resolve, 1_100)); return true; },
+    },
   },
 };
 function registerCliExtension(): void { registerWorkflowExtension(cliExtension); }
@@ -416,6 +422,13 @@ void test("CLI TTY progress disables colors with NO_COLOR", async () => {
   }
   assert.match(stderr, /Workflow: cliEcho/);
   assert.equal(stderr.includes("\u001b["), false);
+});
+void test("CLI TTY progress updates runtime between workflow snapshots", async () => {
+  registerCliExtension();
+  const paths = fixture();
+  let stderr = "";
+  assert.equal(await runCli(["run", "cliRuntime"], { cwd: paths.cwd, agentDir: paths.agentDir, isTTY: true, stderr: (text) => { stderr += text; } }, () => {}), 0);
+  assert.match(stderr, /\[running\].*runtime=1s/);
 });
 void test("headless CLI trust overrides are honored without leaking into workflow arguments", () => {
   const paths = fixture();
