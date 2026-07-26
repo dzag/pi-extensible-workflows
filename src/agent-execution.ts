@@ -226,7 +226,7 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
   const native = await createLocalPiSession(input);
   let disposal: Promise<void> | undefined;
   let aborting: Promise<void> | undefined;
-  let prompting: Promise<WorkflowAgentTurnResult> | undefined;
+  const prompts = new Set<Promise<WorkflowAgentTurnResult>>();
   let disposed = false;
   const startAbort = () => aborting ??= Promise.resolve().then(() => native.abort?.()).then(() => undefined).finally(() => { aborting = undefined; });
   const reference: WorkflowAgentSessionReference = { transport: "local", sessionId: native.sessionId, ...(native.sessionFile ? { locator: { sessionFile: native.sessionFile } } : {}) };
@@ -239,8 +239,8 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
     async prompt(text: string) {
       if (disposed) throw new WorkflowError("INTERNAL_ERROR", "Local workflow session is disposed");
       const prompt = Promise.resolve().then(async () => { await native.prompt(text); const assistant = latestUsableAssistant(native.messages); return assistant ? { assistant } : {}; });
-      prompting = prompt;
-      try { return await prompt; } finally { if (prompting === prompt) prompting = undefined; }
+      prompts.add(prompt);
+      try { return await prompt; } finally { prompts.delete(prompt); }
     },
     async steer(text: string) { if (!native.steer) throw new WorkflowError("INTERNAL_ERROR", "Local workflow session does not support steering"); await native.steer(text); },
     async abort() { if (disposed) return; await startAbort(); },
@@ -248,7 +248,7 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
       disposal ??= (async () => {
         disposed = true;
         try { await startAbort(); } catch { /* Abort failure must not prevent the prompt from settling. */ }
-        try { await prompting; } catch { /* Prompt rejection is expected after abort during teardown. */ }
+        await Promise.allSettled(prompts);
         native.dispose();
       })();
       await disposal;

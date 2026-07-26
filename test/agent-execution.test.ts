@@ -748,6 +748,48 @@ void test("local transport waits for an in-flight prompt and abort before dispos
     Object.defineProperty(AgentSession.prototype, "dispose", originalDispose);
   }
 });
+void test("local transport waits for every in-flight prompt before disposing", async () => {
+  const originalAbort = Object.getOwnPropertyDescriptor(AgentSession.prototype, "abort");
+  const originalPrompt = Object.getOwnPropertyDescriptor(AgentSession.prototype, "prompt");
+  const originalDispose = Object.getOwnPropertyDescriptor(AgentSession.prototype, "dispose");
+  assert.ok(originalAbort && originalPrompt && originalDispose);
+  const events: string[] = [];
+  let releaseFirst!: () => void;
+  let releaseSecond!: () => void;
+  let markFirstStarted!: () => void;
+  let markSecondStarted!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+  const secondStarted = new Promise<void>((resolve) => { markSecondStarted = resolve; });
+  AgentSession.prototype.prompt = async function (text) {
+    events.push(`prompt-start:${text}`);
+    if (text === "first") { markFirstStarted(); await firstGate; } else { markSecondStarted(); await secondGate; }
+    events.push(`prompt-end:${text}`);
+  };
+  AgentSession.prototype.abort = async function () { events.push("abort"); };
+  AgentSession.prototype.dispose = function () { events.push("dispose"); };
+  try {
+    const prepared = { cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], sessionLabel: "async-multi-dispose-contract" } satisfies import("../src/types.js").PreparedAgentSession;
+    const session = await localAgentTransport.createSession(prepared, {} as never);
+    const firstPrompt = session.prompt("first");
+    await firstStarted;
+    const secondPrompt = session.prompt("second");
+    await secondStarted;
+    const disposal = session.dispose();
+    releaseSecond();
+    await secondPrompt;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(events.includes("dispose"), false);
+    releaseFirst();
+    await Promise.all([firstPrompt, disposal]);
+    assert.deepEqual(events, ["prompt-start:first", "prompt-start:second", "abort", "prompt-end:second", "prompt-end:first", "dispose"]);
+  } finally {
+    Object.defineProperty(AgentSession.prototype, "abort", originalAbort);
+    Object.defineProperty(AgentSession.prototype, "prompt", originalPrompt);
+    Object.defineProperty(AgentSession.prototype, "dispose", originalDispose);
+  }
+});
 void test("local transport resets abort state for each prompt and disposal", async () => {
   const originalAbort = Object.getOwnPropertyDescriptor(AgentSession.prototype, "abort");
   const originalPrompt = Object.getOwnPropertyDescriptor(AgentSession.prototype, "prompt");
