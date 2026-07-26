@@ -1509,6 +1509,7 @@ function tuiRows(tui: unknown): number {
   const rows = object(tui) && object(tui.terminal) ? tui.terminal.rows : undefined;
   return typeof rows === "number" && Number.isFinite(rows) ? rows : 24;
 }
+const WORKFLOW_PANEL_FOOTER_ROWS = 2;
 const WORKFLOW_OVERLAY_BORDER_ROWS = 2;
 const WORKFLOW_OVERLAY_TOP_MARGIN = 1;
 const WORKFLOW_OVERLAY_OPTIONS = { anchor: "top-left", width: "100%", maxHeight: "100%", margin: { top: WORKFLOW_OVERLAY_TOP_MARGIN } } as const;
@@ -2838,7 +2839,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                   let tree = buildWorkflowPhaseTree(view.phaseModel);
                   let selectedNodeId = initialSelection.nodeId ?? tree.nodes[0]?.id;
                   let expandedNodeIds = new Set(initialSelection.expandedNodeIds ?? workflowPhaseTreeInitialExpanded(tree));
-                  const terminalRows = () => Math.max(1, tuiRows(tui) - WORKFLOW_OVERLAY_BORDER_ROWS);
+                  const terminalRows = () => Math.max(1, tuiRows(tui) - WORKFLOW_PANEL_FOOTER_ROWS);
                   const keyLabels: Record<string, string> = { up: "↑", down: "↓", left: "←", right: "→", pageUp: "pgup", pageDown: "pgdn" };
                   const keyLabel = (binding: string, fallback: string) => {
                     const keys = keybindingKeys(keybindings, binding);
@@ -2914,7 +2915,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                     void updateDashboard().catch(() => undefined).finally(() => { refreshing = false; });
                   }, 1000);
                   timer.unref();
-                  return borderWorkflowOverlay({
+                  return {
                     render(width: number) {
                       renderedWidth = width;
                       const narrow = width < 80;
@@ -2945,7 +2946,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                         selectionNeedsScroll = false;
                       }
                       dashboardOffset = Math.max(0, Math.min(maxOffset, dashboardOffset));
-                      const hint = truncateToVisualLines(theme.fg("dim", actionMode ? `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} actions · ${keyLabel("tui.select.confirm", "enter")} run · ${keyLabel("tui.select.cancel", "esc")} tree` : `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} tree · ${keyLabel("tui.editor.cursorLeft", "←")}/${keyLabel("tui.editor.cursorRight", "→")} collapse/expand · ${keyLabel("tui.select.confirm", "enter")} inspect · a actions · ${keyLabel("tui.select.cancel", "esc")} ${narrow && detailsMode ? "tree" : "close"}${content.length > viewport ? ` · ${keyLabel("tui.select.pageUp", "pgup")}/${keyLabel("tui.select.pageDown", "pgdn")} scroll` : ""} · auto-refresh 1s`), Number.MAX_SAFE_INTEGER, width, 1).visualLines[0] ?? "";
+                      const hint = truncateToVisualLines(theme.fg("dim", actionMode ? `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} actions · ${keyLabel("tui.select.confirm", "enter")} run · ${keyLabel("tui.select.cancel", "esc")} tree` : `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} tree · ${keyLabel("tui.editor.cursorLeft", "←")}/${keyLabel("tui.editor.cursorRight", "→")} collapse/expand · ${keyLabel("tui.select.confirm", "enter")} inspect · a actions · ${keyLabel("tui.select.cancel", "esc")} ${narrow && detailsMode ? "tree" : "back"}${content.length > viewport ? ` · ${keyLabel("tui.select.pageUp", "pgup")}/${keyLabel("tui.select.pageDown", "pgdn")} scroll` : ""} · auto-refresh 1s`), Number.MAX_SAFE_INTEGER, width, 1).visualLines[0] ?? "";
                       return [...content.slice(dashboardOffset, dashboardOffset + viewport), ...(hintRows ? [hint] : [])];
                     },
                     invalidate() {},
@@ -2984,7 +2985,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                       }
                       const current = selectedNodeId ? tree.byId.get(selectedNodeId) : tree.nodes[0];
                       if (keybindings.matches(data, "tui.select.cancel")) {
-                        if (narrow && detailsMode) { detailsMode = false; selectionNeedsScroll = true; } else done(undefined);
+                        if (narrow && detailsMode) { detailsMode = false; selectionNeedsScroll = true; } else done("Back");
                       } else if (narrow && detailsMode) {
                         if (keybindings.matches(data, "tui.select.pageUp")) dashboardOffset = Math.max(0, dashboardOffset - Math.max(1, terminalRows() - 1));
                         else if (keybindings.matches(data, "tui.select.pageDown")) dashboardOffset += Math.max(1, terminalRows() - 1);
@@ -3014,10 +3015,10 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                       tui.requestRender();
                     },
                     dispose() { disposed = true; clearInterval(timer); setWorkflowStatus(undefined); },
-                  }, theme);
-                }, { overlay: true, overlayOptions: WORKFLOW_OVERLAY_OPTIONS })
-              : await ctx.ui.select(view.dashboard, [...view.actions.keys(), "Close"]);
-            if (!actionChoice || actionChoice === "Close") return;
+                  };
+                })
+              : await ctx.ui.select(view.dashboard, [...view.actions.keys(), "Back"]);
+            if (!actionChoice || actionChoice === "Back") { stores = await loadStores(); break; }
             if (actionChoice === "Agents...") { await selectAgent(view); continue; }
             if (actionChoice.startsWith("__workflow_agent__:")) { await selectAgent(view, actionChoice.slice("__workflow_agent__:".length)); continue; }
             if (actionChoice.startsWith("__workflow_fork__:")) {
