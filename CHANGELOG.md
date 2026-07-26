@@ -4,6 +4,7 @@
 - Added workflow-specific `SYSTEM.md` files and role-level system prompt replacement for workflow agents.
 - Added orange stalled-agent warnings after ten minutes without observable session events.
 - Show active shell operations in workflow progress while agents are settled.
+- Deliver concise human-readable background failure follow-ups and support `inspect --failed` for persisted runs.
 
 ## [3.2.0] - 2026-07-25
 
