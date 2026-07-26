@@ -171,7 +171,7 @@ export function formatWorkflowPreview(args: { script?: unknown; workflow?: unkno
 }
 export const WORKFLOW_TOOL_LABEL = "Workflow";
 export const WORKFLOW_TOOL_DESCRIPTION = "Run a deterministic JavaScript workflow with a named inline parallel-to-summary path by default";
-export const WORKFLOW_TOOL_PROMPT_SNIPPET = "Run a deterministic, resumable JavaScript workflow. Prefer a named inline script that fans out independent work with parallel(...), awaits the keyed results before interpolating them into one summarizing agent(...), and returns. Inline launches require an explicit non-empty name; registered function launches reject name and use workflow as the run name. Advanced controls include registered functions, outputSchema, budgets, checkpoints, worktrees, retry/resume, CLI export, and pipelines. Use workflow_retry with an explicit failed run ID; parentRunId only reuses named worktrees. Runs are in the background by default; completion arrives as a follow-up message. Set foreground: true when the caller must wait for the final value. Foreground results include the completed run ID. Recovery map: agent(..., { retries }) reruns one agent call in the same run for transient failures; workflow_retry({ runId }) replays a failed run into a child; workflow_resume({ runId, budget? }) continues a budget_exhausted run; parentRunId on a new launch only borrows named worktrees and never replays or resumes.";
+export const WORKFLOW_TOOL_PROMPT_SNIPPET = "Run a deterministic, resumable JavaScript workflow. Prefer a named inline script that fans out independent work with parallel(...), awaits the keyed results before interpolating them into one summarizing agent(...), and returns. Inline launches require an explicit non-empty name; registered function launches reject name and use workflow as the run name. Advanced controls include registered functions, outputSchema, budgets, checkpoints, worktrees, retry/resume, CLI export, and pipelines. Use workflow_retry with an explicit failed run ID; parentRunId only reuses named worktrees. Runs are in the background by default; completion arrives as a follow-up message. Set foreground: true when the caller must wait for the final value. If a foreground call detaches before its result is accepted, its terminal success or failure is promoted to one follow-up message. Foreground results include the completed run ID. Recovery map: agent(..., { retries }) reruns one agent call in the same run for transient failures; workflow_retry({ runId }) replays a failed run into a child; workflow_resume({ runId, budget? }) continues a budget_exhausted run; parentRunId on a new launch only borrows named worktrees and never replays or resumes."
 function workflowRecoveryGuidance(action: "resume" | "retry", state: RunState): string {
   if (action === "resume") {
     if (state === "failed") return "Failed workflow runs must use workflow_retry({ runId })";
@@ -1571,13 +1571,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     });
   };
   const pendingFailureDiagnostics = new Map<string, WorkflowFailureDiagnostics>();
-  pi.on("tool_result", (event) => {
-    if (event.toolName !== "workflow" || !event.isError) return;
-    const diagnostic = pendingFailureDiagnostics.get(event.toolCallId);
-    if (!diagnostic) return;
-    pendingFailureDiagnostics.delete(event.toolCallId);
-    return { content: [{ type: "text" as const, text: serializeWorkflowFailureDiagnostics(diagnostic) }], details: diagnostic, isError: true };
-  });
+  const foregroundDeliveries = new Map<string, { store: RunStore; inline: boolean; timer?: ReturnType<typeof setTimeout> }>();
   const liveActivities = new Map<string, Map<string, AgentActivity>>();
   const liveEventTimes = new Map<string, Map<string, number>>();
   const setLiveActivity = (runId: string, agentId: string, activity?: AgentActivity) => {
@@ -1626,6 +1620,42 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const persisted = await store.updateState(update);
     await eventPublisher.budget(store, metadata, persisted);
     return persisted;
+  };
+  pi.on("tool_result", async (event) => {
+    const delivery = event.toolName === "workflow" ? foregroundDeliveries.get(event.toolCallId) : undefined;
+    if (delivery) {
+      if (delivery.timer) clearTimeout(delivery.timer);
+      delivery.inline = true;
+      await delivery.store.updateState((current) => {
+        if (current.delivery?.toolCallId !== event.toolCallId || current.delivery.state === "delivered") return current;
+        return { ...current, delivery: { ...current.delivery, state: "delivered" } };
+      });
+      foregroundDeliveries.delete(event.toolCallId);
+    }
+    if (event.toolName !== "workflow" || !event.isError) return;
+    const diagnostic = pendingFailureDiagnostics.get(event.toolCallId);
+    if (!diagnostic) return;
+    pendingFailureDiagnostics.delete(event.toolCallId);
+    return { content: [{ type: "text" as const, text: serializeWorkflowFailureDiagnostics(diagnostic) }], details: diagnostic, isError: true };
+  });
+  const deliverTerminal = async (store: RunStore, content: string): Promise<void> => {
+    let claimed: boolean | undefined;
+    await store.updateState((current) => {
+      if (current.delivery?.state === "delivered") return current;
+      if (!current.delivery) { claimed = true; return current; }
+      claimed = true;
+      return { ...current, delivery: { ...current.delivery, mode: "background", state: "delivered" } };
+    });
+    if (claimed === true) deliver(pi, content);
+  };
+  const scheduleForegroundDelivery = (toolCallId: string, send: () => Promise<void>): void => {
+    const delivery = foregroundDeliveries.get(toolCallId);
+    if (!delivery || delivery.inline || typeof (pi as unknown as { sendMessage?: unknown }).sendMessage !== "function") return;
+    //NOTE: Give Pi one event-loop turn to deliver an uninterrupted tool result before promoting.
+    delivery.timer = setTimeout(() => {
+      delete delivery.timer;
+      void send().finally(() => foregroundDeliveries.delete(toolCallId));
+    }, 0);
   };
   const phaseBridge = (store: RunStore, metadata: WorkflowMetadata, lifecycle: RunLifecycle) => {
     let cursor = 0;
@@ -2362,7 +2392,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       } : undefined;
       const budgetRuntime = new WorkflowBudgetRuntime(budget);
       const initialBudget = budgetRuntime.snapshot();
-      await store.create({ id: runId, workflowName: checked.metadata.name, cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId(), state: "running", ...(parentRunId !== undefined ? { parentRunId } : {}), agents: [], nativeSessions: [], ...(budget ? { budget } : {}), budgetVersion: 1, ...initialBudget }, snapshot);
+      await store.create({ id: runId, workflowName: checked.metadata.name, cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId(), state: "running", ...(parentRunId !== undefined ? { parentRunId } : {}), agents: [], nativeSessions: [], delivery: params.foreground ? { mode: "foreground", state: "attached", toolCallId } : { mode: "background", state: "pending" }, ...(budget ? { budget } : {}), budgetVersion: 1, ...initialBudget }, snapshot);
+      if (params.foreground) foregroundDeliveries.set(toolCallId, { store, inline: false });
       const lifecycle = lifecycleFor(store, "running", budgetRuntime, checked.metadata);
       const background = !params.foreground;
       const providerPause = async () => { if (background) deliver(pi, `Workflow ${checked.metadata.name} paused: provider limit.`); await lifecycle.providerPause(); };
@@ -2395,16 +2426,37 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       });
       const completion = finish.finally(() => cleanupTerminalRun(runId));
       (runs.get(runId) as NonNullable<ReturnType<typeof runs.get>>).completion = completion;
+      const deliverFailureContent = (error: unknown): string => {
+        const diagnostic = failureDiagnosticsFrom(error);
+        return diagnostic ? formatWorkflowFailureDelivery(diagnostic) : formatWorkflowFailureDeliveryFallback(checked.metadata.name, runId, store.directory, error);
+      };
+      const queueForegroundDelivery = async (content: string): Promise<void> => {
+        const delivery = foregroundDeliveries.get(toolCallId);
+        if (!delivery) return;
+        await store.updateState((current) => {
+          if (!current.delivery || current.delivery.state === "delivered") return current;
+          return { ...current, delivery: { ...current.delivery, mode: "background", state: "pending" } };
+        });
+        if (delivery.inline) return;
+        scheduleForegroundDelivery(toolCallId, async () => {
+          if (delivery.inline) return;
+          pendingFailureDiagnostics.delete(toolCallId);
+          await deliverTerminal(store, content);
+        });
+      };
       if (background) {
         void completion.then(async ({ value, resultPath }) => {
-          deliver(pi, completionDelivery(checked.metadata.name, value, resultPath, await store.changedWorktrees()));
-        }, (error: unknown) => {
-          const diagnostic = failureDiagnosticsFrom(error);
-          if (diagnostic) deliverFailure(pi, diagnostic);
-          else deliver(pi, formatWorkflowFailureDeliveryFallback(checked.metadata.name, runId, store.directory, error));
+          await deliverTerminal(store, completionDelivery(checked.metadata.name, value, resultPath, await store.changedWorktrees()));
+        }, async (error: unknown) => {
+          await deliverTerminal(store, deliverFailureContent(error));
         });
         return { content: [{ type: "text" as const, text: JSON.stringify({ runId, state: "running" }) }], details: { runId, preview: `Started workflow ${runId}.` } };
       }
+      void completion.then(async ({ value, resultPath }) => {
+        await queueForegroundDelivery(completionDelivery(checked.metadata.name, value, resultPath, await store.changedWorktrees()));
+      }, async (error: unknown) => {
+        await queueForegroundDelivery(deliverFailureContent(error));
+      });
       const { value } = await completion;
       const run = (await store.load()).run;
       return { content: [{ type: "text" as const, text: JSON.stringify(value) }, { type: "text" as const, text: `Workflow run ID: ${runId}` }], details: { runId, value, run } };
