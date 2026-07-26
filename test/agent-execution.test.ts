@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { Type } from "@earendil-works/pi-ai";
 import { createLocalPiSession, FairAgentScheduler, localAgentTransport, WorkflowAgentExecutor, type AgentExecutionRoot, type AgentProgress, type SessionInput } from "../src/agent-execution.js";
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { AgentSession, type AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { WorkflowError } from "../src/index.js";
 import type { AgentResourcePolicy } from "../src/types.js";
 import type { RunStore } from "../src/persistence.js";
@@ -42,6 +42,27 @@ void test("uses a transport-neutral session and persists its final reference sha
   assert.equal(attempt.session?.transport, "test");
   assert.equal(attempt.session.sessionId, "external-1");
   assert.deepEqual(events, ["prompt", "dispose"]);
+});
+void test("setup hooks can wrap the selected transport session", async () => {
+  const events: string[] = [];
+  const base = testTransport(async () => ({ sessionId: "wrapped-base", messages: [assistant("wrapped result")], getSessionStats: sessionStats, async prompt() { events.push("base-prompt"); }, dispose() { events.push("base-dispose"); } }));
+  const wrapped: import("../src/types.js").AgentTransport = {
+    id: "wrapped",
+    async createSession(prepared, context) {
+      const session = await base.createSession(prepared, context);
+      return {
+        ...session,
+        reference: { ...session.reference, transport: "wrapped" },
+        async prompt(text) { events.push(`wrapper-prompt:${text}`); const result = await session.prompt(text); events.push("wrapper-result"); return result; },
+        async dispose() { events.push("wrapper-dispose"); await session.dispose(); },
+      };
+    },
+  };
+  const result = await new WorkflowAgentExecutor({ ...root, agentSetupHooks: [{ name: "wrap", priority: 1, setup(agent) { agent.transport = wrapped; } }] }, localAgentTransport).execute("work", { label: "worker", workflowName: "flow" });
+  assert.equal(result.value, "wrapped result");
+  assert.equal(result.attempts[0]?.session?.transport, "wrapped");
+  assert.match(events[0] ?? "", /^wrapper-prompt:Workflow: flow\nAgent: worker/);
+  assert.deepEqual(events.slice(1), ["base-prompt", "wrapper-result", "wrapper-dispose", "base-dispose"]);
 });
 void test("reruns setup hooks and reselects the transport for ordinary retries", async () => {
   const selected: string[] = [];
@@ -587,7 +608,48 @@ void test("production native Pi session installs nested scheduler tools", async 
   assert.ok(session.agent?.state.tools.some(({ name }) => name === "agent"));
   session.dispose();
 });
-
+void test("local transport waits for an in-flight prompt and abort before disposing", async () => {
+  const originalAbort = Object.getOwnPropertyDescriptor(AgentSession.prototype, "abort");
+  const originalPrompt = Object.getOwnPropertyDescriptor(AgentSession.prototype, "prompt");
+  const originalDispose = Object.getOwnPropertyDescriptor(AgentSession.prototype, "dispose");
+  assert.ok(originalAbort && originalPrompt && originalDispose);
+  const events: string[] = [];
+  let releaseAbort!: () => void;
+  let releasePrompt!: () => void;
+  let markAbortStarted!: () => void;
+  let markPromptStarted!: () => void;
+  const abortGate = new Promise<void>((resolve) => { releaseAbort = resolve; });
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
+  const abortStarted = new Promise<void>((resolve) => { markAbortStarted = resolve; });
+  const promptStarted = new Promise<void>((resolve) => { markPromptStarted = resolve; });
+  AgentSession.prototype.abort = async function () { events.push("abort-start"); markAbortStarted(); await abortGate; events.push("abort-end"); };
+  AgentSession.prototype.prompt = async function () { events.push("prompt-start"); markPromptStarted(); await promptGate; events.push("prompt-end"); };
+  AgentSession.prototype.dispose = function (this: AgentSession) { events.push("dispose"); Reflect.apply(originalDispose.value as (this: AgentSession) => void, this, []); };
+  try {
+    const prepared = { cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], sessionLabel: "async-dispose-contract" } satisfies import("../src/types.js").PreparedAgentSession;
+    const session = await localAgentTransport.createSession(prepared, {} as never);
+    const prompt = session.prompt("work");
+    await promptStarted;
+    const abort = session.abort();
+    await abortStarted;
+    const firstDispose = session.dispose();
+    const secondDispose = session.dispose();
+    await Promise.resolve();
+    assert.deepEqual(events, ["prompt-start", "abort-start"]);
+    releaseAbort();
+    await Promise.resolve();
+    assert.deepEqual(events, ["prompt-start", "abort-start", "abort-end"]);
+    releasePrompt();
+    await Promise.all([prompt, abort, firstDispose, secondDispose]);
+    assert.deepEqual(events, ["prompt-start", "abort-start", "abort-end", "prompt-end", "dispose"]);
+    await session.abort();
+    assert.deepEqual(events, ["prompt-start", "abort-start", "abort-end", "prompt-end", "dispose"]);
+  } finally {
+    Object.defineProperty(AgentSession.prototype, "abort", originalAbort);
+    Object.defineProperty(AgentSession.prototype, "prompt", originalPrompt);
+    Object.defineProperty(AgentSession.prototype, "dispose", originalDispose);
+  }
+});
 void test("executor registers the production native steering handler", async () => {
   const steered: string[] = [];
   let registered: ((message: string) => void | Promise<void>) | undefined;

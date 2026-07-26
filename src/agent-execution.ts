@@ -223,7 +223,10 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
   };
   const native = await createLocalPiSession(input);
   let disposal: Promise<void> | undefined;
-  let aborted = false;
+  let aborting: Promise<void> | undefined;
+  let prompting: Promise<WorkflowAgentTurnResult> | undefined;
+  let disposed = false;
+  const startAbort = () => aborting ??= Promise.resolve().then(() => native.abort?.()).then(() => undefined);
   const reference: WorkflowAgentSessionReference = { transport: "local", sessionId: native.sessionId, ...(native.sessionFile ? { locator: { sessionFile: native.sessionFile } } : {}) };
   const session = {
     reference,
@@ -231,10 +234,21 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
     getSessionStats: () => workflowAgentStats(native.getSessionStats()),
     subscribe(listener: (event: WorkflowAgentSessionEvent) => void) { listener({ type: "state_changed", state: workflowAgentState(native, prepared) }); return native.subscribe?.((event) => { listener(localSessionEvent(event)); }) ?? (() => undefined); },
     getLastAssistant: () => workflowAgentMessage([...native.messages].reverse().find((message) => message.role === "assistant")),
-    async prompt(text: string) { await native.prompt(text); const assistant = workflowAgentMessage([...native.messages].reverse().find((message) => message.role === "assistant")); return assistant ? { assistant } : {}; },
+    async prompt(text: string) {
+      if (disposed) throw new WorkflowError("INTERNAL_ERROR", "Local workflow session is disposed");
+      const prompt = Promise.resolve().then(async () => { await native.prompt(text); const assistant = workflowAgentMessage([...native.messages].reverse().find((message) => message.role === "assistant")); return assistant ? { assistant } : {}; });
+      prompting = prompt;
+      try { return await prompt; } finally { if (prompting === prompt) prompting = undefined; }
+    },
     async steer(text: string) { if (!native.steer) throw new WorkflowError("INTERNAL_ERROR", "Local workflow session does not support steering"); await native.steer(text); },
-    async abort() { if (aborted) return; aborted = true; await native.abort?.(); },
-    async dispose() { disposal ??= (async () => { try { await (aborted ? undefined : native.abort?.()); aborted = true; } finally { native.dispose(); } })(); await disposal; },
+    async abort() { await startAbort(); },
+    async dispose() {
+      disposal ??= (async () => {
+        disposed = true;
+        try { await startAbort(); await prompting; } finally { native.dispose(); }
+      })();
+      await disposal;
+    },
   };
   return session;
 }
