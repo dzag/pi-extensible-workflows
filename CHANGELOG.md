@@ -1,9 +1,24 @@
 # Changelog
 ## Unreleased
 
+## [3.4.0] - 2026-07-26
+
+### New capabilities
+
+- Added support for launching reviewed workflow JavaScript files with `scriptPath`; file contents are captured at launch for retry and resume ([#145](https://github.com/vekexasia/pi-extensible-workflows/issues/145)).
+- Workflow progress now displays runtime and keeps runtime accounting accurate across pauses and resumes ([#150](https://github.com/vekexasia/pi-extensible-workflows/issues/150)).
+- Added a `/workflow` action to open agent prompts in the configured external editor while agents are running or settled ([#151](https://github.com/vekexasia/pi-extensible-workflows/issues/151)).
+- Registered function launches may use `name` as an optional run label; `workflow` remains the function identity for resume and replay.
+
+### Recovery, reliability, and navigation
+
 - Inline foreground workflow progress now refreshes persisted agent state so stalled-agent warnings remain visible ([#149](https://github.com/vekexasia/pi-extensible-workflows/issues/149)).
 - `/workflow` agent actions can now be closed with `h` or the left arrow ([#152](https://github.com/vekexasia/pi-extensible-workflows/issues/152)).
-- Registered function launches may use `name` as an optional run label; `workflow` remains the function identity for resume and replay.
+
+### Verification
+
+- Package check passed: 427 tests, 426 passed, 1 skipped; lint, documentation checks, and package dry-run passed.
+
 ## [3.3.0] - 2026-07-26
 
 ### New capabilities
@@ -101,7 +116,7 @@
 - Runtime acceptance suite: 24 tests passing.
 - Build, lint, documentation checks, and package dry-run passing.
 
-[3.3.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.2.0...v3.3.0
+[3.4.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.3.0...v3.4.0
 [3.2.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v2.0.0...v3.0.0
