@@ -560,7 +560,9 @@ export class WorkflowAgentExecutor {
         await flushSystemPrompts();
         unsubscribe();
         const attemptAccounting = accounting(session.getSessionStats());
-        attempts.push(attemptRecord(setup.transport.id, attempt, session, setupSummary, attemptAccounting, value));
+        const completedAttempt = attemptRecord(setup.transport.id, attempt, session, setupSummary, attemptAccounting, value);
+        attempts.push(completedAttempt);
+        await options.onAttempt?.(completedAttempt);
         await session.dispose();
         return { value, attempts, cwd: setupSummary.cwd };
       } catch (error) {
@@ -577,7 +579,9 @@ export class WorkflowAgentExecutor {
           unsubscribe?.();
           const attemptAccounting = accounting(session.getSessionStats());
           if (!budgetError && typed.code !== "BUDGET_EXHAUSTED") { try { options.budget?.afterTurn(attemptAccounting, true); } catch (budgetFailure) { budgetError ??= budgetFailure instanceof WorkflowError ? budgetFailure : new WorkflowError("BUDGET_EXHAUSTED", budgetFailure instanceof Error ? budgetFailure.message : String(budgetFailure)); } }
-          attempts.push(attemptRecord(setup?.transport.id ?? this.transport.id, attempt, session, setupSummary, attemptAccounting, undefined, { code: typed.code, message: typed.message }));
+          const failedAttempt = attemptRecord(setup?.transport.id ?? this.transport.id, attempt, session, setupSummary, attemptAccounting, undefined, { code: typed.code, message: typed.message });
+          attempts.push(failedAttempt);
+          await options.onAttempt?.(failedAttempt);
           await session.dispose();
         }
         if (options.worktreeOwner && typed.code !== "WORKTREE_FAILED") await this.root.runStore?.snapshotWorktree(options.worktreeOwner).catch(() => undefined);

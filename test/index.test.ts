@@ -2114,6 +2114,7 @@ void test("navigator omits transcript actions outside and inside Herdr", async (
       workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
       const dashboardActions: string[][] = [];
       const agentActions: string[][] = [];
+      const workflowPickers: string[][] = [];
       let workflowSelection = 0;
       const ctx = {
         cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "session" },
@@ -2122,6 +2123,7 @@ void test("navigator omits transcript actions outside and inside Herdr", async (
           confirm: async () => false,
           select: async (prompt: string, options: string[]) => {
             if (prompt === "Workflows\n") {
+              workflowPickers.push(options);
               workflowSelection += 1;
               if (workflowSelection > 2) return "Close";
               const target = workflowSelection === 1 ? "agent-run" : "no-agent-run";
@@ -2140,6 +2142,8 @@ void test("navigator omits transcript actions outside and inside Herdr", async (
       await command("", ctx as never);
       await command("", ctx as never);
       const renderedActions = dashboardActions.flat().join("\n");
+      const runPicker = workflowPickers[0] ?? [];
+      assert.equal(runPicker.includes("Inspect session in pane"), inHerdr);
       assert.doesNotMatch(renderedActions, /View transcript|Transcript paths|Copy transcript path|Open transcript in pane/);
       assert.equal(agentActions.length, 1);
       const selectedAgentActions = agentActions[0];

@@ -8,6 +8,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
 import { copyToClipboard, getAgentDir, SettingsManager, truncateToVisualLines, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
 import { FairAgentScheduler, WorkflowAgentExecutor, localAgentTransport, type AgentActivity, type AgentAttempt, type AgentDefinition, type AgentProgress, type AgentProviderFailure, type AgentProviderRecovery } from "./agent-execution.js";
+import { herdrPaneId, openHerdrPane } from "./herdr.js";
 import { acquireSessionLease, listRunIds, RunStore, SessionLease, structuralPath as operationPath } from "./persistence.js";
 import type { AwaitingCheckpoint, PersistedRun, WorktreeReference } from "./persistence.js";
 import { budgetRelaxed, budgetUsage, mergeBudget, resumeBudgetAllowed, validateBudget, validateBudgetPatch, WorkflowBudgetRuntime } from "./budget.js";
@@ -2696,9 +2697,18 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           const terminalStates = HARD_TERMINAL_RUN_STATES;
           const hasCompleted = sorted.some(({ loaded: { run } }) => run.state === "completed");
           const hasFailed = sorted.some(({ loaded: { run } }) => run.state === "failed");
-          const pickerOptions = [...labels, "Model aliases", "Close", ...(hasCompleted ? ["Delete all completed"] : []), ...(hasFailed ? ["Delete all failed"] : [])];
+          const pickerOptions = [...labels, ...(herdrPaneId() ? ["Inspect session in pane"] : []), "Model aliases", "Close", ...(hasCompleted ? ["Delete all completed"] : []), ...(hasFailed ? ["Delete all failed"] : [])];
           const runChoice = await ctx.ui.select("Workflows\n", pickerOptions);
           if (!runChoice || runChoice === "Close") return;
+          if (runChoice === "Inspect session in pane") {
+            try {
+              await openHerdrPane({ action: "inspect", cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId() });
+              ctx.ui.notify("Opened session inspector in pane.", "info");
+            } catch (error) {
+              ctx.ui.notify(`Cannot open session inspector in pane: ${error instanceof Error ? error.message : String(error)}`, "warning");
+            }
+            continue;
+          }
           if (runChoice === "Model aliases") { await manageAliases(); stores = await loadStores(); continue; }
           if (runChoice === "Delete all completed") {
             if (!await ctx.ui.confirm("Delete completed runs?", "Delete all completed workflow runs and their artifacts? This cannot be undone.")) continue;

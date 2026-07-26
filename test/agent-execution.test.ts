@@ -43,6 +43,13 @@ void test("uses a transport-neutral session and persists its final reference sha
   assert.equal(attempt.session.sessionId, "external-1");
   assert.deepEqual(events, ["prompt", "dispose"]);
 });
+void test("reports terminal attempts without a live session before disposal", async () => {
+  const events: string[] = [];
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ sessionId: "terminal-attempt", messages: [assistant("done")], getSessionStats: sessionStats, async prompt() {}, dispose() { events.push("dispose"); } })));
+  const result = await executor.execute("work", { label: "worker", workflowName: "flow", onAttempt: (attempt) => { events.push(`${attempt.liveSession ? "live" : "not-live"}:${attempt.result === undefined ? "active" : "result"}`); } });
+  assert.equal(result.value, "done");
+  assert.deepEqual(events, ["not-live:active", "live:active", "not-live:result", "dispose"]);
+});
 void test("setup hooks can wrap the selected transport session", async () => {
   const events: string[] = [];
   const base = testTransport(async () => ({ sessionId: "wrapped-base", messages: [assistant("wrapped result")], getSessionStats: sessionStats, async prompt() { events.push("base-prompt"); }, dispose() { events.push("base-dispose"); } }));
