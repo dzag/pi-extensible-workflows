@@ -1614,6 +1614,13 @@ void test("TUI navigator exposes agent-scoped worktree actions without transcrip
           assert.match(withActions, /Agent actions/);
           assert.match(withActions, /Copy branch/);
           assert.match(withActions, /issue-65/, "tree must stay visible beside the actions");
+          component.handleInput?.("h");
+          assert.doesNotMatch(component.render(80).join("\n"), /Agent actions/);
+          component.handleInput?.("tui.select.confirm");
+          assert.match(component.render(80).join("\n"), /Agent actions/);
+          component.handleInput?.("tui.editor.cursorLeft");
+          assert.doesNotMatch(component.render(80).join("\n"), /Agent actions/);
+          component.handleInput?.("tui.select.confirm");
           const selectedActionRow = (): string => component.render(80).join("\n").split("\n").find((line) => line.includes("| →")) ?? "";
           const firstActionRow = selectedActionRow();
           component.handleInput?.("j");
