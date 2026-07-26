@@ -492,6 +492,8 @@ export function formatWorkflowProgress(run: PersistedRun, spinner = "◇", style
   const lines = [`${iconStyle(workflowIcon)} ${header}`];
   const budgetWarning = run.state === "budget_exhausted" || (run.budgetEvents ?? []).some((event) => event.type === "hard_exhausted");
   lines.push(...formatCompactBudgetStatus(run).map((line) => `  ${budgetWarning ? styles.warning(line) : line}`));
+  const activeShells = run.activeShells ?? 0;
+  if (activeShells > 0) lines.push(`  ${styles.accent(spinner)} shell ${styles.accent("[running]")} ${styles.dim(`(${String(activeShells)} active)`)}`);
   const byId = new Map(run.agents.map((agent) => [agent.id, agent]));
   const renderAgents = (agents: readonly AgentRecord[], offset: number, nested: boolean) => renderGroupedAgents(agents, ({ agent, index, depth }, grouped) => {
     const icon = agentStateGlyph(agent.state, spinner);
@@ -1665,10 +1667,23 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const path = shellIdentityPath(identity);
       const replayed = await store.replay(path);
       if (replayed) return readShellResult(replayed.value);
-      const cwd = identity.worktreeOwner ? (await persistWorktree(store, metadata, identity.worktreeOwner)).cwd : store.cwd;
-      const result = await executeShellCommand(command, options, signal, cwd);
-      await store.complete(path, result as unknown as JsonValue);
-      return result;
+      const started = await persistRunState(store, metadata, (current) => ({ ...current, activeShells: (current.activeShells ?? 0) + 1 }));
+      runs.get(store.runId)?.update?.(workflowToolUpdate(withLiveActivities(started)));
+      try {
+        const cwd = identity.worktreeOwner ? (await persistWorktree(store, metadata, identity.worktreeOwner)).cwd : store.cwd;
+        const result = await executeShellCommand(command, options, signal, cwd);
+        await store.complete(path, result as unknown as JsonValue);
+        return result;
+      } finally {
+        const stopped = await persistRunState(store, metadata, (current) => {
+          const activeShells = Math.max(0, (current.activeShells ?? 0) - 1);
+          if (activeShells > 0) return { ...current, activeShells };
+          const next = { ...current };
+          delete next.activeShells;
+          return next;
+        });
+        runs.get(store.runId)?.update?.(workflowToolUpdate(withLiveActivities(stopped)));
+      }
     } finally { await lifecycle.leave(); }
   };
   const lifecycleFor = (store: RunStore, state: RunState, budget: WorkflowBudgetRuntime, metadata: WorkflowMetadata) => new RunLifecycle(state, async (next, previous, reason) => {
@@ -2003,6 +2018,13 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
   };
   const coldResumeRun = async (run: NonNullable<ReturnType<typeof runs.get>>, hasUI: boolean, ui: { select?: (prompt: string, options: string[]) => Promise<string | undefined> }, trustedProject: boolean, context?: { model: { provider: string; id: string } | undefined; modelRegistry: ModelRegistryCapability | undefined; signal?: AbortSignal | undefined; resolvedAliases?: Readonly<Record<string, string>>; blockedAliases?: ReadonlySet<string>; blockedAliasTargets?: Readonly<Record<string, string>> }) => {
     const loaded = await run.store.load();
+    if (loaded.run.activeShells !== undefined) {
+      await persistRunState(run.store, run.metadata, (current) => {
+        const next = { ...current };
+        delete next.activeShells;
+        return next;
+      });
+    }
     await run.store.validateRetrySource();
     await run.store.validateBorrowedWorktrees();
     if (loaded.snapshot.identityVersion !== LAUNCH_SNAPSHOT_IDENTITY_VERSION) throw new WorkflowError("RESUME_INCOMPATIBLE", "Workflow launch snapshot identity version is incompatible");
@@ -2225,9 +2247,22 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       if (loaded.run.state === "completed" || loaded.run.state === "failed" || loaded.run.state === "stopped") { terminalRunStates.set(runId, loaded.run.state); continue; }
       if (loaded.run.state !== "interrupted" && loaded.run.state !== "budget_exhausted") {
         const previousState = loaded.run.state;
-        await store.updateState((current) => ["completed", "failed", "stopped", "interrupted", "budget_exhausted"].includes(current.state) ? current : { ...current, state: "interrupted" });
+        await store.updateState((current) => {
+          if (["completed", "failed", "stopped", "interrupted", "budget_exhausted"].includes(current.state)) return current;
+          const next = { ...current, state: "interrupted" as const };
+          delete next.activeShells;
+          return next;
+        });
         loaded = { ...loaded, run: (await store.load()).run };
         await eventPublisher.runState(store, loaded.snapshot.metadata, previousState, "interrupted", "session_shutdown");
+        loaded = { ...loaded, run: (await store.load()).run };
+      } else if (loaded.run.activeShells !== undefined) {
+        await store.updateState((current) => {
+          if (["completed", "failed", "stopped"].includes(current.state)) return current;
+          const next = { ...current };
+          delete next.activeShells;
+          return next;
+        });
         loaded = { ...loaded, run: (await store.load()).run };
       }
       const model = modelSpec(loaded.snapshot.models[0] ?? "", { provider: ctx.model?.provider ?? "", model: ctx.model?.id ?? "", thinking: pi.getThinkingLevel() });

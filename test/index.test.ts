@@ -1172,6 +1172,15 @@ void test("workflow progress warns after ten minutes of agent silence and resets
   const snapshot = createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "stalling" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
   assert.match(formatWorkflowPhaseDashboard(stalled, snapshot, 120, {}, undefined, now).join("\n"), /stalled\? 12m/);
 });
+void test("workflow progress shows active shell operations without command contents", () => {
+  const run = { id: "run", workflowName: "shell-progress", cwd: "/repo", sessionId: "session", state: "running" as const, agents: [], nativeSessions: [], activeShells: 2 } as Parameters<typeof formatWorkflowProgress>[0];
+  const progress = formatWorkflowProgress(run);
+  assert.match(progress, /shell \[running\] \(2 active\)/);
+  assert.doesNotMatch(progress, /command-secret/);
+  const legacy = { ...run };
+  delete legacy.activeShells;
+  assert.doesNotMatch(formatWorkflowProgress(legacy), /shell \[running\]/);
+});
 void test("navigator keeps agent rows compact while preserving identity and state", () => {
   const run = { id: "run", workflowName: "policy", cwd: "/repo", sessionId: "session", state: "running", agents: [{ id: "run:1", name: "review", path: "run:1", state: "running", role: "reviewer", model: { provider: "anthropic", model: "opus", thinking: "high" }, tools: ["read", "grep"], attempts: 1 }], nativeSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
   const dashboard = formatNavigatorDashboard(run, [], []);
@@ -1227,6 +1236,35 @@ void test("streams foreground workflow progress into its tool card", async () =>
   assert.ok(updates.some(({ details }) => details.run.phase === "work"));
   assert.equal(updates.at(-1)?.details.run.state, "completed");
   assert.match(formatWorkflowProgress(result.details.run), /✓ Workflow: progress/);
+});
+void test("foreground workflow progress reports a shell waiting after agents settle", { timeout: 10000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-shell-progress-"));
+  const startedPath = join(home, "shell-started");
+  const releasePath = join(home, "shell-release");
+  const command = `${process.execPath} -e ${JSON.stringify(`const fs=require("node:fs");fs.writeFileSync(${JSON.stringify(startedPath)},"started");const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(releasePath)})){clearInterval(timer);process.exit(0);}},1);`)}`;
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  const createSession = async (): Promise<NativeSession> => ({ sessionId: "shell-progress-agent", sessionFile: "/sessions/shell-progress-agent.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} });
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
+  const workflow = tools.find(({ name }) => name === "workflow");
+  assert.ok(workflow);
+  const updates: PersistedRun[] = [];
+  let reportActive!: () => void;
+  const active = new Promise<void>((resolve) => { reportActive = resolve; });
+  const running = workflow.execute("id", { name: "shell-progress", script: `await agent("finish", {label:"worker"}); await shell(${JSON.stringify(command)}); return true;`, foreground: true }, new AbortController().signal, (update: { details: { run: PersistedRun } }) => {
+    const run = update.details.run;
+    updates.push(run);
+    if (run.activeShells === 1) reportActive();
+  }, { cwd: home, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } });
+  await active;
+  await waitForIssue105(() => existsSync(startedPath));
+  const live = updates.find(({ activeShells }) => activeShells === 1);
+  assert.ok(live);
+  assert.equal(live.agents.every((agent) => agent.state === "completed"), true);
+  assert.match(formatWorkflowProgress(live), /shell \[running\] \(1 active\)/);
+  writeFileSync(releasePath, "release");
+  const result = await running as { details: { run: PersistedRun } };
+  assert.equal(result.details.run.activeShells, undefined);
+  assert.equal(updates.some(({ activeShells }) => activeShells === undefined), true);
 });
 
 void test("foreground workflow reports parallel agent activities together", { timeout: 5000 }, async () => {
