@@ -1273,13 +1273,10 @@ void test("inline workflow progress refreshes persisted state for stalled agents
   assert.ok(tool?.renderResult);
   const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
   const result = { content: [], details: { run: visibleRun } };
-  let redraw!: () => void;
-  const redrawn = new Promise<void>((resolve) => { redraw = resolve; });
-  const context = { state: {}, cwd: home, invalidate: redraw };
-  const initial = tool.renderResult(result, { expanded: false, isPartial: true }, theme, context);
-  assert.doesNotMatch(initial.render(200).join("\n"), /stalled\?/);
-  initial.invalidate?.();
-  await Promise.race([redrawn, new Promise<void>((resolve) => setTimeout(resolve, 200))]);
+  const context = { state: {}, cwd: home, invalidate: () => { current.invalidate?.(); } };
+  const current = tool.renderResult(result, { expanded: false, isPartial: true }, theme, context);
+  assert.doesNotMatch(current.render(200).join("\n"), /stalled\?/);
+  await new Promise<void>((resolve) => setTimeout(resolve, 200));
   const refreshed = tool.renderResult(result, { expanded: false, isPartial: true }, theme, context);
   assert.match(refreshed.render(200).join("\n"), /stalled\? 10m/);
   tool.renderResult({ content: [], details: { run: { ...visibleRun, state: "completed" as const, agents: [] } } }, { expanded: false, isPartial: false }, theme, context);
