@@ -227,7 +227,7 @@ void test("workflow_retry links children, replays parallel branches, inherits bu
   const source = await sourceStore.load();
   assert.equal(source.run.state, "failed");
   const sourceUsage = source.run.usage;
-  const firstResult = await retry.execute("retry", { runId: sourceId }, undefined, undefined, context) as { content: Array<{ text: string }> };
+  const firstResult = await retry.execute("retry", { runId: sourceId, foreground: false }, undefined, undefined, context) as { content: Array<{ text: string }> };
   const firstStarted = JSON.parse(firstResult.content[0]?.text ?? "null") as { runId: string; parentRunId: string; state: string };
   assert.equal(firstStarted.parentRunId, sourceId);
   assert.equal(firstStarted.state, "running");
@@ -246,7 +246,7 @@ void test("workflow_retry links children, replays parallel branches, inherits bu
   assert.equal(first.retry.sourceRunId, sourceId);
   assert.equal(first.retry.lineageRootRunId, sourceId);
   assert.deepEqual(first.retry.completedPaths.length, 1);
-  const secondResult = await retry.execute("retry-again", { runId: firstStarted.runId }, undefined, undefined, context) as { content: Array<{ text: string }> };
+  const secondResult = await retry.execute("retry-again", { runId: firstStarted.runId, foreground: false }, undefined, undefined, context) as { content: Array<{ text: string }> };
   const secondStarted = JSON.parse(secondResult.content[0]?.text ?? "null") as { runId: string; parentRunId: string; state: string };
   assert.equal(secondStarted.parentRunId, firstStarted.runId);
   assert.equal(secondStarted.state, "running");
@@ -290,7 +290,7 @@ void test("failed retry children retain inherited and newly created named worktr
   const retry = tools.find(({ name }) => name === "workflow_retry");
   assert.ok(retry);
   const context = { cwd, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
-  const started = await retry.execute("retry-named-union", { runId: "source" }, undefined, undefined, context) as { content: Array<{ text: string }> };
+  const started = await retry.execute("retry-named-union", { runId: "source", foreground: false }, undefined, undefined, context) as { content: Array<{ text: string }> };
   const childId = (JSON.parse(started.content[0]?.text ?? "null") as { runId: string }).runId;
   let child: PersistedRun | undefined;
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -321,10 +321,10 @@ void test("workflow_retry rejects concurrent children for one mutable retry line
   await assert.rejects(workflow.execute("source", { name: "concurrent-source", script: `return agent("work");`, foreground: true }, new AbortController().signal, undefined, context), WorkflowError);
   const sourceId = (await listRunIds(home, "session", home))[0];
   assert.ok(sourceId);
-  const started = await retry.execute("retry", { runId: sourceId }, undefined, undefined, context) as { content: Array<{ text: string }> };
+  const started = await retry.execute("retry", { runId: sourceId, foreground: false }, undefined, undefined, context) as { content: Array<{ text: string }> };
   const childId = (JSON.parse(started.content[0]?.text ?? "null") as { runId: string }).runId;
   await childEntered;
-  await assert.rejects(retry.execute("retry-again", { runId: sourceId }, undefined, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE");
+  await assert.rejects(retry.execute("retry-again", { runId: sourceId, foreground: false }, undefined, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE");
   release();
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const child = (await new RunStore(home, "session", childId, home).load()).run;
@@ -350,10 +350,10 @@ void test("workflow_retry cleans up child startup when dynamic alias resolution 
   await assert.rejects(workflow.execute("source", { name: "retry-alias-source", script: `return agent("work", { model: "retry-model" });`, foreground: true }, new AbortController().signal, undefined, context), WorkflowError);
   const sourceId = (await listRunIds(home, "session", home))[0];
   assert.ok(sourceId);
-  await assert.rejects(retry.execute("retry-fails", { runId: sourceId }, undefined, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "CONFIG_ERROR");
+  await assert.rejects(retry.execute("retry-fails", { runId: sourceId, foreground: false }, undefined, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "CONFIG_ERROR");
   assert.equal(resolverCalls, 2);
   assert.deepEqual(await listRunIds(home, "session", home), [sourceId]);
-  const started = await retry.execute("retry-succeeds", { runId: sourceId }, undefined, undefined, context) as { content: Array<{ text: string }> };
+  const started = await retry.execute("retry-succeeds", { runId: sourceId, foreground: false }, undefined, undefined, context) as { content: Array<{ text: string }> };
   const childId = (JSON.parse(started.content[0]?.text ?? "null") as { runId: string }).runId;
   assert.equal(resolverCalls, 3);
   assert.notEqual(childId, sourceId);
@@ -987,7 +987,7 @@ void test("registered workflow retries preserve role definitions for agent calls
   const source = await new RunStore(home, "session", sourceId, home).load();
   assert.deepEqual(source.snapshot.roles, { developer: { prompt: "Developer role" } });
   rmSync(join(agentDir, "pi-extensible-workflows", "roles", "developer.md"));
-  const started = await retry.execute("retry", { runId: sourceId }, undefined, undefined, context) as { content: Array<{ text: string }> };
+  const started = await retry.execute("retry", { runId: sourceId, foreground: false }, undefined, undefined, context) as { content: Array<{ text: string }> };
   const childId = (JSON.parse(started.content[0]?.text ?? "null") as { runId: string }).runId;
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const child = (await new RunStore(home, "session", childId, home).load()).run;
@@ -4069,7 +4069,7 @@ void test("foreground failure diagnostics advertise valid named worktrees", asyn
   assert.deepEqual(diagnostic.retry.namedWorktrees, ["diagnostic-tree"]);
   const retry = tools.find(({ name }) => name === "workflow_retry");
   assert.ok(retry);
-  const started = await retry.execute("retry-from-diagnostic", { runId: diagnostic.retry.sourceRunId }, undefined, undefined, context) as { content: Array<{ text: string }> };
+  const started = await retry.execute("retry-from-diagnostic", { runId: diagnostic.retry.sourceRunId, foreground: false }, undefined, undefined, context) as { content: Array<{ text: string }> };
   const childId = (JSON.parse(started.content[0]?.text ?? "null") as { runId: string }).runId;
   let child: PersistedRun | undefined;
   for (let attempt = 0; attempt < 100; attempt += 1) {
