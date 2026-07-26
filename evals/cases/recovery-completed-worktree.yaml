@@ -1,0 +1,17 @@
+id: recovery-completed-worktree
+prompt: >-
+  The completed workflow run ID is "completed-run-42". You need a new workflow to do named worktree work,
+  so launch the workflow with exactly parentRunId "completed-run-42". Use exactly the workflow arguments {"name":"borrow-worktree","script":"return true;","parentRunId":"completed-run-42"}.
+  Do not call workflow_retry because the source is completed and parentRunId only borrows the named worktree; it does not replay or resume.
+maxCost: 0.1
+expectations:
+  firstTool: workflow
+  firstBatchToolSequence:
+    startsWith: [workflow]
+  parentToolSequence:
+    startsWith: [workflow]
+  workflowCallCount: 1
+expectedWorkflowCalls: 1
+semanticCriteria:
+  - id: parent-run-id
+    description: The captured workflow call has exactly name borrow-worktree, script return true;, and parentRunId completed-run-42; it does not call workflow_retry.

@@ -28,6 +28,7 @@ export interface AgentOrderExpectation { role?: string; model?: string; promptIn
 export interface DataFlowExpectation { binding: string; toAgentIndex: number }
 export interface ParentAssistantBatch { index: number; parts: readonly JsonValue[]; tools: readonly string[]; usage?: ParentUsage }
 export interface ParentToolResult { toolCallId?: string; details?: JsonValue; isError?: boolean; text?: string }
+export interface ParentToolCall { name: string; arguments: JsonValue }
 export interface ParentUsage { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: number; models: readonly { model: string; cost: number }[] }
 export interface ParentOracle { assistantBatches: readonly ParentAssistantBatch[]; workflowToolResults: readonly ParentToolResult[]; skillReads: readonly string[]; firstSignificantAction?: SignificantAction; firstTool?: string; firstBatchToolSequence: readonly string[]; toolsBeforeFirstWorkflow: readonly string[]; firstWorkflowBatchToolSequence: readonly string[]; parentToolSequence: readonly string[]; workflowCallCount: number; usage: ParentUsage }
 export interface CapturedWorkflowCall { batch: number; toolCallId?: string; arguments: JsonValue; script?: string }
@@ -91,7 +92,7 @@ export interface EvalCaseResult {
 }
 
 const CASE_PROCESS_GRACE_MS = 1_000;
-export const SAFE_PARENT_EVAL_TOOLS = Object.freeze(["read", "grep", "find", "bash", "workflow"] as const);
+export const SAFE_PARENT_EVAL_TOOLS = Object.freeze(["read", "grep", "find", "bash", "workflow", "workflow_retry"] as const);
 const EVAL_MODEL_TOKEN = "$EVAL_MODEL";
 const semantic = (description: string): readonly SemanticCriterion[] => [{ id: "intent", description }];
 const JSON_RESULT_TYPES = ["null", "boolean", "number", "integer", "string", "array", "object"] as const;
@@ -216,6 +217,13 @@ export function extractParentOracle(entries: readonly unknown[]): ParentOracle {
   return { assistantBatches: batches, workflowToolResults, skillReads, ...(firstSignificantAction ? { firstSignificantAction } : {}), ...(parentToolSequence[0] ? { firstTool: parentToolSequence[0] } : {}), firstBatchToolSequence: firstBatch?.tools ?? [], toolsBeforeFirstWorkflow: firstWorkflowIndex < 0 ? parentToolSequence : parentToolSequence.slice(0, firstWorkflowIndex), firstWorkflowBatchToolSequence: firstWorkflowBatch?.tools ?? [], parentToolSequence, workflowCallCount: parentToolSequence.filter((name) => name === "workflow").length, usage: { ...totals, models: [...modelCosts].map(([model, cost]) => ({ model, cost })) } };
 }
 
+export function extractParentToolCalls(oracle: ParentOracle): ParentToolCall[] {
+  return oracle.assistantBatches.flatMap(({ parts }) => parts.flatMap((part) => {
+    if (!isObject(part) || part.type !== "toolCall" || typeof part.name !== "string") return [];
+    return [{ name: part.name, arguments: isJson(part.arguments) ? part.arguments : null }];
+  }));
+}
+
 export function extractParentOracleFile(path: string): ParentOracle {
   const entries = readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as unknown);
   return extractParentOracle(entries);
@@ -278,6 +286,19 @@ export function evalExpectationErrors(oracle: ParentOracle, expectations: EvalEx
     if (min !== undefined && oracle.workflowCallCount < min || max !== undefined && oracle.workflowCallCount > max) errors.push(`workflow call count was ${String(oracle.workflowCallCount)}`);
   }
   return errors;
+}
+
+const RECOVERY_SELECTIONS: Readonly<Record<string, { tool: string; arguments: JsonValue }>> = {
+  "recovery-failed-run": { tool: "workflow_retry", arguments: { runId: "failed-run-42" } },
+  "recovery-completed-worktree": { tool: "workflow", arguments: { name: "borrow-worktree", script: "return true;", parentRunId: "completed-run-42" } },
+};
+
+export function recoverySelectionErrors(evalCase: Pick<WorkflowEvalCase, "id">, oracle: ParentOracle): string[] {
+  const expected = RECOVERY_SELECTIONS[evalCase.id];
+  if (!expected) return [];
+  const actual = extractParentToolCalls(oracle);
+  if (actual.length === 1 && actual[0]?.name === expected.tool && equalJson(actual[0].arguments, expected.arguments)) return [];
+  return [`${evalCase.id} parent tool calls were ${JSON.stringify(actual)}; expected ${JSON.stringify([expected])}`];
 }
 
 export function replayExpectationErrors(calls: readonly CapturedWorkflowCall[], reports: readonly ReplayReport[], expectations: EvalExpectations): string[] {
@@ -595,7 +616,7 @@ function semanticJudgePrompt(evalCase: WorkflowEvalCase, calls: readonly Capture
   const usedRoles = new Set(calls.flatMap(({ script }) => { try { return script ? inspectWorkflowScript(script).flatMap((call) => call.kind === "agent" && call.role ? [call.role] : []) : []; } catch { return []; } }));
   const roleText = [...usedRoles].map((role) => `${role}: ${roles[role]?.description ?? "no description"}`).join("\n") || "none";
   const docs = "agent(prompt, options) delegates; shell(command, options) runs a deterministic host command and returns exitCode/stdout/stderr; parallel(name, tasks) runs independent tasks concurrently; pipeline(name, items, stages) applies ordered stages; prompt(template, data) carries values into prompts. A role owns model/thinking/tools policy.";
-  return `Judge whether the captured workflow design satisfies each criterion. Do not execute it. Return only JSON: {"criteria":[{"id":"criterion id","pass":true,"evidence":"specific script evidence"}]}.\n\nOriginal request:\n${evalCase.prompt}\n\nCriteria:\n${JSON.stringify(evalCase.semanticCriteria ?? [])}\n\nDSL:\n${docs}\n\nRelevant roles:\n${roleText}\n\nCaptured workflow script(s):\n${calls.map((call, index) => `--- ${String(index)} ---\n${call.script ?? "<missing>"}`).join("\n")}`;
+  return `Judge whether the captured workflow design satisfies each criterion. Do not execute it. Return only JSON: {"criteria":[{"id":"criterion id","pass":true,"evidence":"specific script evidence"}]}.\n\nOriginal request:\n${evalCase.prompt}\n\nCriteria:\n${JSON.stringify(evalCase.semanticCriteria ?? [])}\n\nDSL:\n${docs}\n\nRelevant roles:\n${roleText}\n\nCaptured workflow call(s):\n${calls.map((call, index) => `--- ${String(index)} ---\nArguments:\n${JSON.stringify(call.arguments)}\nScript:\n${call.script ?? "<missing>"}`).join("\n")}`;
 }
 
 async function runSemanticJudge(input: CaptureCaseInput, calls: readonly CapturedWorkflowCall[], cwd: string, home: string, sessionDir: string, maxCost: number): Promise<JudgeProcessResult> {
@@ -720,7 +741,7 @@ export async function captureEvalCase(input: CaptureCaseInput): Promise<EvalCase
     const parentUsageThroughCandidate = usageThroughCandidate(oracle, workflows, selection.callIndices);
     const parentAccounting = parentUsageThroughCandidate ?? oracle.usage;
     const unsafeTool = oracle.parentToolSequence.find((tool) => !SAFE_PARENT_EVAL_TOOLS.includes(tool as (typeof SAFE_PARENT_EVAL_TOOLS)[number]));
-    const errors = [...evalExpectationErrors(oracle, input.case.expectations), ...validation.errors, ...(unsafeTool ? [`parent tool is outside the safe eval allowlist: ${unsafeTool}`] : [])];
+    const errors = [...evalExpectationErrors(oracle, input.case.expectations), ...recoverySelectionErrors(input.case, oracle), ...validation.errors, ...(unsafeTool ? [`parent tool is outside the safe eval allowlist: ${unsafeTool}`] : [])];
     if (requiredCount > 0 && selection.callIndices.length === 0) errors.push("Catastrophic validity failure: no production-valid workflow candidate satisfied static expectations.");
     let judge: SemanticJudgeReport | undefined;
     let judgeProcess: JudgeProcessResult | undefined;
