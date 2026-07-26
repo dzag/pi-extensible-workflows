@@ -1041,3 +1041,38 @@ void test("interactive interrupted recovery stays detached from foreground compl
   const loaded = await store.load();
   assert.equal(loaded.run.state, "completed", JSON.stringify(loaded.run.error));
 });
+
+void test("interactive budget recovery stays detached from foreground completion", { timeout: 10000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-budget-recovery-"));
+  const cwd = join(home, "project");
+  const sessionId = "session";
+  const snapshot = (name: string) => createLaunchSnapshot({ script: "return await checkpoint({ name: 'approval', prompt: 'Approve?', context: {} });", args: null, metadata: { name }, launchMode: "foreground", settings: { concurrency: 1 }, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] });
+  const resumeStore = new RunStore(cwd, sessionId, "budget-resume", home);
+  const adjustStore = new RunStore(cwd, sessionId, "budget-adjust", home);
+  const approveStore = new RunStore(cwd, sessionId, "budget-approve", home);
+  await resumeStore.create({ id: "budget-resume", workflowName: "budget-resume", cwd, sessionId, state: "budget_exhausted", agents: [], nativeSessions: [] }, snapshot("budget-resume"));
+  await adjustStore.create({ id: "budget-adjust", workflowName: "budget-adjust", cwd, sessionId, state: "budget_exhausted", agents: [], nativeSessions: [] }, snapshot("budget-adjust"));
+  const budget = { tokens: { hard: 1 } };
+  await approveStore.create({ id: "budget-approve", workflowName: "budget-approve", cwd, sessionId, state: "budget_exhausted", agents: [], nativeSessions: [], budget, budgetVersion: 1, usage: { tokens: 1, costUsd: 0, durationMs: 0, agentLaunches: 0 } }, snapshot("budget-approve"));
+  let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+  const context = { cwd, hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => sessionId }, ui: { select: async () => { await new Promise<void>((resolve) => setTimeout(resolve, 1000)); return "Approve"; }, input: async () => JSON.stringify({ tokens: { hard: 10 } }), notify() {} } };
+  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) { command = options.handler; }, on(name: string, handler: never) { if (name === "session_start") start = handler; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  assert.ok(start && command);
+  await start({}, context);
+  const assertDetached = async (action: string, store: RunStore) => {
+    const handler = command;
+    assert.ok(handler);
+    const resumedAt = Date.now();
+    await handler(action, context);
+    assert.ok(Date.now() - resumedAt < 500);
+    for (let attempt = 0; attempt < 2000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise<void>((resolve) => setTimeout(resolve, 2));
+    assert.equal((await store.load()).run.state, "completed");
+  };
+  await assertDetached("resume budget-resume", resumeStore);
+  await assertDetached("adjust budget-adjust", adjustStore);
+  await command("resume budget-approve {\"tokens\":{\"hard\":10}}", context);
+  const proposal = (await approveStore.pendingWorkflowDecisions())[0];
+  assert.ok(proposal);
+  await assertDetached(`budget-approve budget-approve ${proposal.proposalId}`, approveStore);
+});

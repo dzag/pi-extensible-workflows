@@ -1821,13 +1821,13 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     run.budget.recordEvent({ type, budgetVersion: request.budgetVersion, dimensions: [], usage: structuredClone(request.consumed), limits: structuredClone(request.proposed), at: Date.now(), proposalId: request.proposalId, previous: structuredClone(request.previous), proposed: structuredClone(request.proposed) });
     await persistRunState(run.store, run.metadata, (current) => ({ ...current, ...run.budget.snapshot() }));
   };
-  const answerBudgetDecision = async (runId: string, proposalId: string, approved: boolean, silent = false, context?: unknown, signal?: AbortSignal): Promise<BudgetDecisionResult | undefined> => {
+  const answerBudgetDecision = async (runId: string, proposalId: string, approved: boolean, silent = false, context?: unknown, signal?: AbortSignal, waitForCompletion = true): Promise<BudgetDecisionResult | undefined> => {
     const run = runs.get(runId);
     if (!run) return undefined;
     const request = await run.store.answerWorkflowDecision(proposalId, approved);
     if (!request) return undefined;
     await appendBudgetDecisionEvent(run, request, approved ? "adjustment_approved" : "adjustment_rejected");
-    const result = await applyBudgetDecision(request, approved, context, signal);
+    const result = await applyBudgetDecision(request, approved, context, signal, waitForCompletion);
     if (!silent) deliver(pi, `Workflow ${run.metadata.name} budget adjustment ${proposalId}: ${approved ? "Approved" : "Rejected"}.`);
     return result;
   };
@@ -2099,7 +2099,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     }
     return completion;
   };
-  const applyBudgetDecision = async (request: BudgetApprovalRequest, approved: boolean, context?: unknown, signal?: AbortSignal): Promise<BudgetDecisionResult> => {
+  const applyBudgetDecision = async (request: BudgetApprovalRequest, approved: boolean, context?: unknown, signal?: AbortSignal, waitForCompletion = true): Promise<BudgetDecisionResult> => {
     const run = runs.get(request.runId);
     if (!run) throw new WorkflowError("RESUME_INCOMPATIBLE", `Unknown workflow run: ${request.runId}`);
     if (!approved) return { state: "budget_exhausted", approved: false };
@@ -2109,11 +2109,11 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     run.budget = runtime;
     await persistRunState(run.store, run.metadata, (current) => { const next = { ...current, ...runtime.snapshot(), budgetVersion: nextVersion }; if (nextBudget) next.budget = nextBudget; else delete next.budget; return next; });
     const { hasUI, ui } = recoveryUi(context);
-    const completed = await coldResumeRun(run, hasUI, ui, projectTrusted(context), { ...resumeHostContext(context), ...(signal ? { signal } : {}) });
+    const completed = await coldResumeRun(run, hasUI, ui, projectTrusted(context), { ...resumeHostContext(context), ...(signal ? { signal } : {}) }, undefined, waitForCompletion);
     if (completed) return { state: "completed", approved: true, value: completed.value, run: (await run.store.load()).run };
     return { state: "running", approved: true };
   };
-  const resumeWorkflowRun = async (runId: string, rawPatch?: unknown, context?: unknown, signal?: AbortSignal, modeOverride?: boolean): Promise<Record<string, JsonValue>> => {
+  const resumeWorkflowRun = async (runId: string, rawPatch?: unknown, context?: unknown, signal?: AbortSignal, modeOverride?: boolean, waitForCompletion = true): Promise<Record<string, JsonValue>> => {
     const run = runs.get(runId);
     if (!run) {
       const host = object(context) ? context : {};
@@ -2153,7 +2153,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       await persistRunState(run.store, run.metadata, (current) => { const next = { ...current, ...runtime.snapshot(), budgetVersion: nextVersion }; if (nextBudget) next.budget = nextBudget; else delete next.budget; return next; });
     }
     const { hasUI, ui } = recoveryUi(context);
-    const completed = await coldResumeRun(run, hasUI, ui, projectTrusted(context), { ...resumeHostContext(context), ...(signal ? { signal } : {}) }, modeOverride);
+    const completed = await coldResumeRun(run, hasUI, ui, projectTrusted(context), { ...resumeHostContext(context), ...(signal ? { signal } : {}) }, modeOverride, waitForCompletion);
     if (completed) return { state: "completed", runId, value: completed.value, run: (await run.store.load()).run as unknown as JsonValue };
     return { state: "running" };
   };
@@ -2499,7 +2499,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             return keepContext ? "dashboard" : "done";
           }
           if ((action === "budget-approve" || action === "budget-reject") && runId && rest[0]) {
-            const result = await answerBudgetDecision(runId, rest[0], action === "budget-approve", true, ctx);
+            const result = await answerBudgetDecision(runId, rest[0], action === "budget-approve", true, ctx, undefined, false);
             ctx.ui.notify(result ? `Budget adjustment ${rest[0]} ${result.approved ? "approved" : "rejected"}.` : "Budget proposal is not pending.", result ? "info" : "warning");
             return keepContext ? "dashboard" : "done";
           }
@@ -2512,7 +2512,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           if (action === "resume" && run) {
             if (run.lifecycle.state === "budget_exhausted") {
               const patch: unknown = rest.length ? JSON.parse(rest.join(" ")) as unknown : undefined;
-              const result = await resumeWorkflowRun(run.store.runId, patch, ctx);
+              const result = await resumeWorkflowRun(run.store.runId, patch, ctx, undefined, undefined, false);
               ctx.ui.notify(result.state === "completed" ? `Workflow ${run.store.runId} completed.` : result.state === "running" ? `Resumed workflow ${run.store.runId}.` : `Budget adjustment for ${run.store.runId} is awaiting approval.`, result.state === "awaiting_approval" ? "warning" : "info");
             } else {
               if (run.lifecycle.state === "interrupted") await coldResumeRun(run, ctx.hasUI, ctx.ui, projectTrusted(ctx), ctx, undefined, false);
@@ -2527,7 +2527,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           if (action === "adjust" && run?.lifecycle.state === "budget_exhausted") {
             const input = await uiHostCapabilities(ctx.ui)?.input?.call(ctx.ui, "Budget patch (JSON)", "{\"tokens\":{\"hard\":null}}" );
             if (input === undefined) return keepContext ? "dashboard" : "done";
-            const result = await resumeWorkflowRun(run.store.runId, JSON.parse(input), ctx);
+            const result = await resumeWorkflowRun(run.store.runId, JSON.parse(input), ctx, undefined, undefined, false);
             ctx.ui.notify(result.state === "completed" ? `Workflow ${run.store.runId} completed.` : result.state === "running" ? `Resumed workflow ${run.store.runId}.` : `Budget adjustment for ${run.store.runId} is awaiting approval.`, result.state === "awaiting_approval" ? "warning" : "info");
             return keepContext ? "dashboard" : "done";
           }
