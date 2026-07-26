@@ -474,6 +474,28 @@ void test("falls back when a terminal provider error omits errorMessage", async 
   assert.deepEqual(attempts?.[0]?.error, { code: "AGENT_FAILED", message: "Workflow agent session ended with a terminal provider error" });
 });
 
+void test("preserves a prior report after an empty aborted assistant turn", async () => {
+  const report = { role: "assistant", content: [{ type: "text", text: "report" }] };
+  const aborted = { role: "assistant", content: [], stopReason: "aborted", errorMessage: "Request was aborted" };
+  const transport = {
+    id: "aborted-test",
+    async createSession(prepared: Readonly<import("../src/types.js").PreparedAgentSession>) {
+      return {
+        reference: { transport: "aborted-test", sessionId: "aborted-after-compaction" },
+        getState: () => ({ model: prepared.model, tools: prepared.tools }),
+        getSessionStats: sessionStats,
+        getLastAssistant: () => report,
+        subscribe() { return () => undefined; },
+        async prompt() { return { assistant: aborted }; },
+        async steer() {},
+        async abort() {},
+        async dispose() {},
+      };
+    },
+  } satisfies import("../src/types.js").AgentTransport;
+  const result = await new WorkflowAgentExecutor(root, transport).execute("work", { label: "worker", workflowName: "flow" });
+  assert.equal(result.value, "report");
+});
 void test("fails terminal provider errors during finalization without repair", async () => {
   const errorMessage = "OAuth refresh failed during finalization";
   const messages = [assistant("ready")];

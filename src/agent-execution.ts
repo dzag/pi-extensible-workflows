@@ -94,6 +94,7 @@ function text(message: WorkflowAgentMessage | undefined): string {
   if (!message || !Array.isArray(message.content)) return "";
   return message.content.filter((part: unknown): part is { type: "text"; text: string } => typeof part === "object" && part !== null && "type" in part && part.type === "text" && "text" in part && typeof part.text === "string").map((part) => part.text).join("");
 }
+function isEmptyAbortedAssistant(message: WorkflowAgentMessage | undefined): boolean { return message?.stopReason === "aborted" && Array.isArray(message.content) && message.content.length === 0; }
 
 function hasToolCall(message: unknown): boolean {
   return typeof message === "object" && message !== null && Array.isArray((message as { content?: unknown }).content) && (message as { content: unknown[] }).content.some((part) => typeof part === "object" && part !== null && (part as { type?: unknown }).type === "toolCall");
@@ -205,6 +206,7 @@ export async function createLocalPiSession(input: SessionInput): Promise<PiSessi
   }) as unknown as PiSession;
 }
 function workflowAgentMessage(message: AgentMessage | undefined): WorkflowAgentMessage | undefined { return message ? { role: message.role, ...(message.content === undefined ? {} : { content: message.content }), ...(message.stopReason === undefined ? {} : { stopReason: message.stopReason }), ...(message.errorMessage === undefined ? {} : { errorMessage: message.errorMessage }), ...(message.usage === undefined ? {} : { usage: message.usage }) } : undefined; }
+function latestUsableAssistant(messages: readonly AgentMessage[]): WorkflowAgentMessage | undefined { for (let index = messages.length - 1; index >= 0; index -= 1) { const candidate = workflowAgentMessage(messages[index]); if (candidate?.role === "assistant" && !isEmptyAbortedAssistant(candidate)) return candidate; } return undefined; }
 function workflowAgentStats(stats: ReturnType<PiSession["getSessionStats"]>): WorkflowAgentSessionStats { return { tokens: { input: stats.tokens.input, output: stats.tokens.output, cacheRead: stats.tokens.cacheRead, cacheWrite: stats.tokens.cacheWrite, total: stats.tokens.total }, cost: stats.cost }; }
 function workflowAgentState(native: PiSession, prepared: Readonly<PreparedAgentSession>): WorkflowAgentSessionState {
   const tools = native.agent?.state.tools.map(({ name }) => name) ?? prepared.tools;
@@ -233,10 +235,10 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
     getState: () => Object.freeze(workflowAgentState(native, prepared)),
     getSessionStats: () => workflowAgentStats(native.getSessionStats()),
     subscribe(listener: (event: WorkflowAgentSessionEvent) => void) { listener({ type: "state_changed", state: workflowAgentState(native, prepared) }); return native.subscribe?.((event) => { listener(localSessionEvent(event)); }) ?? (() => undefined); },
-    getLastAssistant: () => workflowAgentMessage([...native.messages].reverse().find((message) => message.role === "assistant")),
+    getLastAssistant: () => latestUsableAssistant(native.messages),
     async prompt(text: string) {
       if (disposed) throw new WorkflowError("INTERNAL_ERROR", "Local workflow session is disposed");
-      const prompt = Promise.resolve().then(async () => { await native.prompt(text); const assistant = workflowAgentMessage([...native.messages].reverse().find((message) => message.role === "assistant")); return assistant ? { assistant } : {}; });
+      const prompt = Promise.resolve().then(async () => { await native.prompt(text); const assistant = latestUsableAssistant(native.messages); return assistant ? { assistant } : {}; });
       prompting = prompt;
       try { return await prompt; } finally { if (prompting === prompt) prompting = undefined; }
     },
@@ -480,11 +482,17 @@ export class WorkflowAgentExecutor {
         if (setup.sessionInput.resourcePolicy) setupSummary = { ...setupSummary, disabledAgentResources: resourcePolicySummary(setup.sessionInput.resourcePolicy) };
         const activeSession = session;
         let lastAssistant: WorkflowAgentMessage | undefined;
-        const recoverTerminal = () => recoverTerminalProviderError(activeSession, options.label, options.providerErrorRecovery, async () => { try { lastAssistant = (await promptWithProviderPause(activeSession, providerContinuationPrompt, remaining(options.timeoutMs, started), attemptSignal, this.root.providerPause)).assistant; } catch (error) { lastAssistant = (activeSession as WorkflowAgentSession & { getLastAssistant?: () => WorkflowAgentMessage | undefined }).getLastAssistant?.() ?? lastAssistant; if (!hasSchemaResult()) throw error; } }, () => lastAssistant);
+        const acceptAssistant = (candidate: WorkflowAgentMessage | undefined) => {
+          if (isEmptyAbortedAssistant(candidate)) {
+            const previous = (activeSession as WorkflowAgentSession & { getLastAssistant?: () => WorkflowAgentMessage | undefined }).getLastAssistant?.();
+            if (previous && !isEmptyAbortedAssistant(previous)) lastAssistant = previous;
+          } else if (candidate) lastAssistant = candidate;
+        };
+        const recoverTerminal = () => recoverTerminalProviderError(activeSession, options.label, options.providerErrorRecovery, async () => { try { acceptAssistant((await promptWithProviderPause(activeSession, providerContinuationPrompt, remaining(options.timeoutMs, started), attemptSignal, this.root.providerPause)).assistant); } catch (error) { acceptAssistant((activeSession as WorkflowAgentSession & { getLastAssistant?: () => WorkflowAgentMessage | undefined }).getLastAssistant?.() ?? lastAssistant); if (!hasSchemaResult()) throw error; } }, () => lastAssistant);
         const promptAndRecover = async (prompt: string): Promise<void> => {
           let promptFailed = false;
           let promptError: unknown;
-          try { lastAssistant = (await promptWithProviderPause(activeSession, prompt, remaining(options.timeoutMs, started), attemptSignal, this.root.providerPause)).assistant; } catch (error) { lastAssistant = (activeSession as WorkflowAgentSession & { getLastAssistant?: () => WorkflowAgentMessage | undefined }).getLastAssistant?.() ?? lastAssistant; promptFailed = true; promptError = error; }
+          try { acceptAssistant((await promptWithProviderPause(activeSession, prompt, remaining(options.timeoutMs, started), attemptSignal, this.root.providerPause)).assistant); } catch (error) { acceptAssistant((activeSession as WorkflowAgentSession & { getLastAssistant?: () => WorkflowAgentMessage | undefined }).getLastAssistant?.() ?? lastAssistant); promptFailed = true; promptError = error; }
           const recovered = await recoverTerminal();
           if (promptFailed && !hasSchemaResult() && !recovered) throw promptError;
         };
@@ -519,7 +527,7 @@ export class WorkflowAgentExecutor {
             activity = undefined;
             shouldReport = activityChanged(previousActivity);
             if (event.message?.role === "assistant") {
-              lastAssistant = event.message;
+              acceptAssistant(event.message);
               const needsMoreWork = hasToolCall(event.message);
               const final = !needsMoreWork || (options.schema !== undefined && hasSchemaResult());
               if (!budgetError) { try { options.budget?.afterTurn(accounting(activeSession.getSessionStats()), final); if (!final) { const instruction = options.budget?.instruction(); if (instruction) void activeSession.steer(instruction); } } catch (error) { budgetError ??= error instanceof WorkflowError ? error : new WorkflowError("BUDGET_EXHAUSTED", error instanceof Error ? error.message : String(error)); void activeSession.abort(); } }
