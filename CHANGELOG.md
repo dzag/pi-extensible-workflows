@@ -2,6 +2,7 @@
 ## Unreleased
 
 - Inline foreground workflow progress now refreshes persisted agent state so stalled-agent warnings remain visible ([#149](https://github.com/vekexasia/pi-extensible-workflows/issues/149)).
+- Registered function launches may use `name` as an optional run label; `workflow` remains the function identity for resume and replay.
 ## [3.3.0] - 2026-07-26
 
 ### New capabilities

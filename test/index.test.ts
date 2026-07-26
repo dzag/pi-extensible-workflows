@@ -155,6 +155,7 @@ void test("workflow call preview summarizes inline and registered functions safe
   assert.match(preview, /^workflow review\nReview code/m);
   assert.doesNotMatch(preview, /^(Phases|Steps|Agents|Models|Roles|Tools|Extensions):/m);
   assert.equal(formatWorkflowPreview({ workflow: "audit" }), "workflow audit\nRegistered function");
+  assert.equal(formatWorkflowPreview({ workflow: "audit", name: "nightly" }), "workflow nightly\nRegistered function: audit");
   assert.equal(formatWorkflowPreview({ script: "not javascript", name: "review" }), "workflow review");
 });
 void test("workflow guidance leads with the inline parallel-to-summary path", () => {
@@ -210,7 +211,7 @@ void test("registers the workflow tool, command, and conditional skill", async (
   assert.doesNotThrow(() => preflight(shellExample, { models: new Set(), tools: new Set(), agentTypes: new Set() }));
   await assert.rejects(tool.execute("id", { script: "return true" }, new AbortController().signal, undefined, { model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   await assert.rejects(tool.execute("id", { script: "return true", workflow: "missing" }, new AbortController().signal, undefined, { model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
-  await assert.rejects(tool.execute("id", { workflow: "missing", name: "missing-run" }, new AbortController().signal, undefined, { model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  await assert.rejects(tool.execute("id", { workflow: "missing", name: "missing-run" }, new AbortController().signal, undefined, { model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }), (error: unknown) => error instanceof WorkflowError && error.code === "MISSING_WORKFLOW");
   await assert.rejects(tool.execute("id", { workflow: "missing", name: " " }, new AbortController().signal, undefined, { model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   await assert.rejects(tool.execute("id", { script: "" }, undefined, undefined, { model: undefined }), (error: unknown) => error instanceof WorkflowError && error.code === "UNKNOWN_MODEL");
 });
@@ -989,7 +990,9 @@ void test("direct function launches enforce input and output schemas", async () 
   const context = { cwd: mkdtempSync(join(tmpdir(), "pi-extensible-workflows-function-schema-")), model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
   await assert.rejects(execute("id", { workflow: "needsValue", args: {}, foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESULT_INVALID");
   await assert.rejects(execute("id", { name: " ", workflow: "needsValue", args: { value: "ok" }, foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
-  await assert.rejects(execute("id", { name: "needs-value", workflow: "needsValue", args: { value: "ok" }, foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  const named = await execute("id", { name: "needs-value", workflow: "needsValue", args: { value: "ok" }, foreground: true }, new AbortController().signal, undefined, context) as { content: Array<{ text: string }>; details: { run: { workflowName: string } } };
+  assert.equal(named.content[0]?.text, '"ok"');
+  assert.equal(named.details.run.workflowName, "needs-value");
   await assert.rejects(execute("id", { workflow: "badResult", args: {}, foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESULT_INVALID");
 });
 void test("registered workflow retries preserve role definitions for agent calls", async () => {

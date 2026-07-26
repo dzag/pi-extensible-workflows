@@ -691,8 +691,9 @@ export function validateWorkflowLaunchWithRegistry(params: WorkflowValidationPar
     catch (error) { fail("INVALID_SYNTAX", `Cannot read workflow script file ${scriptPath}: ${errorText(error)}`); }
   }
   const functionName = typeof params.workflow === "string" ? params.workflow : undefined;
-  if (functionName !== undefined && params.name !== undefined) fail("INVALID_METADATA", "Registered function launches do not accept name; workflow is the run name");
-  const workflowName = functionName ?? (typeof params.name === "string" ? params.name.trim() : "");
+  const explicitName = params.name === undefined ? undefined : typeof params.name === "string" ? params.name.trim() : "";
+  if (params.name !== undefined && !explicitName) fail("INVALID_METADATA", "Workflow name must be non-empty when provided");
+  const workflowName = explicitName ?? functionName ?? "";
   if (functionName === undefined && !workflowName) fail("INVALID_METADATA", "Inline workflow launches require a non-empty name");
   const fn = functionName === undefined ? undefined : registry?.function(functionName);
   if (functionName !== undefined && !registry) fail("MISSING_WORKFLOW", `Registered function is unavailable: ${functionName}`);
