@@ -336,16 +336,20 @@ export function renderInspector(report: SessionReport, state: InspectorViewState
   const scroll = Math.max(0, Math.min(state.scroll, Math.max(0, fitted.length - room)));
   return [...header, ...fitted.slice(scroll, scroll + room), ...footer].slice(0, height);
 }
-export async function loadPersistedSessionSummary(cwd: string, sessionId: string, home = homedir()): Promise<PersistedSessionSummary> {
+export async function loadPersistedSessionSummary(cwd: string, sessionId: string, home = homedir(), failedOnly = false): Promise<PersistedSessionSummary> {
   const runs: RunSummary[] = [];
   for (const runId of (await listRunIds(cwd, sessionId, home)).sort()) {
-    try { runs.push(await new RunStore(cwd, sessionId, runId, home).loadSummary()); } catch { /* Ignore corrupt or concurrently removed runs. */ }
+    try {
+      const summary = await new RunStore(cwd, sessionId, runId, home).loadSummary();
+      if (!failedOnly || summary.state === "failed") runs.push(summary);
+    } catch { /* Ignore corrupt or concurrently removed runs. */ }
   }
   return { schemaVersion: 1, cwd, sessionId, runs };
 }
-export async function loadPersistedSummaries(cwd: string, sessionId: string | undefined, home = homedir()): Promise<readonly PersistedSessionSummary[]> {
+export async function loadPersistedSummaries(cwd: string, sessionId: string | undefined, home = homedir(), failedOnly = false): Promise<readonly PersistedSessionSummary[]> {
   const sessionIds = sessionId ? [sessionId] : (await listPersistedSessionIds(cwd, home)).sort();
-  return Promise.all(sessionIds.map((id) => loadPersistedSessionSummary(cwd, id, home)));
+  const sessions = await Promise.all(sessionIds.map((id) => loadPersistedSessionSummary(cwd, id, home, failedOnly)));
+  return sessionId || !failedOnly ? sessions : sessions.filter((session) => session.runs.length > 0);
 }
 export function formatPersistedRunSummary(summary: RunSummary, sessionId = summary.sessionId): string {
   const counts = summary.agents.reduce<Record<string, number>>((result, agent) => { result[agent.state] = (result[agent.state] ?? 0) + 1; return result; }, {});
@@ -402,16 +406,17 @@ async function askSessionId(): Promise<string> {
 export async function resolveSession(query: string, sessionDir = process.env.PI_CODING_AGENT_SESSION_DIR): Promise<SessionInfo> {
   return matchSession(query, await SessionManager.listAll(sessionDir));
 }
-export async function runSessionInspector(sessionId?: string, mode: InspectMode = "tui", cwd = process.cwd(), home = homedir(), write: (text: string) => void = (text) => { stdout.write(text); }): Promise<void> {
+export async function runSessionInspector(sessionId?: string, mode: InspectMode = "tui", cwd = process.cwd(), home = homedir(), write: (text: string) => void = (text) => { stdout.write(text); }, failedOnly = false): Promise<void> {
   if (mode !== "tui") {
-    const sessions = await loadPersistedSummaries(cwd, sessionId?.trim() || undefined, home);
+    const sessions = await loadPersistedSummaries(cwd, sessionId?.trim() || undefined, home, failedOnly);
     if (mode === "json") {
       const value = sessionId?.trim() ? sessions[0] : undefined;
       write(`${JSON.stringify(value ?? { schemaVersion: 1, cwd, sessions })}\n`);
       return;
     }
-    const lines = sessions.flatMap((session) => session.runs.length ? session.runs.map((run) => formatPersistedRunSummary(run, session.sessionId)) : [`${session.sessionId} (no persisted runs)`]);
-    write(`${lines.length ? lines.join("\n") : "No persisted workflow runs."}\n`);
+    const emptyLabel = failedOnly ? "no failed runs" : "no persisted runs";
+    const lines = sessions.flatMap((session) => session.runs.length ? session.runs.map((run) => formatPersistedRunSummary(run, session.sessionId)) : [`${session.sessionId} (${emptyLabel})`]);
+    write(`${lines.length ? lines.join("\n") : failedOnly ? "No failed workflow runs." : "No persisted workflow runs."}\n`);
     return;
   }
   const query = sessionId?.trim() || await askSessionId();

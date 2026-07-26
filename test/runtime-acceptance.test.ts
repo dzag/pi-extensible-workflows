@@ -786,12 +786,15 @@ void test("cold resume recomputes variables and marks resolver failures", { time
   await assert.rejects(command("resume failed-run", context), (error: unknown) => error instanceof WorkflowError && error.code === "INTERNAL_ERROR");
   assert.deepEqual((await failed.load()).run.error, { code: "INTERNAL_ERROR", message: "resumeFailureVariable: resume variable failure" });
   assert.equal((await failed.load()).run.state, "failed");
-  const diagnosticMessage = messages.find((value) => value.includes("failure diagnostics:"));
+  const diagnosticMessage = messages.find((value) => value.includes(" failed (runId="));
   assert.ok(diagnosticMessage);
-  const diagnostic = JSON.parse(diagnosticMessage.slice(diagnosticMessage.indexOf("{"))) as { runId: string; retry: { sourceRunId: string; action: string } };
-  assert.equal(diagnostic.runId, "failed-run");
-  assert.equal(diagnostic.retry.sourceRunId, "failed-run");
-  assert.equal(diagnostic.retry.action, `workflow_retry({ runId: ${JSON.stringify(diagnostic.runId)} })`);
+  assert.doesNotMatch(diagnosticMessage, /\n/);
+  assert.match(diagnosticMessage, /Workflow resume-variable-failure failed/);
+  assert.match(diagnosticMessage, /runId=failed-run/);
+  assert.match(diagnosticMessage, /error=INTERNAL_ERROR: resumeFailureVariable: resume variable failure/);
+  assert.match(diagnosticMessage, /statePath=.*state\.json/);
+  assert.match(diagnosticMessage, /journalPath=.*journal\.json/);
+  assert.match(diagnosticMessage, /next action: workflow_retry\(\{ runId: "failed-run" \}\)/);
   const started = new Promise<void>((resolve) => { markStopVariableStarted = resolve; });
   stopVariableAborted = false;
   const resuming = command("resume stop-run", context).catch(() => undefined);
@@ -826,7 +829,7 @@ void test("restart recovers every persisted nonterminal run state", async () => 
     assert.equal(JSON.parse(readFileSync(join(store.directory, "result.json"), "utf8")), `run-${String(index)}`);
   }
 });
-void test("cold-resumed failures deliver structured diagnostics while persistence keeps codes", async () => {
+void test("cold-resumed failures deliver human-readable diagnostics while persistence keeps codes", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-recovery-failure-"));
   const cwd = join(home, "project");
   const store = new RunStore(cwd, "session-a", "run-a", home);
@@ -844,17 +847,16 @@ void test("cold-resumed failures deliver structured diagnostics while persistenc
   let diagnosticMessage: string | undefined;
   for (let attempt = 0; attempt < 100 && (loaded.run.state !== "failed" || !diagnosticMessage); attempt += 1) {
     loaded = await store.load();
-    diagnosticMessage = messages.find((value) => value.includes("failure diagnostics:"));
+    diagnosticMessage = messages.find((value) => value.includes(" failed (runId="));
     if (loaded.run.state !== "failed" || !diagnosticMessage) await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.equal(loaded.run.state, "failed");
   assert.deepEqual(loaded.run.error, { code: "INTERNAL_ERROR", message });
   assert.ok(diagnosticMessage);
-  const diagnostic = JSON.parse(diagnosticMessage.slice(diagnosticMessage.indexOf("{"))) as { runId: string; state: string; error: { code: string; message: string }; artifacts: { statePath: string; journalPath: string } };
-  assert.equal(diagnostic.runId, "run-a");
-  assert.equal(diagnostic.state, "failed");
-  assert.equal(diagnostic.error.code, "INTERNAL_ERROR");
-  assert.equal(diagnostic.error.message, message);
-  assert.match(diagnostic.artifacts.statePath, /state\.json$/);
-  assert.match(diagnostic.artifacts.journalPath, /journal\.json$/);
+  assert.doesNotMatch(diagnosticMessage, /\n/);
+  assert.match(diagnosticMessage, /Workflow restored-failure failed/);
+  assert.match(diagnosticMessage, /runId=run-a/);
+  assert.match(diagnosticMessage, /error=INTERNAL_ERROR: .*restored approval gate rejected the release\./);
+  assert.match(diagnosticMessage, /statePath=.*state\.json/);
+  assert.match(diagnosticMessage, /journalPath=.*journal\.json/);
 });

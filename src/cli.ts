@@ -14,7 +14,7 @@ import { runSessionInspector, transcriptFileLines, type InspectMode } from "./se
 import type { PersistedRun } from "./persistence.js";
 import type { WorkflowCatalogFunction } from "./index.js";
 
-export interface CliOptions extends DoctorOptions { inspect?: (sessionId?: string, mode?: InspectMode) => Promise<void>; transcript?: (sessionFile: string) => Promise<void>; stderr?: (text: string) => void; signal?: AbortSignal; trustOverride?: boolean; isTTY?: boolean; skillPaths?: readonly string[] }
+export interface CliOptions extends DoctorOptions { inspect?: (sessionId?: string, mode?: InspectMode, failedOnly?: boolean) => Promise<void>; transcript?: (sessionFile: string) => Promise<void>; stderr?: (text: string) => void; signal?: AbortSignal; trustOverride?: boolean; isTTY?: boolean; skillPaths?: readonly string[] }
 
 type CliScalar = "string" | "integer" | "number" | "boolean";
 type CliField = { name: string; option: string; schema: Record<string, unknown>; type: CliScalar | "array"; itemType?: CliScalar; required: boolean };
@@ -161,19 +161,21 @@ function launcherHelpLines(): string[] {
 function workflowUsage(): string { return [`Usage: pi-extensible-workflows run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force]`, "", "Launcher options:", ...launcherHelpLines()].join("\n") + "\n"; }
 function exportUsage(): string { return [`Usage: pi-extensible-workflows export <workflow-name> [--name <command>] [--output <path>] [--force] [--bundle]`, "", "Launcher options:", ...launcherHelpLines()].join("\n") + "\n"; }
 function bundleUsage(): string { return [`Usage: pi-extensible-workflows bundle <workflow-name> [--name <command>] [--output <directory>] [--force]`, "", "The bundle contains a launcher, manifest, workflow payload, and external-runtime setup instructions.", "Repeat --role, --alias, --tool, --command, or --environment to declare recipient requirements.", "Use --extension, --skill, --resource, and --dependency to copy selected payload resources."].join("\n") + "\n"; }
-function parseInspectArgs(rawArgs: readonly string[]): { sessionId?: string; mode: InspectMode } {
+function parseInspectArgs(rawArgs: readonly string[]): { sessionId?: string; mode: InspectMode; failedOnly: boolean } {
   let sessionId: string | undefined;
   let mode: InspectMode = "tui";
+  let failedOnly = false;
   for (const arg of rawArgs) {
     if (arg === "--json" || arg === "--summary") {
       const next: InspectMode = arg === "--json" ? "json" : "summary";
       if (mode !== "tui" && mode !== next) throw new Error("inspect accepts only one output mode");
       mode = next;
-    } else if (arg.startsWith("--")) throw new Error(`Unknown inspect option: ${arg}`);
+    } else if (arg === "--failed") failedOnly = true;
+    else if (arg.startsWith("--")) throw new Error(`Unknown inspect option: ${arg}`);
     else if (sessionId !== undefined) throw new Error(`Unexpected argument: ${arg}`);
     else sessionId = arg;
   }
-  return { ...(sessionId ? { sessionId } : {}), mode };
+  return { ...(sessionId ? { sessionId } : {}), mode: failedOnly && mode === "tui" ? "summary" : mode, failedOnly };
 }
 export function parseDoctorCleanupArgs(rawArgs: readonly string[]): Required<Pick<DoctorCleanupOptions, "olderThanDays" | "yes">> {
   let olderThanDays = 90;
@@ -529,8 +531,8 @@ export async function runCli(args: readonly string[], options: CliOptions = {}, 
   if (args[0] === "inspect") {
     try {
       const parsed = parseInspectArgs(args.slice(1));
-      if (options.inspect) await options.inspect(parsed.sessionId, parsed.mode);
-      else await runSessionInspector(parsed.sessionId, parsed.mode, options.cwd ?? process.cwd(), undefined, write);
+      if (options.inspect) await options.inspect(parsed.sessionId, parsed.mode, parsed.failedOnly);
+      else await runSessionInspector(parsed.sessionId, parsed.mode, options.cwd ?? process.cwd(), undefined, write, parsed.failedOnly);
       return 0;
     }
     catch (error) { write(`Error: ${error instanceof Error ? error.message : String(error)}\n`); return 1; }
@@ -549,7 +551,7 @@ export async function runCli(args: readonly string[], options: CliOptions = {}, 
       return args[0] === "run" ? await runWorkflowCli(args.slice(1), workflowOptions) : await exportWorkflowCli(args.slice(1), workflowOptions);
     } catch (error) { stderr(`Error: ${error instanceof Error ? error.message : String(error)}\n`); return 1; }
   }
-  write("Usage: pi-extensible-workflows doctor | inspect [session-id] [--json|--summary] | transcript <session-file> | bundle <workflow-name> [--name <command>] [--output <path>] [--force] | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force]\n");
+  write("Usage: pi-extensible-workflows doctor | inspect [session-id] [--json|--summary] [--failed] | transcript <session-file> | bundle <workflow-name> [--name <command>] [--output <path>] [--force] | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force] [--bundle]\n");
   return 1;
 }
 

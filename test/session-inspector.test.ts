@@ -256,3 +256,29 @@ void test("non-TTY inspection discovers persisted runs without a transcript", as
     if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
   }
 });
+void test("filters persisted inspection to failed runs", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-inspect-failed-"));
+  const cwd = join(home, "project");
+  const sessionId = "session-failed";
+  const snapshot = (name: string) => createLaunchSnapshot({ script: "return true;", args: null, metadata: { name }, settings: { concurrency: 1 }, models: [], tools: [], agentTypes: [], schemas: [] });
+  await new RunStore(cwd, sessionId, "completed-run", home).create({ id: "completed-run", workflowName: "completed", cwd, sessionId, state: "completed", agents: [], nativeSessions: [] }, snapshot("completed"));
+  await new RunStore(cwd, sessionId, "failed-run", home).create({ id: "failed-run", workflowName: "failed", cwd, sessionId, state: "failed", agents: [], nativeSessions: [] }, snapshot("failed"));
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    let summary = "";
+    assert.equal(await runCli(["inspect", sessionId, "--summary", "--failed"], { cwd, isTTY: false }, (text) => { summary += text; }), 0);
+    assert.match(summary, /failed-run/);
+    assert.doesNotMatch(summary, /completed-run/);
+    let defaultSummary = "";
+    assert.equal(await runCli(["inspect", sessionId, "--failed"], { cwd, isTTY: false }, (text) => { defaultSummary += text; }), 0);
+    assert.match(defaultSummary, /failed-run/);
+    assert.doesNotMatch(defaultSummary, /completed-run/);
+    let json = "";
+    assert.equal(await runCli(["inspect", sessionId, "--json", "--failed"], { cwd, isTTY: false }, (text) => { json += text; }), 0);
+    const parsed = JSON.parse(json) as { runs: Array<{ runId: string; state: string }> };
+    assert.deepEqual(parsed.runs.map(({ runId, state }) => ({ runId, state })), [{ runId: "failed-run", state: "failed" }]);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+  }
+});

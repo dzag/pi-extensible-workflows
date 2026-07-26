@@ -234,7 +234,7 @@ void test("package bin and CLI expose doctor and inspector commands", async () =
   assert.equal(inspected, "session-a");
   output = "";
   assert.equal(await runCli([], {}, (text) => { output += text; }), 1);
-  assert.equal(output, "Usage: pi-extensible-workflows doctor | inspect [session-id] [--json|--summary] | transcript <session-file> | bundle <workflow-name> [--name <command>] [--output <path>] [--force] | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force]\n");
+  assert.equal(output, "Usage: pi-extensible-workflows doctor | inspect [session-id] [--json|--summary] [--failed] | transcript <session-file> | bundle <workflow-name> [--name <command>] [--output <path>] [--force] | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force] [--bundle]\n");
   const bin = join(paths.root, "bin", "pi-extensible-workflows");
   mkdirSync(join(paths.root, "bin"), { recursive: true });
   symlinkSync(join(process.cwd(), "dist", "src", "cli.js"), bin);

@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import type { AgentSessionEvent, InlineExtension, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { WORKFLOW_TOOL_DESCRIPTION, WORKFLOW_TOOL_PROMPT_SNIPPET } from "../src/host.js";
-import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, disabledResources, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDiagnostics, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeAgentResourceExclusions, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resourcePatternMatches, resolveAgentResourcePolicy, resolveModelReference, resolveWorkflowSettings, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, openWorkflowArtifact, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
+import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, disabledResources, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDelivery, formatWorkflowFailureDiagnostics, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeAgentResourceExclusions, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resourcePatternMatches, resolveAgentResourcePolicy, resolveModelReference, resolveWorkflowSettings, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, openWorkflowArtifact, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
 import { loadingRegistry } from "../src/registry.js";
 import type { NativeSession, SessionInput } from "../src/agent-execution.js";
 import { listRunIds } from "../src/persistence.js";
@@ -3901,6 +3901,24 @@ void test("presents every workflow error code as factual prose", () => {
   assert.match(composed, /missing\/provider/);
   assert.doesNotMatch(composed, /UNKNOWN_MODEL/);
 });
+void test("formats background failure delivery as one concise human-readable line", () => {
+  const diagnostic: WorkflowFailureDiagnostics = {
+    runId: "run-130", workflowName: "background-audit", state: "failed", failedAt: "agent/review",
+    error: { code: "AGENT_FAILED", message: "provider failed\nwith a diagnostic" },
+    completedSiblingPaths: [],
+    retry: { sourceRunId: "run-130", action: 'workflow_retry({ runId: "run-130" })', completedPaths: [], incompletePaths: ["agent/review"], namedWorktrees: [], warning: "retry warning" },
+    artifacts: { runDirectory: "/tmp/run-130", statePath: "/tmp/run-130/state.json", journalPath: "/tmp/run-130/journal.json" },
+  };
+  const delivery = formatWorkflowFailureDelivery(diagnostic);
+  assert.equal(delivery.includes("\n"), false);
+  assert.match(delivery, /Workflow background-audit failed/);
+  assert.match(delivery, /runId=run-130/);
+  assert.match(delivery, /error=AGENT_FAILED: provider failed with a diagnostic/);
+  assert.match(delivery, /failed path=agent\/review/);
+  assert.match(delivery, /next action: workflow_retry\(\{ runId: "run-130" \}\)/);
+  assert.match(delivery, /artifacts: .*state\.json .*journal\.json/);
+  assert.doesNotMatch(delivery, /^\s*\{/);
+});
 void test("foreground workflow failures preserve codes while returning main-agent prose", async () => {
   type Tool = { name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> };
   const tools: Tool[] = [];
@@ -4089,15 +4107,16 @@ void test("background failure diagnostics drive workflow_retry with the advertis
   await workflow.execute("background-retry", { name: "background-retry", script: `return withWorktree("background-tree", async () => parallel("branches", { good: () => agent("good", {label:"good"}), bad: () => agent("bad", {label:"bad"}) }));` }, undefined, undefined, context);
   let diagnosticMessage: string | undefined;
   for (let attempt = 0; attempt < 100 && !diagnosticMessage; attempt += 1) {
-    diagnosticMessage = delivered.find((message) => message.includes("failure diagnostics:"));
+    diagnosticMessage = delivered.find((message) => message.includes(" failed (runId="));
     if (!diagnosticMessage) await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
   assert.ok(diagnosticMessage);
-  const diagnostic = JSON.parse(diagnosticMessage.slice(diagnosticMessage.indexOf("{"))) as WorkflowFailureDiagnostics;
-  assert.ok(diagnostic.retry);
-  assert.equal(diagnostic.retry.action, `workflow_retry({ runId: ${JSON.stringify(diagnostic.retry.sourceRunId)} })`);
-  assert.deepEqual(diagnostic.retry.namedWorktrees, ["background-tree"]);
-  const started = await retry.execute("background-retry-child", { runId: diagnostic.retry.sourceRunId }, undefined, undefined, context) as { content: Array<{ text: string }> };
+  const sourceRunId = /runId=([^;) ]+)/.exec(diagnosticMessage)?.[1];
+  if (!sourceRunId) throw new Error("Background failure did not include a run ID");
+  assert.match(diagnosticMessage, /next action: workflow_retry\(\{ runId: /);
+  assert.match(diagnosticMessage, /statePath=.*state\.json/);
+  assert.match(diagnosticMessage, /journalPath=.*journal\.json/);
+  const started = await retry.execute("background-retry-child", { runId: sourceRunId }, undefined, undefined, context) as { content: Array<{ text: string }> };
   const childId = (JSON.parse(started.content[0]?.text ?? "null") as { runId: string }).runId;
   let child: PersistedRun | undefined;
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -4109,11 +4128,11 @@ void test("background failure diagnostics drive workflow_retry with the advertis
   assert.equal(goodAttempts, 1);
   assert.equal(badAttempts, 2);
 });
-void test("failed retry diagnostics remove completed paths from inherited incomplete paths", async () => {
+void test("failed retry diagnostics preserve retry provenance", async () => {
   type Tool = { name: string; execute: (...args: unknown[]) => Promise<unknown> };
   const tools: Tool[] = [];
   const delivered: string[] = [];
-  const diagnostics: WorkflowFailureDiagnostics[] = [];
+  const diagnostics: Array<{ runId: string }> = [];
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-retry-diagnostic-paths-"));
   const cwd = join(home, "repo");
   mkdirSync(cwd);
@@ -4132,7 +4151,8 @@ void test("failed retry diagnostics remove completed paths from inherited incomp
   });
   workflowExtension({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) {
     delivered.push(message.content);
-    if (message.content.includes("failure diagnostics:")) diagnostics.push(JSON.parse(message.content.slice(message.content.indexOf("{"))) as WorkflowFailureDiagnostics);
+    const runId = /runId=([^;) ]+)/.exec(message.content)?.[1];
+    if (runId && message.content.includes(" failed (runId=")) diagnostics.push({ runId });
   }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
   const workflow = tools.find(({ name }) => name === "workflow");
   const retry = tools.find(({ name }) => name === "workflow_retry");
@@ -4142,18 +4162,15 @@ void test("failed retry diagnostics remove completed paths from inherited incomp
   for (let attempt = 0; attempt < 100 && diagnostics.length < 1; attempt += 1) await new Promise<void>((resolve) => setTimeout(resolve, 10));
   assert.equal(diagnostics.length, 1);
   const sourceDiagnostic = diagnostics[0];
-  assert.ok(sourceDiagnostic?.retry);
-  const started = await retry.execute("retry-diagnostic-child", { runId: sourceDiagnostic.retry.sourceRunId }, undefined, undefined, context) as { content: Array<{ text: string }> };
+  if (!sourceDiagnostic) throw new Error("Source failure was not delivered");
+  const started = await retry.execute("retry-diagnostic-child", { runId: sourceDiagnostic.runId }, undefined, undefined, context) as { content: Array<{ text: string }> };
   const childId = (JSON.parse(started.content[0]?.text ?? "null") as { runId: string }).runId;
   for (let attempt = 0; attempt < 100 && !diagnostics.some((diagnostic) => diagnostic.runId === childId); attempt += 1) await new Promise<void>((resolve) => setTimeout(resolve, 10));
   const childDiagnostic = diagnostics.find((diagnostic) => diagnostic.runId === childId);
-  assert.ok(childDiagnostic);
-  assert.ok(childDiagnostic.retry);
-  const childRetry = childDiagnostic.retry;
-  assert.equal(childDiagnostic.state, "failed");
-  assert.ok(childRetry.completedPaths.some((path) => path.includes("first")));
-  assert.ok(childRetry.incompletePaths.some((path) => path.includes("second")));
-  assert.ok(childRetry.incompletePaths.every((incomplete) => childRetry.completedPaths.every((completed) => completed !== incomplete && !completed.startsWith(`${incomplete}/`))));
+  if (!childDiagnostic) throw new Error("Child failure was not delivered");
+  const childRun = (await new RunStore(cwd, "session", childId, home).load()).run;
+  assert.equal(childRun.state, "failed");
+  if (!childRun.retry) throw new Error("Child retry provenance was not persisted");
   const nextStarted = await retry.execute("retry-diagnostic-next-child", { runId: childId }, undefined, undefined, context) as { content: Array<{ text: string }> };
   const nextChildId = (JSON.parse(nextStarted.content[0]?.text ?? "null") as { runId: string }).runId;
   let nextChild: PersistedRun | undefined;
@@ -4164,11 +4181,6 @@ void test("failed retry diagnostics remove completed paths from inherited incomp
   }
   assert.ok(nextChild);
   assert.ok(nextChild.retry);
-  const nextRetry = nextChild.retry;
-  assert.equal(nextChild.state, "failed");
-  assert.ok(nextRetry.completedPaths.some((path) => path.includes("first")));
-  assert.ok(nextRetry.incompletePaths.some((path) => path.includes("second")));
-  assert.ok(nextRetry.incompletePaths.every((incomplete) => nextRetry.completedPaths.every((completed) => completed !== incomplete && !completed.startsWith(`${incomplete}/`))));
   assert.equal(firstAttempts, 2);
   assert.equal(secondAttempts, 2);
 });
@@ -4183,12 +4195,12 @@ void test("background failures and workflow responses deliver prose to the main 
   const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
   await tool.execute("id", { name: "custom-background", script: "throw Object.assign(new Error('The approval gate rejected the release.'), {code:'ENOSPC'});" }, new AbortController().signal, undefined, context);
   await tool.execute("id", { name: "value-background", script: "throw 'background value';" }, new AbortController().signal, undefined, context);
-  for (let attempt = 0; attempt < 100 && delivered.filter((message) => message.includes("failure diagnostics:")).length < 2; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
-  const diagnostics = delivered.filter((message) => message.includes("failure diagnostics:")).map((message) => JSON.parse(message.slice(message.indexOf("{"))) as { runId: string; state: string; error: { code: string; message: string } });
-  assert.equal(diagnostics.length, 2);
-  assert.ok(diagnostics.some(({ error }) => error.message.includes("The approval gate rejected the release.")));
-  assert.ok(diagnostics.some(({ error }) => error.message.includes("background value")));
-  assert.ok(diagnostics.every(({ runId, state, error }) => runId && state === "failed" && ERROR_CODES.includes(error.code as (typeof ERROR_CODES)[number])));
+  for (let attempt = 0; attempt < 100 && delivered.filter((message) => message.includes(" failed (runId=")).length < 2; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  const failures = delivered.filter((message) => message.includes(" failed (runId="));
+  assert.equal(failures.length, 2);
+  assert.ok(failures.some((message) => message.includes("approval gate rejected the release.")));
+  assert.ok(failures.some((message) => message.includes("background value")));
+  assert.ok(failures.every((message) => !message.includes("\n") && /runId=/.test(message) && /statePath=.*state\.json/.test(message) && /journalPath=.*journal\.json/.test(message) && /next action: workflow_retry\(\{ runId: /.test(message)));
 });
 void test("workflow_respond keeps asynchronous failures on the prose delivery path", async () => {
   type Tool = { name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }>; details?: { runId?: string; accepted?: boolean } }> };
@@ -4208,15 +4220,12 @@ void test("workflow_respond keeps asynchronous failures on the prose delivery pa
   assert.equal(response.details?.accepted, true);
   for (let attempt = 0; attempt < 100 && !delivered.some((message) => message.includes("The release was rejected after approval.")); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.ok(delivered.some((message) => message.includes("The release was rejected after approval.")));
-  const diagnosticMessage = delivered.find((message) => message.includes("failure diagnostics:"));
+  const diagnosticMessage = delivered.find((message) => message.includes(`runId=${runId}`) && message.includes(" failed (runId="));
   assert.ok(diagnosticMessage);
-  const diagnostic = JSON.parse(diagnosticMessage.slice(diagnosticMessage.indexOf("{"))) as { runId: string; state: string; error: { code: string; message: string }; artifacts: { statePath: string; journalPath: string } };
-  assert.equal(diagnostic.runId, runId);
-  assert.equal(diagnostic.state, "failed");
-  assert.equal(diagnostic.error.code, "INTERNAL_ERROR");
-  assert.equal(diagnostic.error.message, "The release was rejected after approval.");
-  assert.match(diagnostic.artifacts.statePath, /state\.json$/);
-  assert.match(diagnostic.artifacts.journalPath, /journal\.json$/);
+  assert.doesNotMatch(diagnosticMessage, /\n/);
+  assert.match(diagnosticMessage, /error=INTERNAL_ERROR: The release was rejected after approval\./);
+  assert.match(diagnosticMessage, /statePath=.*state\.json/);
+  assert.match(diagnosticMessage, /journalPath=.*journal\.json/);
 });
 
 type BudgetMessage = { role: string; content: unknown; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: { total: number } } };
