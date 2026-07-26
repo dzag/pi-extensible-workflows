@@ -8,6 +8,7 @@ export interface WorkflowArtifact { extension: ".js" | ".json" | ".md"; content:
 export type WorkflowTui = { stop(): void; start(): void; requestRender(force?: boolean): void };
 
 export function workflowScriptArtifact(script: string): WorkflowArtifact { return { extension: ".js", content: script }; }
+export function workflowPromptArtifact(prompt: string): WorkflowArtifact { return { extension: ".md", content: prompt }; }
 export function workflowResultArtifact(value: JsonValue): WorkflowArtifact { return typeof value === "string" ? { extension: ".md", content: value } : { extension: ".json", content: `${JSON.stringify(value, null, 2)}\n` }; }
 
 async function spawnWorkflowEditor(command: string, path: string): Promise<number | null> {

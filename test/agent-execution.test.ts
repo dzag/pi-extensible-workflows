@@ -887,6 +887,7 @@ void test("writes each ownership-tree transition to persistence", async () => {
   await scheduler.flush();
   assert.equal(writes.at(-1)?.[0] && (writes.at(-1)?.[0] as { state: string }).state, "completed");
   assert.equal((writes.at(-1)?.[0] as { label: string }).label, "worker");
+  assert.equal((writes.at(-1)?.[0] as { prompt: string }).prompt, "work");
 });
 
 void test("scheduler flush waits for terminal ownership persistence", async () => {
