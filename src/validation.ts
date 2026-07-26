@@ -699,7 +699,7 @@ export function validateWorkflowLaunchWithRegistry(params: WorkflowValidationPar
   const aliases = context.modelAliases ?? {};
   const knownModels = context.knownModels ?? context.availableModels;
   const checked = preflight(script, { models: context.availableModels, tools: context.rootTools, agentTypes: new Set(Object.keys(agentDefinitions)), modelAliases: aliases, knownModels, ...(context.settingsPath ? { settingsPath: context.settingsPath } : {}) }, [], metadata);
-  const roleNames = functionName !== undefined || checked.dynamicAgentRoles ? Object.keys(agentDefinitions) : checked.referenced.agentTypes;
+  const roleNames = checked.dynamicAgentRoles ? Object.keys(agentDefinitions) : checked.referenced.agentTypes;
   validateRolePolicies(agentDefinitions, roleNames, context.availableModels, context.rootTools, aliases, knownModels, context.settingsPath);
   return { script, checked, agentDefinitions, projectAgentDefinitions, roleNames, ...(functionName ? { functionName } : {}) };
 }
