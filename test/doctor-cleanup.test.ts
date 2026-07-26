@@ -14,7 +14,7 @@ const snapshot = createLaunchSnapshot({ script: "export const meta={name:'cleanu
 function fixture(): { home: string; cwd: string } { const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-cleanup-")); return { home, cwd: join(home, "project") }; }
 async function makeRun(paths: { home: string; cwd: string }, runId: string, state: RunState, now: number, extra: Record<string, unknown> = {}, sessionId = "session-a"): Promise<RunStore> {
   const store = new RunStore(paths.cwd, sessionId, runId, paths.home);
-  await store.create({ id: runId, workflowName: "cleanup", cwd: paths.cwd, sessionId, state, agents: [], nativeSessions: [], ...extra }, snapshot);
+  await store.create({ id: runId, workflowName: "cleanup", cwd: paths.cwd, sessionId, state, agents: [], agentSessions: [], ...extra }, snapshot);
   if (state === "completed") await store.saveResult(null);
   const old = now - 100 * DAY_MS;
   utimesSync(join(store.directory, "state.json"), old / 1000, old / 1000);
@@ -99,7 +99,7 @@ void test("doctor cleanup rejects malformed nested records before deleting any s
     ["worktrees.json", JSON.stringify([null])],
     ["journal.json", JSON.stringify({ completed: { broken: null } })],
     ["snapshot.json", JSON.stringify({ ...snapshot, settings: { concurrency: "broken" } })],
-    ["state.json", JSON.stringify({ id: "corrupt-record", workflowName: "cleanup", cwd: "PLACEHOLDER", sessionId: "session-a", state: "completed", agents: [null], nativeSessions: [] })],
+    ["state.json", JSON.stringify({ id: "corrupt-record", workflowName: "cleanup", cwd: "PLACEHOLDER", sessionId: "session-a", state: "completed", agents: [null], agentSessions: [] })],
   ];
   for (const [file, contents] of corruptions) {
     const paths = fixture();

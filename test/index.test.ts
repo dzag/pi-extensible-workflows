@@ -9,8 +9,9 @@ import type { AgentSessionEvent, InlineExtension, ToolDefinition } from "@earend
 import { WORKFLOW_TOOL_DESCRIPTION, WORKFLOW_TOOL_PROMPT_SNIPPET } from "../src/host.js";
 import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, disabledResources, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDelivery, formatWorkflowFailureDiagnostics, formatWorkflowPhaseDashboard, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeAgentResourceExclusions, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resourcePatternMatches, resolveAgentResourcePolicy, resolveModelReference, resolveWorkflowSettings, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STALL_THRESHOLD_MS, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, openWorkflowArtifact, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
 import { loadingRegistry } from "../src/registry.js";
-import type { PiSession, SessionInput } from "../src/agent-execution.js";
+import type { SessionInput } from "../src/agent-execution.js";
 import { listRunIds } from "../src/persistence.js";
+import { testTransport, type TestPiSession } from "./test-transport.js";
 
 const typeCheckAgentContext = (context: WorkflowOrchestrationContext): void => {
   void context.agent("prompt");
@@ -234,12 +235,12 @@ void test("workflow_retry links children, replays parallel branches, inherits bu
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-retry-tool-"));
   let sessions = 0;
   let remainingFailures = 2;
-  const createSession = async (): Promise<PiSession> => {
+  const createSession = async (): Promise<TestPiSession> => {
     const attempt = ++sessions;
     return { sessionId: `retry-session-${String(attempt)}`, sessionFile: `/sessions/retry-${String(attempt)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 }), prompt: async () => { if (attempt > 1 && remainingFailures > 0) { remainingFailures -= 1; throw new Error("retry source failure"); } }, steer: async () => {}, dispose() {} };
   };
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   const retry = tools.find(({ name }) => name === "workflow_retry");
   assert.ok(workflow && retry);
@@ -298,19 +299,19 @@ void test("failed retry children retain inherited and newly created named worktr
   const script = `return parallel("named", { inherited: () => withWorktree("inherited", async () => agent("inherited")), fresh: () => withWorktree("fresh", async () => agent("fresh")) });`;
   const snapshot = createLaunchSnapshot({ script, args: null, metadata: { name: "named-retry", description: "named retry" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: ["agent"], agentTypes: [], roles: {}, schemas: [] });
   const root = new RunStore(cwd, "session", "root", home);
-  await root.create({ id: "root", workflowName: "named-retry", cwd, sessionId: "session", state: "failed", agents: [], nativeSessions: [] }, snapshot);
+  await root.create({ id: "root", workflowName: "named-retry", cwd, sessionId: "session", state: "failed", agents: [], agentSessions: [] }, snapshot);
   const inheritedOwner = structuralPath("worktree", "named", "inherited");
   await root.worktree(inheritedOwner);
   const source = new RunStore(cwd, "session", "source", home);
-  await source.create({ id: "source", workflowName: "named-retry", cwd, sessionId: "session", state: "failed", parentRunId: "root", retry: { sourceRunId: "root", lineageRootRunId: "root", completedPaths: [], incompletePaths: [], namedWorktrees: ["inherited"] }, agents: [], nativeSessions: [] }, snapshot);
+  await source.create({ id: "source", workflowName: "named-retry", cwd, sessionId: "session", state: "failed", parentRunId: "root", retry: { sourceRunId: "root", lineageRootRunId: "root", completedPaths: [], incompletePaths: [], namedWorktrees: ["inherited"] }, agents: [], agentSessions: [] }, snapshot);
   await source.worktree(inheritedOwner);
   await source.worktree(structuralPath("worktree", "named", "fresh"));
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  const createSession = async (input: SessionInput): Promise<PiSession> => ({
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => ({
     sessionId: input.sessionLabel, sessionFile: `/sessions/${input.sessionLabel}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
     getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {},
   });
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["agent", "workflow"] } as never, home, async () => {}, createSession);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["agent", "workflow"] } as never, home, async () => {}, testTransport(createSession));
   const retry = tools.find(({ name }) => name === "workflow_retry");
   assert.ok(retry);
   const context = { cwd, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
@@ -332,12 +333,12 @@ void test("workflow_retry rejects concurrent children for one mutable retry line
   let release!: () => void;
   const childEntered = new Promise<void>((resolve) => { entered = resolve; });
   const childRelease = new Promise<void>((resolve) => { release = resolve; });
-  const createSession = async (): Promise<PiSession> => {
+  const createSession = async (): Promise<TestPiSession> => {
     const attempt = ++sessions;
     return { sessionId: `retry-concurrent-${String(attempt)}`, sessionFile: `/sessions/retry-concurrent-${String(attempt)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { if (attempt === 1) throw new Error("source failure"); if (attempt === 2) { entered(); await childRelease; } }, steer: async () => {}, dispose() {} };
   };
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   const retry = tools.find(({ name }) => name === "workflow_retry");
   assert.ok(workflow && retry);
@@ -361,11 +362,11 @@ void test("workflow_retry cleans up child startup when dynamic alias resolution 
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-retry-alias-failure-"));
   let resolverCalls = 0;
   let sessions = 0;
-  const createSession = async (): Promise<PiSession> => ({
+  const createSession = async (): Promise<TestPiSession> => ({
     sessionId: `retry-alias-${String(++sessions)}`, sessionFile: `/sessions/retry-alias-${String(sessions)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { if (sessions === 1) throw new Error("source failure"); }, steer: async () => {}, dispose() {},
   });
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
   registerWorkflowExtension({ version: "1.0.0", headline: "Retry policy", description: "Retry alias policy", modelAliases: { "retry-model": { resolve: () => { resolverCalls += 1; if (resolverCalls === 2) throw new Error("retry resolver failure"); return "openai/gpt"; } } } });
   const workflow = tools.find(({ name }) => name === "workflow");
   const retry = tools.find(({ name }) => name === "workflow_retry");
@@ -389,14 +390,14 @@ void test("workflow_retry blocks removed dynamic aliases from native bare-model 
   const aliases = { gpt: "openai/gpt" };
   const snapshot = createLaunchSnapshot({ script, args: null, metadata: { name: "removed-alias" }, settings: { concurrency: 1, modelAliases: aliases }, modelAliases: aliases, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] });
   const source = new RunStore(home, "session", "source", home);
-  await source.create({ id: "source", workflowName: "removed-alias", cwd: home, sessionId: "session", state: "failed", agents: [], nativeSessions: [], error: { code: "AGENT_FAILED", message: "source failure" } }, snapshot);
+  await source.create({ id: "source", workflowName: "removed-alias", cwd: home, sessionId: "session", state: "failed", agents: [], agentSessions: [], error: { code: "AGENT_FAILED", message: "source failure" } }, snapshot);
   let sessions = 0;
-  const createSession = async (): Promise<PiSession> => {
+  const createSession = async (): Promise<TestPiSession> => {
     sessions += 1;
     return { sessionId: `retry-removed-${String(sessions)}`, sessionFile: `/sessions/retry-removed-${String(sessions)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
   };
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, undefined, createSession);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, undefined, testTransport(createSession));
   const retry = tools.find(({ name }) => name === "workflow_retry");
   assert.ok(retry);
   const context = { cwd: home, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }], getAvailable: () => [{ provider: "openai", id: "gpt" }] }, sessionManager: { getSessionId: () => "session" } };
@@ -421,7 +422,7 @@ void test("workflow_retry rejects unsupported states, routes cross-wired recover
   const createRun = async (id: string, state: PersistedRun["state"], cwd = home, sessionId = "session") => {
     mkdirSync(cwd, { recursive: true });
     const store = new RunStore(cwd, sessionId, id, home);
-    await store.create({ id, workflowName: "retry-compatibility", cwd, sessionId, state, agents: [], nativeSessions: [] }, launch);
+    await store.create({ id, workflowName: "retry-compatibility", cwd, sessionId, state, agents: [], agentSessions: [] }, launch);
     return store;
   };
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
@@ -684,12 +685,12 @@ void test("orchestration lifecycle events cover phase, worktree, retry, checkpoi
   execFileSync("git", ["-C", cwd, "commit", "-qm", "initial"]);
   const events: Array<{ channel: string; data: unknown }> = [];
   let sessions = 0;
-  const createSession = async (): Promise<PiSession> => {
+  const createSession = async (): Promise<TestPiSession> => {
     const attempt = ++sessions;
     return { sessionId: `event-session-${String(attempt)}`, sessionFile: `/sessions/event-${String(attempt)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { if (attempt === 1) throw new Error("PROMPT_SECRET"); }, steer: async () => {}, dispose() {} };
   };
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { events.push({ channel, data }); } } } as never, home, async () => {}, createSession);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { events.push({ channel, data }); } } } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   const result = await workflow.execute("id", { name: "orchestration-events", args: { secret: "ARG_SECRET" }, script: "phase('build'); return withWorktree('OWNER_SECRET', async () => { const value = await agent('PROMPT_SECRET', {label:'worker', retries:1}); const approved = await checkpoint({name:'ship', prompt:'CHECKPOINT_SECRET', context:{secret:'CONTEXT_SECRET'}}); const rejected = await checkpoint({name:'reject', prompt:'Reject?', context:{secret:'REJECT_CONTEXT_SECRET'}}); return {value, approved, rejected}; });", foreground: true }, new AbortController().signal, undefined, { cwd, hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { select: async (prompt: string) => prompt === "Reject?" ? "Reject" : "Approve" } }) as { details?: { value?: unknown } };
@@ -717,7 +718,7 @@ void test("TUI terminal provider recovery shows factual failure and retries with
   let disposals = 0;
   const prompts: Array<{ title: string; options: string[] }> = [];
   let shutdown: (() => Promise<void>) | undefined;
-  const createSession = async (input: SessionInput): Promise<PiSession> => {
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => {
     const attempt = ++sessions;
     const terminal = { role: "assistant", content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: "AUTH_FAILED" };
     const messages: Array<{ role: string; content: unknown; stopReason?: string; errorMessage?: string }> = [terminal];
@@ -725,7 +726,7 @@ void test("TUI terminal provider recovery shows factual failure and retries with
     return { sessionId: `recovery-retry-${String(attempt)}`, sessionFile: `/sessions/recovery-retry-${String(attempt)}.jsonl`, model: { provider: input.model.provider, model: input.model.model }, messages, getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { promptCount += 1; if (promptCount === 2) messages[0] = { role: "assistant", content: [{ type: "text", text: "done" }] }; }, steer: async () => {}, dispose() { disposals += 1; } };
   };
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   const context = { cwd: home, mode: "tui", hasUI: true, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt" }, { provider: "anthropic", id: "opus" }] }, sessionManager: { getSessionId: () => "session" }, ui: { select: async (title: string, options: string[]) => { prompts.push({ title, options }); return "Retry"; } } };
@@ -746,13 +747,13 @@ void test("TUI terminal provider recovery changes model before a fresh attempt",
   const prompts: Array<{ title: string; options: string[] }> = [];
   const inputs: SessionInput[] = [];
   let shutdown: (() => Promise<void>) | undefined;
-  const createSession = async (input: SessionInput): Promise<PiSession> => {
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => {
     inputs.push(input);
     const attempt = ++sessions;
     return { sessionId: `recovery-model-${String(attempt)}`, sessionFile: `/sessions/recovery-model-${String(attempt)}.jsonl`, model: { provider: input.model.provider, model: input.model.model }, messages: [attempt === 1 ? { role: "assistant", content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: "MODEL_UNAVAILABLE" } : { role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
   };
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   let selectCalls = 0;
@@ -771,9 +772,9 @@ void test("TUI terminal provider recovery changes model before a fresh attempt",
 void test("TUI provider recovery aborts the workflow even when workflow code catches the agent failure", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-provider-recovery-abort-"));
   let shutdown: (() => Promise<void>) | undefined;
-  const createSession = async (input: SessionInput): Promise<PiSession> => ({ sessionId: "recovery-abort", sessionFile: "/sessions/recovery-abort.jsonl", model: { provider: input.model.provider, model: input.model.model }, messages: [{ role: "assistant", content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: "PROVIDER_FAILED" }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} });
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => ({ transport: "local", session: { transport: "local", sessionId: "recovery-abort", locator: { sessionFile: "/sessions/recovery-abort.jsonl" } }, model: { provider: input.model.provider, model: input.model.model }, messages: [{ role: "assistant", content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: "PROVIDER_FAILED" }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} });
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   const context = { cwd: home, mode: "tui", hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { select: async () => "Abort workflow" } };
@@ -792,7 +793,7 @@ void test("budget exhaustion emits a budget event and state change, not run fail
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-budget-events-"));
   const events: string[] = [];
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string) { events.push(channel); } } } as never, home, async () => {}, async () => { throw new Error("must not launch"); });
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string) { events.push(channel); } } } as never, home, async () => {}, testTransport(async () => { throw new Error("must not launch"); }));
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   await assert.rejects(workflow.execute("id", { name: "budget-events", script: "return agent('PROMPT_SECRET');", budget: { agentLaunches: { hard: 0 } }, foreground: true }, new AbortController().signal, undefined, { cwd: home, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }), (error: unknown) => error instanceof WorkflowError);
@@ -813,8 +814,8 @@ void test("run control lifecycle events cover pause, resume, and stop", async ()
   const stopReady = new Promise<string>((resolve) => { resolveStop = resolve; });
   let releaseAgent!: () => void;
   const agentReady = new Promise<void>((resolve) => { releaseAgent = resolve; });
-  const createSession = async (): Promise<PiSession> => ({ sessionId: "control-session", sessionFile: "/sessions/control.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { await agentReady; }, steer: async () => {}, dispose() {} });
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { events.push({ channel, data }); if (channel === WORKFLOW_PHASE_CHANGED_EVENT) { const event = data as { phase: string; runId: string }; if (event.phase === "pause") { const action = commands[0]?.handler(`pause ${event.runId}`, context); if (action) void action.then(() => { setImmediate(() => { resolvePause(event.runId); }); }); } if (event.phase === "stop") { const action = commands[0]?.handler(`stop ${event.runId}`, context); if (action) void action.then(() => { setImmediate(() => { resolveStop(event.runId); }); }); } } } } } as never, home, async () => {}, createSession);
+  const createSession = async (): Promise<TestPiSession> => ({ transport: "local", session: { transport: "local", sessionId: "control-session", locator: { sessionFile: "/sessions/control.jsonl" } }, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { await agentReady; }, steer: async () => {}, dispose() {} });
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { events.push({ channel, data }); if (channel === WORKFLOW_PHASE_CHANGED_EVENT) { const event = data as { phase: string; runId: string }; if (event.phase === "pause") { const action = commands[0]?.handler(`pause ${event.runId}`, context); if (action) void action.then(() => { setImmediate(() => { resolvePause(event.runId); }); }); } if (event.phase === "stop") { const action = commands[0]?.handler(`stop ${event.runId}`, context); if (action) void action.then(() => { setImmediate(() => { resolveStop(event.runId); }); }); } } } } } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   const command = commands[0]?.handler;
   assert.ok(workflow && command);
@@ -848,9 +849,9 @@ void test("workflow_stop reports unknown and terminal runs and persists cancella
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   let agentStarted!: () => void;
   const started = new Promise<void>((resolve) => { agentStarted = resolve; });
-  const createSession = async (): Promise<PiSession> => ({ sessionId: "stop-tool-session", sessionFile: "/sessions/stop-tool.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { agentStarted(); await new Promise<void>(() => {}); }, steer: async () => {}, abort: async () => {}, dispose() {} });
+  const createSession = async (): Promise<TestPiSession> => ({ transport: "local", session: { transport: "local", sessionId: "stop-tool-session", locator: { sessionFile: "/sessions/stop-tool.jsonl" } }, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { agentStarted(); await new Promise<void>(() => {}); }, steer: async () => {}, abort: async () => {}, dispose() {} });
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   const stop = tools.find(({ name }) => name === "workflow_stop");
   const resume = tools.find(({ name }) => name === "workflow_resume");
@@ -860,14 +861,14 @@ void test("workflow_stop reports unknown and terminal runs and persists cancella
   assert.deepEqual(JSON.parse(result.content[0].text), { runId: "missing", state: "unknown", stopped: false, reason: "unknown_run" });
   const foreignStore = new RunStore(home, "other-session", "foreign", home);
   const snapshot = createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "foreign" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
-  await foreignStore.create({ id: "foreign", workflowName: "foreign", cwd: home, sessionId: "other-session", state: "running", agents: [], nativeSessions: [] }, snapshot);
+  await foreignStore.create({ id: "foreign", workflowName: "foreign", cwd: home, sessionId: "other-session", state: "running", agents: [], agentSessions: [] }, snapshot);
   const foreignResult = (await stop.execute("id", { runId: "foreign" })) as { content: [{ text: string }] };
   assert.deepEqual(JSON.parse(foreignResult.content[0].text), { runId: "foreign", state: "unknown", stopped: false, reason: "unknown_run" });
   assert.equal((await foreignStore.load()).run.state, "running");
   const terminalStore = new RunStore(home, "session", "terminal", home);
-  await terminalStore.create({ id: "terminal", workflowName: "terminal", cwd: home, sessionId: "session", state: "completed", agents: [], nativeSessions: [] }, snapshot);
+  await terminalStore.create({ id: "terminal", workflowName: "terminal", cwd: home, sessionId: "session", state: "completed", agents: [], agentSessions: [] }, snapshot);
   const exhaustedStore = new RunStore(home, "session", "exhausted", home);
-  await exhaustedStore.create({ id: "exhausted", workflowName: "exhausted", cwd: home, sessionId: "session", state: "budget_exhausted", agents: [], nativeSessions: [] }, snapshot);
+  await exhaustedStore.create({ id: "exhausted", workflowName: "exhausted", cwd: home, sessionId: "session", state: "budget_exhausted", agents: [], agentSessions: [] }, snapshot);
   assert.ok(start);
   await start({}, context);
   const terminalResult = (await stop.execute("id", { runId: "terminal" })) as { content: [{ text: string }] };
@@ -894,7 +895,7 @@ void test("session recovery emits interruption as state change only", async () =
   const runId = "interrupted-run";
   const store = new RunStore(cwd, "session", runId, home);
   const snapshot = createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "interrupted" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] });
-  await store.create({ id: runId, workflowName: "interrupted", cwd, sessionId: "session", state: "running", agents: [], nativeSessions: [] }, snapshot);
+  await store.create({ id: runId, workflowName: "interrupted", cwd, sessionId: "session", state: "running", agents: [], agentSessions: [] }, snapshot);
   const events: Array<{ channel: string; data: unknown }> = [];
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let shutdown: (() => Promise<void>) | undefined;
@@ -930,12 +931,12 @@ void test("resuming a launched trusted-project run keeps per-run concurrency and
   let resolvePause!: (runId: string) => void;
   const pauseReady = new Promise<string>((resolve) => { resolvePause = resolve; });
   const context = { cwd, hasUI: false, isProjectTrusted: () => true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
-  const createSession = async (input: SessionInput): Promise<PiSession> => {
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => {
     inputs.push(input);
     return { sessionId: `project-resume-${String(inputs.length)}`, sessionFile: `/sessions/project-resume-${String(inputs.length)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { await agentReady; }, steer: async () => {}, dispose() {} };
   };
   let shutdown: (() => Promise<void>) | undefined;
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { if (channel !== WORKFLOW_PHASE_CHANGED_EVENT || (data as { phase?: string }).phase !== "pause") return; const event = data as { runId: string }; const action = commands[0]?.handler(`pause ${event.runId}`, context); if (action) void action.then(() => setImmediate(() => { resolvePause(event.runId); })); } } } as never, home, async () => {}, createSession, agentDir);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { if (channel !== WORKFLOW_PHASE_CHANGED_EVENT || (data as { phase?: string }).phase !== "pause") return; const event = data as { runId: string }; const action = commands[0]?.handler(`pause ${event.runId}`, context); if (action) void action.then(() => setImmediate(() => { resolvePause(event.runId); })); } } } as never, home, async () => {}, testTransport(createSession), agentDir);
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   const run = workflow.execute("id", { name: "project-resume-settings", script: "phase('pause'); const value = await agent('work'); phase('after'); return value;", concurrency: 4, foreground: true }, new AbortController().signal, undefined, context);
@@ -997,12 +998,12 @@ void test("registered workflow retries preserve role definitions for agent calls
   mkdirSync(join(agentDir, "pi-extensible-workflows", "roles"), { recursive: true });
   writeFileSync(join(agentDir, "pi-extensible-workflows", "roles", "developer.md"), "Developer role");
   let sessions = 0;
-  const createSession = async (): Promise<PiSession> => {
+  const createSession = async (): Promise<TestPiSession> => {
     const attempt = ++sessions;
     return { sessionId: `registered-role-${String(attempt)}`, sessionFile: `/sessions/registered-role-${String(attempt)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { if (attempt === 1) throw new Error("source failure"); }, steer: async () => {}, dispose() {} };
   };
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession, agentDir);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession), agentDir);
   registerWorkflowExtension({ version: "1.0.0", headline: "Registered role retry", description: "Registered role retry reproduction", functions: { registeredRoleRetry: { description: "Run a developer role", input: { type: "object", additionalProperties: false }, output: { type: "string" }, run: async (_input, context) => { await context.agent("work", { role: "developer", retries: 0 }); return "done"; } } } });
   const workflow = tools.find(({ name }) => name === "workflow");
   const retry = tools.find(({ name }) => name === "workflow_retry");
@@ -1085,11 +1086,11 @@ void test("production launches dynamic aliases through role files with precedenc
   let shutdown: (() => Promise<void>) | undefined;
   try {
     const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-    const createSession = async (input: SessionInput): Promise<PiSession> => {
+    const createSession = async (input: SessionInput): Promise<TestPiSession> => {
       inputs.push(input);
       return { sessionId: `dynamic-${String(inputs.length)}`, sessionFile: `/sessions/dynamic-${String(inputs.length)}`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
     };
-    workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; } } as never, home, async () => {}, createSession, agentDir);
+    workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; } } as never, home, async () => {}, testTransport(createSession), agentDir);
     registerWorkflowExtension({ version: "1.0.0", headline: "Production policy", description: "Production dynamic aliases", modelAliases: { "policy-model": { resolve: () => { shadowedCalls += 1; return "anthropic/opus:high"; } }, "policy-chain": { resolve: () => "policy-model" }, "direct-model": { resolve: () => "anthropic/opus:high" } } });
     const execute = tools.find(({ name }) => name === "workflow")?.execute;
     assert.ok(execute);
@@ -1111,17 +1112,17 @@ void test("production resume reruns dynamic aliases, replays completed work, and
   let replayPath = "";
   await runWorkflow(script, null, { agent: async (_prompt, _options, _signal, identity) => { replayPath = structuralPath("agent", ...identity.structuralPath, `callsite:${identity.callSite}`, `occurrence:${String(identity.occurrence)}`); return "historical"; } }).result;
   const store = new RunStore(cwd, "session", "run", home);
-  await store.create({ id: "run", workflowName: "dynamic-resume", cwd, sessionId: "session", state: "interrupted", agents: [], nativeSessions: [] }, createLaunchSnapshot({ script, args: null, metadata: { name: "dynamic-resume" }, settings: { concurrency: 1, modelAliases: { "dynamic-model": "old/model" } }, modelAliases: { "dynamic-model": "old/model" }, models: ["root/model", "old/model"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+  await store.create({ id: "run", workflowName: "dynamic-resume", cwd, sessionId: "session", state: "interrupted", agents: [], agentSessions: [] }, createLaunchSnapshot({ script, args: null, metadata: { name: "dynamic-resume" }, settings: { concurrency: 1, modelAliases: { "dynamic-model": "old/model" } }, modelAliases: { "dynamic-model": "old/model" }, models: ["root/model", "old/model"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
   await store.complete(replayPath, "historical");
   const inputs: SessionInput[] = [];
   let resolverCalls = 0;
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
-    const createSession = async (input: SessionInput): Promise<PiSession> => {
+    const createSession = async (input: SessionInput): Promise<TestPiSession> => {
       inputs.push(input);
       return { sessionId: `resume-${String(inputs.length)}`, sessionFile: `/sessions/resume-${String(inputs.length)}`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
     };
-    workflowExtension({ registerTool() {}, registerCommand(_name: string, value: { handler: (args: string, ctx: unknown) => Promise<void> }) { command = value.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], ui: {} } as never, home, async () => {}, createSession, agentDir);
+    workflowExtension({ registerTool() {}, registerCommand(_name: string, value: { handler: (args: string, ctx: unknown) => Promise<void> }) { command = value.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], ui: {} } as never, home, async () => {}, testTransport(createSession), agentDir);
     registerWorkflowExtension({ version: "1.0.0", headline: "Resume policy", description: "Resume dynamic aliases", modelAliases: { "dynamic-model": { resolve: () => { resolverCalls += 1; return "new/model"; } } } });
     const context = { cwd, hasUI: false, model: { provider: "root", id: "model" }, modelRegistry: { getAll: () => [{ provider: "root", id: "model" }, { provider: "old", id: "model" }, { provider: "new", id: "model" }], getAvailable: () => [{ provider: "root", id: "model" }, { provider: "new", id: "model" }] }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
     assert.ok(start && command);
@@ -1142,7 +1143,7 @@ void test("production budget resume cancellation aborts a dynamic alias resolver
   const cwd = join(home, "project");
   mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
   const store = new RunStore(cwd, "session", "run", home);
-  await store.create({ id: "run", workflowName: "cancel-resume", cwd, sessionId: "session", state: "budget_exhausted", agents: [], nativeSessions: [] }, createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "cancel-resume" }, settings: { concurrency: 1, modelAliases: { "cancel-model": "root/model" } }, modelAliases: { "cancel-model": "root/model" }, models: ["root/model"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+  await store.create({ id: "run", workflowName: "cancel-resume", cwd, sessionId: "session", state: "budget_exhausted", agents: [], agentSessions: [] }, createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "cancel-resume" }, settings: { concurrency: 1, modelAliases: { "cancel-model": "root/model" } }, modelAliases: { "cancel-model": "root/model" }, models: ["root/model"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
   let markStarted!: () => void;
   const started = new Promise<void>((resolve) => { markStarted = resolve; });
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
@@ -1180,7 +1181,7 @@ void test("inline workflow args cross the production tool boundary and omitted a
 void test("workflow progress warns after ten minutes of agent silence and resets on events", () => {
   const now = 12 * 60 * 60 * 1000;
   const agent = { id: "run:1", name: "worker", path: "run:1", state: "running" as const, model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1, activity: { kind: "text" as const, text: "responding" }, lastEventAt: now - WORKFLOW_AGENT_STALL_THRESHOLD_MS + 1 };
-  const run = { id: "run", workflowName: "stalling", cwd: "/repo", sessionId: "session", state: "running" as const, agents: [agent], nativeSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
+  const run = { id: "run", workflowName: "stalling", cwd: "/repo", sessionId: "session", state: "running" as const, agents: [agent], agentSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
   assert.doesNotMatch(formatWorkflowProgress(run, "◇", undefined, now), /stalled\?/);
   const atThreshold = { ...run, agents: [{ ...agent, lastEventAt: now - WORKFLOW_AGENT_STALL_THRESHOLD_MS }] } as Parameters<typeof formatWorkflowProgress>[0];
   assert.match(formatWorkflowProgress(atThreshold, "◇", undefined, now), /responding - stalled\? 10m/);
@@ -1200,7 +1201,7 @@ void test("workflow progress warns after ten minutes of agent silence and resets
   assert.match(formatWorkflowPhaseDashboard(stalled, snapshot, 120, {}, undefined, now).join("\n"), /stalled\? 12m/);
 });
 void test("workflow progress shows active shell operations without command contents", () => {
-  const run = { id: "run", workflowName: "shell-progress", cwd: "/repo", sessionId: "session", state: "running" as const, agents: [], nativeSessions: [], activeShells: 2 } as Parameters<typeof formatWorkflowProgress>[0];
+  const run = { id: "run", workflowName: "shell-progress", cwd: "/repo", sessionId: "session", state: "running" as const, agents: [], agentSessions: [], activeShells: 2 } as Parameters<typeof formatWorkflowProgress>[0];
   const progress = formatWorkflowProgress(run);
   assert.match(progress, /shell \[running\] \(2 active\)/);
   assert.doesNotMatch(progress, /command-secret/);
@@ -1209,7 +1210,7 @@ void test("workflow progress shows active shell operations without command conte
   assert.doesNotMatch(formatWorkflowProgress(legacy), /shell \[running\]/);
 });
 void test("navigator keeps agent rows compact while preserving identity and state", () => {
-  const run = { id: "run", workflowName: "policy", cwd: "/repo", sessionId: "session", state: "running", agents: [{ id: "run:1", name: "review", path: "run:1", state: "running", role: "reviewer", model: { provider: "anthropic", model: "opus", thinking: "high" }, tools: ["read", "grep"], attempts: 1 }], nativeSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
+  const run = { id: "run", workflowName: "policy", cwd: "/repo", sessionId: "session", state: "running", agents: [{ id: "run:1", name: "review", path: "run:1", state: "running", role: "reviewer", model: { provider: "anthropic", model: "opus", thinking: "high" }, tools: ["read", "grep"], attempts: 1 }], agentSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
   const dashboard = formatNavigatorDashboard(run, [], []);
   assert.match(dashboard, /⠦ review · running/);
   assert.doesNotMatch(dashboard, /model=|requested=|tools=|role=/);
@@ -1218,7 +1219,7 @@ void test("navigator keeps agent rows compact while preserving identity and stat
 void test("compact TUI hides budgets without effective limits", () => {
   const snapshot = createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "render" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
   const render = (budget: unknown): string => {
-    const run = { id: "run", workflowName: "render", cwd: "/repo", sessionId: "session", state: "running", agents: [], nativeSessions: [], ...(budget === undefined ? {} : { budget }) } as Parameters<typeof formatWorkflowProgress>[0];
+    const run = { id: "run", workflowName: "render", cwd: "/repo", sessionId: "session", state: "running", agents: [], agentSessions: [], ...(budget === undefined ? {} : { budget }) } as Parameters<typeof formatWorkflowProgress>[0];
     return [formatWorkflowProgress(run), formatNavigatorDashboard(run, [], []), formatNavigatorRun({ run, snapshot }, [], [])].join("\n");
   };
   for (const budget of [undefined, {}, { tokens: {} }]) assert.doesNotMatch(render(budget), /Budget|unlimited|tokens|costUsd|durationMs|agentLaunches/);
@@ -1237,7 +1238,7 @@ void test("navigator uses persisted labels and model fallbacks across views", ()
   const run = { id: "run", workflowName: "labels", cwd: "/repo", sessionId: "session", state: "running", agents: [
     { id: "run:1", name: "stale-name", label: "explicit label", path: "run:1", state: "running", model: { provider: "provider", model: "worker" }, tools: [], attempts: 1 },
     { id: "run:2", name: "worker", path: "run:2", state: "completed", parentId: "run:1", model: { provider: "provider", model: "worker" }, tools: [], attempts: 1 },
-  ], nativeSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
+  ], agentSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
   const dashboard = formatNavigatorDashboard(run, [], []);
   const progress = formatWorkflowProgress(run);
   const detail = formatNavigatorRun({ run, snapshot: createLaunchSnapshot({ script: "return 1;", args: null, metadata: { name: "labels" }, settings: DEFAULT_SETTINGS, models: ["provider/worker"], tools: [], agentTypes: [], schemas: [] }) }, [], []);
@@ -1270,8 +1271,8 @@ void test("foreground workflow progress reports a shell waiting after agents set
   const releasePath = join(home, "shell-release");
   const command = `${process.execPath} -e ${JSON.stringify(`const fs=require("node:fs");fs.writeFileSync(${JSON.stringify(startedPath)},"started");const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(releasePath)})){clearInterval(timer);process.exit(0);}},1);`)}`;
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  const createSession = async (): Promise<PiSession> => ({ sessionId: "shell-progress-agent", sessionFile: "/sessions/shell-progress-agent.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} });
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
+  const createSession = async (): Promise<TestPiSession> => ({ transport: "local", session: { transport: "local", sessionId: "shell-progress-agent", locator: { sessionFile: "/sessions/shell-progress-agent.jsonl" } }, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} });
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   const updates: PersistedRun[] = [];
@@ -1301,7 +1302,7 @@ void test("foreground workflow reports parallel agent activities together", { ti
   let session = 0;
   let release!: () => void;
   const hold = new Promise<void>((resolve) => { release = resolve; });
-  const createSession = async (): Promise<PiSession> => {
+  const createSession = async (): Promise<TestPiSession> => {
     const id = ++session;
     const toolName = id === 1 ? "read" : "grep";
     let listener: ((event: AgentSessionEvent) => void) | undefined;
@@ -1319,7 +1320,7 @@ void test("foreground workflow reports parallel agent activities together", { ti
       dispose() {},
     };
   };
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "read", "grep"], on() {} } as never, home, async () => {}, createSession);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "read", "grep"], on() {} } as never, home, async () => {}, testTransport(createSession));
   const tool = tools.find(({ name }) => name === "workflow");
   assert.ok(tool);
   const seen = new Set<string>();
@@ -1339,7 +1340,7 @@ void test("foreground workflow reports parallel agent activities together", { ti
 });
 
 void test("workflow progress keeps each agent to one line with latest tool", () => {
-  const run = { id: "run", workflowName: "live", cwd: "/repo", sessionId: "session", state: "running", phase: "work", agents: [{ id: "run:1", name: "review", path: "run:1", state: "running", model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" }, tools: ["read"], attempts: 1, accounting: { input: 120, output: 30, cacheRead: 40, cacheWrite: 0, cost: 0.01 }, toolCalls: [{ id: "call-1", name: "ls", state: "completed" }, { id: "call-2", name: "read", state: "running" }] }], nativeSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
+  const run = { id: "run", workflowName: "live", cwd: "/repo", sessionId: "session", state: "running", phase: "work", agents: [{ id: "run:1", name: "review", path: "run:1", state: "running", model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" }, tools: ["read"], attempts: 1, accounting: { input: 120, output: 30, cacheRead: 40, cacheWrite: 0, cost: 0.01 }, toolCalls: [{ id: "call-1", name: "ls", state: "completed" }, { id: "call-2", name: "read", state: "running" }] }], agentSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
   const rendered = formatWorkflowProgress(run);
   assert.match(rendered, /#1 ◇ review \[running\] ◇ read/);
   assert.doesNotMatch(rendered, /Model:/);
@@ -1373,7 +1374,7 @@ void test("workflow progress applies semantic styles without coloring agent name
     { id: "run:3", name: "waiting", path: "run:3", state: "queued", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
     { id: "run:4", name: "failed", path: "run:4", state: "failed", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
     { id: "run:5", name: "cancelled", path: "run:5", state: "cancelled", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
-  ], nativeSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
+  ], agentSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
   const progress = formatWorkflowProgress(run, "@", styles);
   assert.match(progress, /<bold><accent>Workflow: styled/);
   assert.match(progress, /<warning>!<\/warning>/);
@@ -1400,7 +1401,7 @@ void test("workflow cards group structural scopes with stable creation order", (
     { id: "run:2", name: "developer", path: "run:2", state: "running", structuralPath: ["issues", "issue-66"], parentBreadcrumb: "developUntilApproved", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
     { id: "run:3", name: "reviewer", path: "run:3", state: "running", structuralPath: ["issues", "issue-65"], parentBreadcrumb: "developUntilApproved", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
     { id: "run:4", name: "child", path: "run:4", state: "running", parentId: "run:3", structuralPath: ["issues", "issue-65"], parentBreadcrumb: "developUntilApproved", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
-  ], nativeSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
+  ], agentSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
   const progress = formatWorkflowProgress(run);
   const dashboard = formatNavigatorDashboard(run, [], [{ owner: "worktree/named/issue-65", branch: "hidden", path: "/hidden", cwd: "/hidden", base: "base" }]);
   assert.match(progress, /issues > issue-65 > developUntilApproved/);
@@ -1415,7 +1416,7 @@ void test("workflow progress keeps top-level agents separate from review-loop gr
   const run = { id: "run", workflowName: "mixed", cwd: "/repo", sessionId: "session", state: "running", agents: [
     { id: "run:1", name: "scout", path: "run:1", state: "completed", structuralPath: [], model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
     { id: "run:2", name: "developer", path: "run:2", state: "running", structuralPath: [], parentBreadcrumb: "reviewLoop.developUntilApproved", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
-  ], nativeSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
+  ], agentSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
   const progress = formatWorkflowProgress(run);
   assert.match(progress, / {2}Agents\n {4}#1 ✓ scout \[completed\]/);
   assert.match(progress, / {2}reviewLoop\.developUntilApproved\n {4}#2 ◇ developer \[running\]/);
@@ -1426,18 +1427,18 @@ void test("session-scoped navigator shows metadata and confirms terminal deletio
   const cwd = join(home, "project");
   const snapshot = createLaunchSnapshot({ script: "export const meta={name:'nav',description:'nav'}", args: null, metadata: { name: "nav", description: "nav" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: ["read"], agentTypes: [], schemas: [] });
   const store = new RunStore(cwd, "session-a", "run-a", home);
-  await store.create({ id: "run-a", workflowName: "nav", cwd, sessionId: "session-a", state: "completed", phase: "review", agents: [{ id: "run-a:1", name: "reviewer", path: "run-a:1", state: "failed", role: "reviewer", model: { provider: "openai", model: "gpt", thinking: "medium" }, tools: ["read"], attempts: 2, attemptDetails: [{ attempt: 2, sessionId: "native-a", sessionFile: "/pi/native-a.jsonl", error: { code: "AGENT_FAILED", message: "boom" }, accounting: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5 } }], accounting: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5 } }], nativeSessions: [{ sessionId: "native-a", sessionFile: "/pi/native-a.jsonl" }] }, snapshot);
+  await store.create({ id: "run-a", workflowName: "nav", cwd, sessionId: "session-a", state: "completed", phase: "review", agents: [{ id: "run-a:1", name: "reviewer", path: "run-a:1", state: "failed", role: "reviewer", model: { provider: "openai", model: "gpt", thinking: "medium" }, tools: ["read"], attempts: 2, attemptDetails: [{ attempt: 2, transport: "local", session: { transport: "local", sessionId: "native-a", locator: { sessionFile: "/pi/native-a.jsonl" } }, setup: { hookNames: [], model: { provider: "openai", model: "gpt" }, tools: [], cwd: "/repo" }, error: { code: "AGENT_FAILED", message: "boom" }, accounting: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5 } }], accounting: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5 } }], agentSessions: [{ transport: "local", sessionId: "native-a", locator: { sessionFile: "/pi/native-a.jsonl" } }] }, snapshot);
   const same = new RunStore(cwd, "session-a", "run-c", home);
-  await same.create({ id: "run-c", workflowName: "nav", cwd, sessionId: "session-a", state: "awaiting_input", agents: [], nativeSessions: [] }, snapshot);
+  await same.create({ id: "run-c", workflowName: "nav", cwd, sessionId: "session-a", state: "awaiting_input", agents: [], agentSessions: [] }, snapshot);
   await same.awaitCheckpoint({ path: "checkpoint/ship", name: "ship", prompt: "Ship?", context: null });
   const other = new RunStore(cwd, "session-b", "run-b", home);
-  await other.create({ id: "run-b", workflowName: "other", cwd, sessionId: "session-b", state: "completed", agents: [], nativeSessions: [] }, snapshot);
+  await other.create({ id: "run-b", workflowName: "other", cwd, sessionId: "session-b", state: "completed", agents: [], agentSessions: [] }, snapshot);
   const rendered = formatNavigatorRun(await store.load(), [], [{ owner: "worktree/named/reviewer", branch: "pi-extensible-workflows/run-a/tree", path: "/worktree", cwd: "/worktree/project", base: "abc" }]);
   assert.match(rendered, /Phase: review/);
   assert.match(rendered, /reviewer state=failed model=openai\/gpt:medium role=reviewer tools=read attempts=2 retries=1/);
   assert.match(rendered, /error=AGENT_FAILED: boom/);
   assert.match(rendered, /Worktrees: 1/);
-  assert.match(rendered, /Native Pi transcripts: 1/);
+  assert.match(rendered, /Agent sessions: 1/);
   assert.doesNotMatch(rendered, /worktree\/named|branch=|native-a: \/pi\/native-a|\/worktree/);
 
   const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
@@ -1447,8 +1448,10 @@ void test("session-scoped navigator shows metadata and confirms terminal deletio
   const copied: string[] = [];
   const pi = { registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["read", "workflow"] };
   workflowExtension(pi as never, home, async (value) => { copied.push(value); });
+  const actionRuns: Array<{ attempt: number; sessionId: string | undefined; live: boolean }> = [];
+  registerWorkflowExtension({ version: "1.0.0", headline: "Navigator actions", description: "Navigator action test", agentAttemptActions: { inspectLatest: { label: "Inspect latest attempt", visible: (context) => context.attempt.attempt === 2, run: (context) => { actionRuns.push({ attempt: context.attempt.attempt, sessionId: context.session?.sessionId, live: context.liveSession !== undefined }); } } } });
   let selectCall = 0;
-  const ctx = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "session-a" }, ui: { notify() {}, select: async (prompt: string, options: string[]) => { prompts.push(prompt); selections.push(options); selectCall += 1; if (selectCall === 1) return options.find((option) => option.includes("completed")); if (selectCall === 2) return "Agents..."; if (selectCall === 3) return options.find((option) => option.includes("#1")); if (selectCall === 4) return "Copy agent ID"; if (selectCall === 5) return "Back"; return prompt === "Workflows\n" ? "Close" : "Back"; }, confirm: async () => deleteConfirmed } };
+  const ctx = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "session-a" }, ui: { notify() {}, select: async (prompt: string, options: string[]) => { prompts.push(prompt); selections.push(options); selectCall += 1; if (selectCall === 1) return options.find((option) => option.includes("completed")); if (selectCall === 2) return "Agents..."; if (selectCall === 3) return options.find((option) => option.includes("#1")); if (selectCall === 4) return "Inspect latest attempt"; if (selectCall === 5) return "Back"; return prompt === "Workflows\n" ? "Close" : "Back"; }, confirm: async () => deleteConfirmed } };
   const command = commands[0]?.handler;
   assert.ok(command);
   await command("", ctx as never);
@@ -1461,7 +1464,8 @@ void test("session-scoped navigator shows metadata and confirms terminal deletio
   assert.match(dashActions, /Agents\.\.\./);
   assert.doesNotMatch(dashActions, /Transcript paths|View transcript|Copy run path|Copy run ID|Copy branch|Copy worktree path/);
   assert.doesNotMatch(`${prompts.join("\n")}\n${selections.flat().join("\n")}`, /other|\/pi\/native-a/);
-  assert.deepEqual(copied, ["run-a:1"]);
+  assert.deepEqual(copied, []);
+  assert.deepEqual(actionRuns, [{ attempt: 2, sessionId: "native-a", live: false }]);
   assert.doesNotMatch(`${prompts.join("\n")}\n${selections.flat().join("\n")}`, /other/);
   await command("delete run-a", ctx as never);
   assert.equal(existsSync(store.directory), true);
@@ -1484,7 +1488,7 @@ void test("TUI navigator exposes agent-scoped worktree actions without transcrip
   const transcriptB = join(home, "transcript-b.jsonl");
   const store = new RunStore(repo, "session", runId, home);
   const snapshot = createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "copy" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
-  await store.create({ id: runId, workflowName: "copy", cwd: repo, sessionId: "session", state: "completed", agents: [{ id: "agent", name: "agent", path: "agent", state: "completed", structuralPath: ["issues", "issue-65"], parentBreadcrumb: "developUntilApproved", worktreeOwner: "copy-owner", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 2, attemptDetails: [{ attempt: 1, sessionId: "native-a", sessionFile: transcriptA, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } }, { attempt: 2, sessionId: "native-b", sessionFile: transcriptB, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } }] }], nativeSessions: [] }, snapshot);
+  await store.create({ id: runId, workflowName: "copy", cwd: repo, sessionId: "session", state: "completed", agents: [{ id: "agent", name: "agent", path: "agent", state: "completed", structuralPath: ["issues", "issue-65"], parentBreadcrumb: "developUntilApproved", worktreeOwner: "copy-owner", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 2, attemptDetails: [{ attempt: 1, transport: "local", session: { transport: "local", sessionId: "native-a", locator: { sessionFile: transcriptA } }, setup: { hookNames: [], model: { provider: "openai", model: "gpt" }, tools: [], cwd: "/repo" }, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } }, { attempt: 2, transport: "local", session: { transport: "local", sessionId: "native-b", locator: { sessionFile: transcriptB } }, setup: { hookNames: [], model: { provider: "openai", model: "gpt" }, tools: [], cwd: "/repo" }, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } }] }], agentSessions: [] }, snapshot);
   const worktree = await store.worktree("copy-owner");
   const copied: string[] = [];
   const notifications: Array<{ message: string; type: string | undefined }> = [];
@@ -1582,7 +1586,7 @@ void test("navigator stop asks for confirmation before cancelling", async () => 
   const cwd = join(home, "project");
   const store = new RunStore(cwd, "session", "run", home);
   const snapshot = createLaunchSnapshot({ script: "export const meta={name:'live',description:'live'}", args: null, metadata: { name: "live", description: "live" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
-  await store.create({ id: "run", workflowName: "live", cwd, sessionId: "session", state: "running", agents: [], nativeSessions: [] }, snapshot);
+  await store.create({ id: "run", workflowName: "live", cwd, sessionId: "session", state: "running", agents: [], agentSessions: [] }, snapshot);
   await store.saveOwnership([{ id: "run:1", label: "worker", state: "running", options: { label: "worker", cwd, tools: [] } }]);
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
@@ -1635,7 +1639,7 @@ void test("navigator stop stays visible through cleanup and ignores repeated inp
   const cwd = join(home, "project");
   const store = new RunStore(cwd, "session", "run", home);
   const snapshot = createLaunchSnapshot({ script: "export const meta={name:'live',description:'live'}", args: null, metadata: { name: "live", description: "live" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
-  await store.create({ id: "run", workflowName: "live", cwd, sessionId: "session", state: "running", agents: [], nativeSessions: [] }, snapshot);
+  await store.create({ id: "run", workflowName: "live", cwd, sessionId: "session", state: "running", agents: [], agentSessions: [] }, snapshot);
   await store.saveOwnership([{ id: "run:1", label: "worker", state: "running", options: { label: "worker", cwd, tools: [] } }]);
   let releaseCleanup = () => {};
   let cleanupStarted = false;
@@ -1706,7 +1710,7 @@ void test("non-TUI navigator Stop confirms before cancelling", async () => {
   const cwd = join(home, "project");
   const store = new RunStore(cwd, "session", "run", home);
   const snapshot = createLaunchSnapshot({ script: "return true", args: null, metadata: { name: "select-stop" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
-  await store.create({ id: "run", workflowName: "select-stop", cwd, sessionId: "session", state: "running", agents: [], nativeSessions: [] }, snapshot);
+  await store.create({ id: "run", workflowName: "select-stop", cwd, sessionId: "session", state: "running", agents: [], agentSessions: [] }, snapshot);
   const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let selectCalls = 0;
@@ -1741,7 +1745,7 @@ void test("navigator dashboard auto-refreshes the selected run", async () => {
   const cwd = join(home, "project");
   const store = new RunStore(cwd, "session", "run", home);
   const snapshot = createLaunchSnapshot({ script: "export const meta={name:'live',description:'live'}", args: null, metadata: { name: "live", description: "live" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
-  await store.create({ id: "run", workflowName: "live", cwd, sessionId: "session", state: "running", phase: "before", agents: [], nativeSessions: [] }, snapshot);
+  await store.create({ id: "run", workflowName: "live", cwd, sessionId: "session", state: "running", phase: "before", agents: [], agentSessions: [] }, snapshot);
   const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
   workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
   let selectCall = 0;
@@ -1789,7 +1793,7 @@ void test("navigator returns to the picker after cancelling a recovered run dash
   const cwd = join(home, "project");
   const store = new RunStore(cwd, "session", "run", home);
   const snapshot = createLaunchSnapshot({ script: "return true", args: null, metadata: { name: "actions" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
-  await store.create({ id: "run", workflowName: "actions", cwd, sessionId: "session", state: "running", agents: [], nativeSessions: [] }, snapshot);
+  await store.create({ id: "run", workflowName: "actions", cwd, sessionId: "session", state: "running", agents: [], agentSessions: [] }, snapshot);
   const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   const notices: string[] = [];
@@ -1828,7 +1832,7 @@ void test("navigator keeps consecutive checkpoint decisions in the same dashboar
   const cwd = join(home, "project");
   const store = new RunStore(cwd, "session", "run", home);
   const snapshot = createLaunchSnapshot({ script: "return true", args: null, metadata: { name: "checkpoints" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
-  await store.create({ id: "run", workflowName: "checkpoints", cwd, sessionId: "session", state: "awaiting_input", agents: [], nativeSessions: [] }, snapshot);
+  await store.create({ id: "run", workflowName: "checkpoints", cwd, sessionId: "session", state: "awaiting_input", agents: [], agentSessions: [] }, snapshot);
   await store.awaitCheckpoint({ path: "checkpoint/ship", name: "ship", prompt: "Ship?", context: null });
   await store.awaitCheckpoint({ path: "checkpoint/deploy", name: "deploy", prompt: "Deploy?", context: null });
   const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
@@ -1886,8 +1890,8 @@ void test("navigator returns to the picker after deleting a run", async () => {
   const snapshot = createLaunchSnapshot({ script: "return true", args: null, metadata: { name: "delete", }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
   const oldStore = new RunStore(cwd, "session", "old", home);
   const keepStore = new RunStore(cwd, "session", "keep", home);
-  await oldStore.create({ id: "old", workflowName: "old", cwd, sessionId: "session", state: "completed", agents: [], nativeSessions: [] }, snapshot);
-  await keepStore.create({ id: "keep", workflowName: "keep", cwd, sessionId: "session", state: "completed", agents: [], nativeSessions: [] }, snapshot);
+  await oldStore.create({ id: "old", workflowName: "old", cwd, sessionId: "session", state: "completed", agents: [], agentSessions: [] }, snapshot);
+  await keepStore.create({ id: "keep", workflowName: "keep", cwd, sessionId: "session", state: "completed", agents: [], agentSessions: [] }, snapshot);
   const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
   const pickerOptions: string[][] = [];
   let pickerCalls = 0;
@@ -1918,7 +1922,7 @@ void test("navigator opens the workflow script in the configured external editor
   const store = new RunStore(cwd, "session", "run", home);
   const script = ["// SCRIPT_START", ...Array.from({ length: 20 }, (_, index) => `const line${String(index)} = ${String(index)};`), "// SCRIPT_END"].join("\n");
   const snapshot = createLaunchSnapshot({ script, args: null, metadata: { name: "viewer", description: "viewer" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
-  await store.create({ id: "run", workflowName: "viewer", cwd, sessionId: "session", state: "running", phase: "view", agents: [], nativeSessions: [] }, snapshot);
+  await store.create({ id: "run", workflowName: "viewer", cwd, sessionId: "session", state: "running", phase: "view", agents: [], agentSessions: [] }, snapshot);
   const editorPath = join(home, "fake-editor.sh");
   const editedPath = join(home, "edited-content");
   const openedPath = join(home, "opened-path");
@@ -1989,7 +1993,7 @@ void test("navigator opens a persisted top-level agent result in the external ed
   const store = new RunStore(cwd, "session", "run", home);
   const resultPath = "agent/reviewer/callsite%3Areviewer/occurrence%3A1";
   const snapshot = createLaunchSnapshot({ script: "return true", args: null, metadata: { name: "agent-result" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
-  await store.create({ id: "run", workflowName: "agent-result", cwd, sessionId: "session", state: "completed", phase: "review", agents: [{ id: "agent", name: "reviewer", path: "agent", state: "completed", resultPath, structuralPath: ["reviewer"], model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 }], nativeSessions: [] }, snapshot);
+  await store.create({ id: "run", workflowName: "agent-result", cwd, sessionId: "session", state: "completed", phase: "review", agents: [{ id: "agent", name: "reviewer", path: "agent", state: "completed", resultPath, structuralPath: ["reviewer"], model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 }], agentSessions: [] }, snapshot);
   await store.complete(resultPath, { answer: 42 });
   const editorPath = join(home, "fake-editor.sh");
   const editedPath = join(home, "edited-content");
@@ -2060,9 +2064,9 @@ void test("navigator omits transcript actions outside and inside Herdr", async (
       mkdirSync(cwd);
       const snapshot = createLaunchSnapshot({ script: "return true", args: null, metadata: { name: "navigator" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
       const noAgent = new RunStore(cwd, "session", "no-agent-run", home);
-      await noAgent.create({ id: "no-agent-run", workflowName: "no-agent-run", cwd, sessionId: "session", state: "completed", agents: [], nativeSessions: [{ sessionId: "native", sessionFile: join(home, "native.jsonl") }] }, snapshot);
+      await noAgent.create({ id: "no-agent-run", workflowName: "no-agent-run", cwd, sessionId: "session", state: "completed", agents: [], agentSessions: [{ transport: "local", sessionId: "native", locator: { sessionFile: join(home, "native.jsonl") } }] }, snapshot);
       const withAgent = new RunStore(cwd, "session", "agent-run", home);
-      await withAgent.create({ id: "agent-run", workflowName: "agent-run", cwd, sessionId: "session", state: "completed", agents: [{ id: "agent", name: "agent", path: "agent", state: "completed", resultPath: "agent/result", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1, attemptDetails: [{ attempt: 1, sessionId: "native-agent", sessionFile: join(home, "agent.jsonl"), accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } }] }], nativeSessions: [] }, snapshot);
+      await withAgent.create({ id: "agent-run", workflowName: "agent-run", cwd, sessionId: "session", state: "completed", agents: [{ id: "agent", name: "agent", path: "agent", state: "completed", resultPath: "agent/result", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1, attemptDetails: [{ attempt: 1, transport: "local", session: { transport: "local", sessionId: "native-agent", locator: { sessionFile: join(home, "agent.jsonl") } }, setup: { hookNames: [], model: { provider: "openai", model: "gpt" }, tools: [], cwd: "/repo" }, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } }] }], agentSessions: [] }, snapshot);
       await withAgent.complete("agent/result", { done: true });
       const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
       workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
@@ -2116,11 +2120,11 @@ void test("navigator attention-orders runs, disambiguates names, shows breadcrum
   const cwd = join(home, "project");
   const snapshot = createLaunchSnapshot({ script: "export const meta={name:'build',description:'b'}", args: null, metadata: { name: "build", description: "b" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: ["read"], agentTypes: [], schemas: [] });
   const storeA = new RunStore(cwd, "s", "aaaa-1111-2222-3333", home);
-  await storeA.create({ id: "aaaa-1111-2222-3333", workflowName: "build", cwd, sessionId: "s", state: "completed", agents: [{ id: "a:1", name: "scout", path: "a:1", state: "completed", model: { provider: "openai", model: "gpt" }, tools: ["read"], attempts: 1, accounting: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: 0.01 } }], nativeSessions: [] }, snapshot);
+  await storeA.create({ id: "aaaa-1111-2222-3333", workflowName: "build", cwd, sessionId: "s", state: "completed", agents: [{ id: "a:1", name: "scout", path: "a:1", state: "completed", model: { provider: "openai", model: "gpt" }, tools: ["read"], attempts: 1, accounting: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: 0.01 } }], agentSessions: [] }, snapshot);
   const storeB = new RunStore(cwd, "s", "bbbb-1111-2222-3333", home);
-  await storeB.create({ id: "bbbb-1111-2222-3333", workflowName: "build", cwd, sessionId: "s", state: "running", phase: "review", agents: [{ id: "b:1", name: "root", path: "b:1", state: "completed", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 }, { id: "b:2", name: "child", path: "b:2", state: "running", parentId: "b:1", role: "reviewer", model: { provider: "openai", model: "gpt", thinking: "high" }, tools: ["read"], attempts: 1, attemptDetails: [{ attempt: 1, sessionId: "active", sessionFile: "/sessions/active.jsonl", accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } }], accounting: { input: 10, output: 5, cacheRead: 20, cacheWrite: 2, cost: 0.04 }, toolCalls: [{ id: "tc1", name: "read", state: "running" }], activity: { kind: "reasoning", text: "checking source" } }], nativeSessions: [{ sessionId: "active", sessionFile: "/sessions/active.jsonl" }] }, snapshot);
+  await storeB.create({ id: "bbbb-1111-2222-3333", workflowName: "build", cwd, sessionId: "s", state: "running", phase: "review", agents: [{ id: "b:1", name: "root", path: "b:1", state: "completed", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 }, { id: "b:2", name: "child", path: "b:2", state: "running", parentId: "b:1", role: "reviewer", model: { provider: "openai", model: "gpt", thinking: "high" }, tools: ["read"], attempts: 1, attemptDetails: [{ attempt: 1, transport: "local", session: { transport: "local", sessionId: "active", locator: { sessionFile: "/sessions/active.jsonl" } }, setup: { hookNames: [], model: { provider: "openai", model: "gpt" }, tools: [], cwd: "/repo" }, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } }], accounting: { input: 10, output: 5, cacheRead: 20, cacheWrite: 2, cost: 0.04 }, toolCalls: [{ id: "tc1", name: "read", state: "running" }], activity: { kind: "reasoning", text: "checking source" } }], agentSessions: [{ transport: "local", sessionId: "active", locator: { sessionFile: "/sessions/active.jsonl" } }] }, snapshot);
   const storeC = new RunStore(cwd, "s", "cccc-1111-2222-3333", home);
-  await storeC.create({ id: "cccc-1111-2222-3333", workflowName: "deploy", cwd, sessionId: "s", state: "failed", agents: [{ id: "c:1", name: "deployer", path: "c:1", state: "failed", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 2, attemptDetails: [{ attempt: 2, sessionId: "n", sessionFile: "/n", error: { code: "AGENT_FAILED", message: "timeout" }, accounting: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 } }] }], nativeSessions: [] }, snapshot);
+  await storeC.create({ id: "cccc-1111-2222-3333", workflowName: "deploy", cwd, sessionId: "s", state: "failed", agents: [{ id: "c:1", name: "deployer", path: "c:1", state: "failed", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 2, attemptDetails: [{ attempt: 2, transport: "local", session: { transport: "local", sessionId: "n", locator: { sessionFile: "/n" } }, setup: { hookNames: [], model: { provider: "openai", model: "gpt" }, tools: [], cwd: "/repo" }, error: { code: "AGENT_FAILED", message: "timeout" }, accounting: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 } }] }], agentSessions: [] }, snapshot);
 
   // Dashboard with breadcrumbs and inline errors
   const dashB = formatNavigatorDashboard((await storeB.load()).run, [], []);
@@ -2181,7 +2185,7 @@ void test("navigator bulk deletes only failed runs after confirmation", async ()
   const states = ["failed", "failed", "completed", "stopped", "running", "interrupted", "budget_exhausted"] as const;
   const stores = await Promise.all(states.map(async (state, index) => {
     const store = new RunStore(cwd, "session", `bulk-${String(index)}`, home);
-    await store.create({ id: store.runId, workflowName: "bulk", cwd, sessionId: "session", state, agents: [], nativeSessions: [] }, snapshot);
+    await store.create({ id: store.runId, workflowName: "bulk", cwd, sessionId: "session", state, agents: [], agentSessions: [] }, snapshot);
     return store;
   }));
   const failedArtifact = await stores[0]?.saveResult({ owned: true });
@@ -2212,7 +2216,7 @@ void test("navigator remains usable when retry provenance is unavailable", async
   const cwd = join(home, "project");
   const snapshot = createLaunchSnapshot({ script: "return true", args: null, metadata: { name: "broken-retry" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
   const store = new RunStore(cwd, "session", "broken-retry", home);
-  await store.create({ id: "broken-retry", workflowName: "broken-retry", cwd, sessionId: "session", state: "failed", retry: { sourceRunId: "deleted-source", lineageRootRunId: "broken-retry", completedPaths: [], incompletePaths: [], namedWorktrees: [] }, agents: [], nativeSessions: [] }, snapshot);
+  await store.create({ id: "broken-retry", workflowName: "broken-retry", cwd, sessionId: "session", state: "failed", retry: { sourceRunId: "deleted-source", lineageRootRunId: "broken-retry", completedPaths: [], incompletePaths: [], namedWorktrees: [] }, agents: [], agentSessions: [] }, snapshot);
   const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
   const selections: string[][] = [];
   workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
@@ -2230,7 +2234,7 @@ void test("navigator reviews each pending checkpoint before answering", async ()
   const runId = "checkpoint-review";
   const snapshot = createLaunchSnapshot({ script: "export const meta={name:'review',description:'review'}", args: null, metadata: { name: "review", description: "review" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
   const store = new RunStore(cwd, "session", runId, home);
-  await store.create({ id: runId, workflowName: "review", cwd, sessionId: "session", state: "awaiting_input", agents: [], nativeSessions: [] }, snapshot);
+  await store.create({ id: runId, workflowName: "review", cwd, sessionId: "session", state: "awaiting_input", agents: [], agentSessions: [] }, snapshot);
   await store.awaitCheckpoint({ path: "checkpoint/first", name: "first", prompt: "Review the first artifact?", context: { artifact: "object", entries: Array.from({ length: 80 }, (_, index) => `entry-${String(index)}`), marker: "OBJECT_CONTEXT_END" } });
   await store.awaitCheckpoint({ path: "checkpoint/second", name: "second", prompt: "Review the second artifact?", context: null });
 
@@ -2607,7 +2611,7 @@ void test("pause waits for parallel agents and blocks later operations until res
   let resolveBothStarted!: () => void;
   const bothStarted = new Promise<void>((resolve) => { resolveBothStarted = resolve; });
   let sessionCount = 0;
-  const createSession = async (input: SessionInput): Promise<PiSession> => {
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => {
     const label = input.sessionLabel.split(":")[1] ?? "unknown";
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -2619,7 +2623,7 @@ void test("pause waits for parallel agents and blocks later operations until res
       abort: async () => { release(); }, steer: async () => {}, dispose() {},
     };
   };
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { events.push({ channel, data }); } } } as never, home, async () => {}, createSession);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { events.push({ channel, data }); } } } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   const command = commands[0]?.handler;
   assert.ok(workflow && command);
@@ -2658,8 +2662,8 @@ void test("pause blocks shell work at both shared and worktree operation boundar
     const sessionId = name;
     const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
     const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
-    const createSession = async (): Promise<PiSession> => { throw new Error("agent must not launch"); };
-    workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
+    const createSession = async (): Promise<TestPiSession> => { throw new Error("agent must not launch"); };
+    workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
     const workflow = tools.find(({ name }) => name === "workflow");
     const command = commands[0]?.handler;
     assert.ok(workflow && command);
@@ -2700,8 +2704,8 @@ void test("navigator Pause and Resume actions round-trip persisted state and ref
   const after = `${process.execPath} -e ${JSON.stringify(`require("node:fs").writeFileSync(${JSON.stringify(afterPath)},"after")`)}`;
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
-  const createSession = async (): Promise<PiSession> => { throw new Error("agent must not launch"); };
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
+  const createSession = async (): Promise<TestPiSession> => { throw new Error("agent must not launch"); };
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   const command = commands[0]?.handler;
   assert.ok(workflow && command);
@@ -2751,7 +2755,7 @@ void test("registered workflow command controls reject races and cancel queued w
   const starts: string[] = [];
   const releases = new Map<string, () => void>();
   let sessionCount = 0;
-  const createSession = async (input: SessionInput): Promise<PiSession> => {
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => {
     const label = input.sessionLabel.split(":")[1] ?? "unknown";
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -2762,7 +2766,7 @@ void test("registered workflow command controls reject races and cancel queued w
       prompt: async () => { starts.push(label); await gate; }, abort: async () => { release(); }, steer: async () => {}, dispose() {},
     };
   };
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   const command = commands[0]?.handler;
   assert.ok(workflow && command);
@@ -2907,12 +2911,12 @@ void test("production role policy rejects overrides before persistence and prese
     if (role !== "reviewer") writeFileSync(join(cwd, ".pi", "pi-extensible-workflows", "roles", `${role}.md`), "---\nmodel: openai/gpt\ntools: [read]\n---\nTest role");
   }
   const inputs: SessionInput[] = [];
-  const createSession = async (input: SessionInput): Promise<PiSession> => {
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => {
     inputs.push(input);
     return { sessionId: `session-${String(inputs.length)}`, sessionFile: `/sessions/${String(inputs.length)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
   };
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["read", "agent", "workflow"] } as never, home, async () => {}, createSession);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["read", "agent", "workflow"] } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   const context = { cwd, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
@@ -3150,10 +3154,10 @@ void test("active run keeps its alias snapshot after settings edits", async () =
   const settingsPath = join(dir, "settings.json");
   writeFileSync(settingsPath, JSON.stringify({ modelAliases: { reviewer: "old/model" } }));
   const inputs: SessionInput[] = [];
-  const executor = new WorkflowAgentExecutor({ cwd: dir, model: { provider: "root", model: "model", thinking: "medium" }, tools: new Set(), knownModels: new Set(["root/model", "old/model", "new/model"]), modelAliases: validateModelAliases({ reviewer: "old/model" }, settingsPath), settingsPath }, async (input) => {
+  const executor = new WorkflowAgentExecutor({ cwd: dir, model: { provider: "root", model: "model", thinking: "medium" }, tools: new Set(), knownModels: new Set(["root/model", "old/model", "new/model"]), modelAliases: validateModelAliases({ reviewer: "old/model" }, settingsPath), settingsPath }, testTransport(async (input) => {
     inputs.push(input);
     return { sessionId: `active-${String(inputs.length)}`, sessionFile: `/sessions/active-${String(inputs.length)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
-  });
+  }));
   await executor.execute("before", { label: "before", workflowName: "active", model: "reviewer" });
   saveModelAliases(settingsPath, { reviewer: "new/model" });
   await executor.execute("after", { label: "after", workflowName: "active", model: "reviewer" });
@@ -3172,14 +3176,14 @@ void test("resume reloads aliases for pending and retried calls while replaying 
   const replayPaths: string[] = [];
   await runWorkflow(script, null, { agent: async (_prompt, _options, _signal, identity) => { replayPaths.push(structuralPath("agent", ...identity.structuralPath, `callsite:${identity.callSite}`, `occurrence:${String(identity.occurrence)}`)); return "original"; } }).result;
   const store = new RunStore(cwd, "session", "run", home);
-  await store.create({ id: "run", workflowName: "alias-resume", cwd, sessionId: "session", state: "interrupted", agents: [], nativeSessions: [] }, createLaunchSnapshot({ script, args: null, metadata: { name: "alias-resume" }, settings: { concurrency: 2, modelAliases: oldAliases }, modelAliases: oldAliases, models: ["root/model", "old/model"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+  await store.create({ id: "run", workflowName: "alias-resume", cwd, sessionId: "session", state: "interrupted", agents: [], agentSessions: [] }, createLaunchSnapshot({ script, args: null, metadata: { name: "alias-resume" }, settings: { concurrency: 2, modelAliases: oldAliases }, modelAliases: oldAliases, models: ["root/model", "old/model"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
   await store.complete(replayPaths[0] as string, "replayed");
   const previous = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = agentDir;
   writeFileSync(settingsPath, JSON.stringify({ concurrency: 6, modelAliases: newAliases, disabledAgentResources: { skills: ["new-skill"], extensions: [join(agentDir, "new.ts")] } }));
   const inputs: SessionInput[] = [];
   let failedPending = false;
-  const createSession = async (input: SessionInput): Promise<PiSession> => {
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => {
     inputs.push(input);
     return {
       sessionId: `alias-${String(inputs.length)}`, sessionFile: `/sessions/alias-${String(inputs.length)}.jsonl`,
@@ -3197,7 +3201,7 @@ void test("resume reloads aliases for pending and retried calls while replaying 
   };
   try {
     const events: Array<{ channel: string; data: unknown }> = [];
-    workflowExtension({ registerTool() {}, registerCommand(_name: string, value: { handler: typeof command }) { command = value.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { events.push({ channel, data }); } } } as never, home, async () => {}, createSession);
+    workflowExtension({ registerTool() {}, registerCommand(_name: string, value: { handler: typeof command }) { command = value.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { events.push({ channel, data }); } } } as never, home, async () => {}, testTransport(createSession));
     assert.ok(start && command);
     await start({}, ctx);
     await command("resume run", ctx);
@@ -3228,7 +3232,7 @@ void test("persists resume snapshots and warning events", async () => {
   const cwd = join(home, "project");
   const store = new RunStore(cwd, "session", "run", home);
   const initial = createLaunchSnapshot({ script: "return true", args: null, metadata: { name: "resume" }, settings: { ...DEFAULT_SETTINGS, modelAliases: { reviewer: "openai/gpt" } }, modelAliases: { reviewer: "openai/gpt" }, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
-  await store.create({ id: "run", workflowName: "resume", cwd, sessionId: "session", state: "interrupted", agents: [], nativeSessions: [] }, initial);
+  await store.create({ id: "run", workflowName: "resume", cwd, sessionId: "session", state: "interrupted", agents: [], agentSessions: [] }, initial);
   const next = createLaunchSnapshot({ ...initial, settings: { ...initial.settings, modelAliases: { reviewer: "anthropic/opus" } }, modelAliases: { reviewer: "anthropic/opus" } });
   await store.saveSnapshot(next);
   await store.appendEvent({ type: "warning", message: "reviewer: openai/gpt -> anthropic/opus" });
@@ -3907,11 +3911,11 @@ void test("extension roles flow through host guidance, preflight, launch snapsho
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }>; details?: unknown }> }> = [];
   let guidanceHandler: ((event: { systemPrompt: string }, ctx: { cwd: string; isProjectTrusted?: () => boolean }) => { systemPrompt?: string } | undefined) | undefined;
   let shutdown: (() => Promise<void>) | undefined;
-  const createSession = async (input: SessionInput): Promise<PiSession> => {
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => {
     inputs.push(input);
     return { sessionId: input.sessionLabel, sessionFile: `/sessions/${input.sessionLabel}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async (text) => { prompts.push(text); }, steer: async () => {}, dispose() {} };
   };
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["read", "grep", "workflow"], on(name: string, candidate: unknown) { if (name === "before_agent_start") guidanceHandler = candidate as typeof guidanceHandler; if (name === "session_shutdown") shutdown = candidate as typeof shutdown; } } as never, home, async () => {}, createSession, agentDir);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["read", "grep", "workflow"], on(name: string, candidate: unknown) { if (name === "before_agent_start") guidanceHandler = candidate as typeof guidanceHandler; if (name === "session_shutdown") shutdown = candidate as typeof shutdown; } } as never, home, async () => {}, testTransport(createSession), agentDir);
   registerWorkflowExtension({ version: "1.0.0", headline: "Packaged roles", description: "Packaged role definitions", roleDirectories: [pathToFileURL(roleDirectory)] });
   assert.ok(guidanceHandler);
   const guidance = guidanceHandler({ systemPrompt: "BASE SYSTEM" }, { cwd, isProjectTrusted: () => true })?.systemPrompt ?? "";
@@ -4008,7 +4012,7 @@ void test("navigator stop reports cleanup failures without closing unexpectedly"
   const cwd = join(home, "project");
   const store = new RunStore(cwd, "session", "run", home);
   const snapshot = createLaunchSnapshot({ script: "export const meta={name:'broken',description:'broken'}", args: null, metadata: { name: "broken", description: "broken" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
-  await store.create({ id: "run", workflowName: "broken", cwd, sessionId: "session", state: "running", agents: [], nativeSessions: [] }, snapshot);
+  await store.create({ id: "run", workflowName: "broken", cwd, sessionId: "session", state: "running", agents: [], agentSessions: [] }, snapshot);
   await store.saveOwnership([{ id: "run:1", label: "worker", state: "running", options: { label: "worker", cwd, tools: [] } }]);
   failedOwnership.add(store.directory);
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
@@ -4142,7 +4146,7 @@ void test("foreground failure diagnostics advertise valid named worktrees", asyn
   let failBad = true;
   let goodAttempts = 0;
   let badAttempts = 0;
-  const createSession = async (input: SessionInput): Promise<PiSession> => ({
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => ({
     sessionId: input.sessionLabel, sessionFile: `/sessions/${input.sessionLabel}.jsonl`,
     messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
     getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
@@ -4159,7 +4163,7 @@ void test("foreground failure diagnostics advertise valid named worktrees", asyn
     steer: async () => {},
     dispose() {},
   });
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as typeof toolResultHandler; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as typeof toolResultHandler; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow && toolResultHandler);
   const context = { cwd, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
@@ -4191,7 +4195,7 @@ void test("foreground failures patch finalized tool results with bounded diagnos
   const tools: Tool[] = [];
   let toolResultHandler: ToolResultHandler | undefined;
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-failure-diagnostics-"));
-  const createSession = async (input: SessionInput): Promise<PiSession> => ({
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => ({
     sessionId: `diagnostic-${input.sessionLabel}`, sessionFile: `/sessions/${input.sessionLabel}.jsonl`,
     messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
     getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
@@ -4203,7 +4207,7 @@ void test("foreground failures patch finalized tool results with bounded diagnos
     registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {},
     on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as ToolResultHandler; },
     getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"],
-  } as never, home, async () => {}, createSession);
+  } as never, home, async () => {}, testTransport(createSession));
   const tool = tools.find(({ name }) => name === "workflow");
   assert.ok(tool && toolResultHandler);
   const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
@@ -4223,7 +4227,9 @@ void test("foreground failures patch finalized tool results with bounded diagnos
   assert.equal(diagnostic.failedAgent.role, undefined);
   assert.deepEqual(diagnostic.failedAgent.structuralPath, ["reviewers", "bad"]);
   assert.equal(diagnostic.failedAgent.attempt, 1);
-  assert.match(diagnostic.failedAgent.sessionFile ?? "", /diagnostics:bad:attempt-1/);
+  const locator = diagnostic.failedAgent.session?.locator;
+  const sessionFile = typeof locator === "object" && locator !== null && !Array.isArray(locator) && typeof locator.sessionFile === "string" ? locator.sessionFile : "";
+  assert.match(sessionFile, /diagnostics:bad:attempt-1/);
   assert.ok(diagnostic.completedSiblingAgents);
   assert.deepEqual(diagnostic.completedSiblingAgents.map(({ label, role, structuralPath }) => ({ label, role, structuralPath })), [{ label: "good", role: undefined, structuralPath: ["reviewers", "good"] }]);
   assert.deepEqual(diagnostic.completedSiblingPaths, [["reviewers", "good"]]);
@@ -4284,7 +4290,7 @@ void test("background failure diagnostics drive workflow_retry with the advertis
   let failBad = true;
   let goodAttempts = 0;
   let badAttempts = 0;
-  const createSession = async (input: SessionInput): Promise<PiSession> => ({
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => ({
     sessionId: input.sessionLabel, sessionFile: `/sessions/${input.sessionLabel}.jsonl`,
     messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
     getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
@@ -4295,7 +4301,7 @@ void test("background failure diagnostics drive workflow_retry with the advertis
     steer: async () => {},
     dispose() {},
   });
-  workflowExtension({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) { delivered.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
+  workflowExtension({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) { delivered.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   const retry = tools.find(({ name }) => name === "workflow_retry");
   assert.ok(workflow && retry);
@@ -4334,7 +4340,7 @@ void test("failed retry diagnostics preserve retry provenance", async () => {
   mkdirSync(cwd);
   let firstAttempts = 0;
   let secondAttempts = 0;
-  const createSession = async (input: SessionInput): Promise<PiSession> => ({
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => ({
     sessionId: input.sessionLabel, sessionFile: `/sessions/${input.sessionLabel}.jsonl`,
     messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
     getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
@@ -4349,7 +4355,7 @@ void test("failed retry diagnostics preserve retry provenance", async () => {
     delivered.push(message.content);
     const runId = /runId=([^;) ]+)/.exec(message.content)?.[1];
     if (runId && message.content.includes(" failed (runId=")) diagnostics.push({ runId });
-  }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
+  }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   const retry = tools.find(({ name }) => name === "workflow_retry");
   assert.ok(workflow && retry);
@@ -4429,7 +4435,7 @@ type BudgetResponse = { content: unknown; usage?: BudgetMessage["usage"] };
 
 function budgetUsage(input: number, output: number, cost = 0): NonNullable<BudgetMessage["usage"]> { return { input, output, cacheRead: 100, cacheWrite: 200, cost: { total: cost } }; }
 
-function budgetSession(responses: readonly BudgetResponse[], steered: string[] = [], aborted = { value: false }): PiSession {
+function budgetSession(responses: readonly BudgetResponse[], steered: string[] = [], aborted = { value: false }): TestPiSession {
   let listener: ((event: never) => void) | undefined;
   let responseIndex = 0;
   const messages: BudgetMessage[] = [];
@@ -4465,8 +4471,8 @@ function budgetSession(responses: readonly BudgetResponse[], steered: string[] =
   };
 }
 
-function budgetExecutor(session: PiSession): WorkflowAgentExecutor {
-  return new WorkflowAgentExecutor({ cwd: "/repo", model: { provider: "openai", model: "gpt" }, tools: new Set() }, async () => session);
+function budgetExecutor(session: TestPiSession): WorkflowAgentExecutor {
+  return new WorkflowAgentExecutor({ cwd: "/repo", model: { provider: "openai", model: "gpt" }, tools: new Set() }, testTransport(async () => session));
 }
 
 void test("budget validation covers zero, all dimensions, and invalid patches", () => {
@@ -4491,13 +4497,13 @@ void test("navigator budget resume and approval use the live trust context", asy
   const budget = { tokens: { hard: 4 } };
   const usage = { tokens: 4, costUsd: 0, durationMs: 0, agentLaunches: 1 };
   const store = new RunStore(cwd, "session", runId, home);
-  await store.create({ id: runId, workflowName: "navigator-budget", cwd, sessionId: "session", state: "budget_exhausted", agents: [], nativeSessions: [], budget, budgetVersion: 1, usage }, createLaunchSnapshot({ script: "return await agent('work', { model: 'reviewer-model' });", args: null, metadata: { name: "navigator-budget" }, settings: { concurrency: 1, modelAliases: { "reviewer-model": "old/model" } }, modelAliases: { "reviewer-model": "old/model" }, models: ["openai/gpt", "old/model"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+  await store.create({ id: runId, workflowName: "navigator-budget", cwd, sessionId: "session", state: "budget_exhausted", agents: [], agentSessions: [], budget, budgetVersion: 1, usage }, createLaunchSnapshot({ script: "return await agent('work', { model: 'reviewer-model' });", args: null, metadata: { name: "navigator-budget" }, settings: { concurrency: 1, modelAliases: { "reviewer-model": "old/model" } }, modelAliases: { "reviewer-model": "old/model" }, models: ["openai/gpt", "old/model"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let resolverCalls = 0;
-  const createSession = async (): Promise<PiSession> => ({ sessionId: "navigator-budget-session", sessionFile: "/sessions/navigator-budget.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} });
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) { command = options.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], ui: {} } as never, home, undefined, createSession, agentDir);
+  const createSession = async (): Promise<TestPiSession> => ({ transport: "local", session: { transport: "local", sessionId: "navigator-budget-session", locator: { sessionFile: "/sessions/navigator-budget.jsonl" } }, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} });
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) { command = options.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], ui: {} } as never, home, undefined, testTransport(createSession), agentDir);
   registerWorkflowExtension({ version: "1.0.0", headline: "Navigator policy", description: "Navigator alias policy", modelAliases: { "reviewer-model": { resolve(context) { resolverCalls += 1; assert.equal(context.projectTrusted, false); assert.ok(context.availableModels.has("new/model")); return "new/model"; } } } });
   const context = { cwd, hasUI: false, isProjectTrusted: () => false, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }, { provider: "new", id: "model" }], getAvailable: () => [{ provider: "openai", id: "gpt" }, { provider: "new", id: "model" }] }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
   assert.ok(start && command);
@@ -4588,7 +4594,7 @@ void test("budget persistence retains usage, versions, events, and replay histor
   const usage = { tokens: 4, costUsd: 1.2, durationMs: 8, agentLaunches: 2 };
   const event = { type: "hard_exhausted" as const, budgetVersion: 1, dimensions: ["tokens"] as const, usage, limits: budget, at: 8 };
   const snapshot = createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "budget" }, settings: DEFAULT_SETTINGS, budget, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] });
-  await store.create({ id: "run", workflowName: "budget", cwd, sessionId: "session", state: "budget_exhausted", agents: [], nativeSessions: [], budget, budgetVersion: 1, usage, budgetEvents: [event] }, snapshot);
+  await store.create({ id: "run", workflowName: "budget", cwd, sessionId: "session", state: "budget_exhausted", agents: [], agentSessions: [], budget, budgetVersion: 1, usage, budgetEvents: [event] }, snapshot);
   await store.complete("agent/replayed", "historical");
   const reloaded = await new RunStore(cwd, "session", "run", home).load();
   assert.deepEqual(reloaded.run.usage, usage);
@@ -4602,7 +4608,7 @@ void test("completed final overruns complete, while later budgeted work reaches 
   const cwd = join(home, "project");
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   let sessionCount = 0;
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], } as never, home, async () => {}, async () => { sessionCount += 1; return budgetSession([{ content: [{ type: "text", text: "done" }], usage: budgetUsage(2, 0) }]); });
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], } as never, home, async () => {}, testTransport(async () => { sessionCount += 1; return budgetSession([{ content: [{ type: "text", text: "done" }], usage: budgetUsage(2, 0) }]); }));
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   const context = { cwd, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
@@ -4628,7 +4634,7 @@ void test("workflow_resume persists exact proposals and approval or rejection co
   const usage = { tokens: 4, costUsd: 0, durationMs: 0, agentLaunches: 1 };
   const exhausted = { type: "hard_exhausted" as const, budgetVersion: 1, dimensions: ["tokens"] as const, usage, limits: budget, at: 0 };
   const store = new RunStore(cwd, "session", runId, home);
-  await store.create({ id: runId, workflowName: "resume-budget", cwd, sessionId: "session", state: "budget_exhausted", agents: [], nativeSessions: [], budget, budgetVersion: 1, usage, budgetEvents: [exhausted] }, createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "resume-budget" }, launchMode: "foreground", settings: { concurrency: 1 }, budget, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+  await store.create({ id: runId, workflowName: "resume-budget", cwd, sessionId: "session", state: "budget_exhausted", agents: [], agentSessions: [], budget, budgetVersion: 1, usage, budgetEvents: [exhausted] }, createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "resume-budget" }, launchMode: "foreground", settings: { concurrency: 1 }, budget, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
   const agentDir = join(home, "agent");
   mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];

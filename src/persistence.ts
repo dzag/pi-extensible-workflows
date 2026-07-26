@@ -10,10 +10,8 @@ import type { OwnershipRecord } from "./agent-execution.js";
 import { WorkflowError } from "./types.js";
 import { loadLaunchSnapshot } from "./utils.js";
 
-export interface NativeSessionReference { sessionId: string; sessionFile: string }
 export interface EffectiveSystemPrompt { sessionId: string; attempt: number; turn: number; sha256: string; prompt: string }
-export interface PersistedRun extends RunRecord { agentSessions?: readonly WorkflowAgentSessionReference[]; nativeSessions?: readonly NativeSessionReference[] }
-export interface LegacyPersistedRun extends RunRecord { nativeSessions: readonly NativeSessionReference[]; agentSessions?: readonly WorkflowAgentSessionReference[] }
+export type PersistedRun = RunRecord;
 type LoadedPersistedRun = PersistedRun;
 export interface RunSummaryAgent { id: string; name: string; label?: string; state: string; role?: string; attempts: number }
 export interface RunSummaryArtifacts { runDirectory: string; statePath: string; journalPath: string; snapshotPath: string; workflowPath: string; resultPath: string; summaryPath: string }
@@ -26,7 +24,7 @@ type Journal = { completed: Record<string, CompletedOperation>; awaiting?: Recor
 const TERMINAL_SUMMARY_STATES = new Set(["completed", "failed", "stopped"]);
 const EMPTY_USAGE: WorkflowBudgetUsage = { tokens: 0, costUsd: 0, durationMs: 0, agentLaunches: 0 };
 function summaryArtifacts(directory: string): RunSummaryArtifacts { return { runDirectory: directory, statePath: join(directory, "state.json"), journalPath: join(directory, "journal.json"), snapshotPath: join(directory, "snapshot.json"), workflowPath: join(directory, "workflow.js"), resultPath: join(directory, "result.json"), summaryPath: join(directory, "summary.json") }; }
-function summaryFromRun(run: PersistedRun | LegacyPersistedRun, directory: string, journal: Journal, previous: Partial<RunSummary> | undefined, fallbackCreatedAt: string, now = new Date().toISOString()): RunSummary {
+function summaryFromRun(run: PersistedRun, directory: string, journal: Journal, previous: Partial<RunSummary> | undefined, fallbackCreatedAt: string, now = new Date().toISOString()): RunSummary {
   const createdAt = typeof previous?.createdAt === "string" ? previous.createdAt : fallbackCreatedAt;
   const failedAt = run.failedAt ?? run.error?.failedAt;
   const replayablePaths = [...new Set([...(run.retry?.completedPaths ?? []), ...Object.keys(journal.completed)])];
@@ -233,7 +231,7 @@ export class RunStore {
     this.directory = join(runsDirectory(this.cwd, sessionId, home), safePart(runId));
   }
 
-  async create(run: PersistedRun | LegacyPersistedRun, snapshot: Readonly<LaunchSnapshot>): Promise<void> {
+  async create(run: PersistedRun, snapshot: Readonly<LaunchSnapshot>): Promise<void> {
     if (resolve(run.cwd) !== this.cwd || run.sessionId !== this.sessionId || run.id !== this.runId) throw new WorkflowError("INTERNAL_ERROR", "Run identity does not match its session-scoped store");
     const temporary = join(dirname(this.directory), `.${safePart(this.runId)}.${String(process.pid)}.${randomUUID()}.tmp`);
     await mkdir(dirname(this.directory), { recursive: true, mode: 0o700 });
@@ -276,6 +274,8 @@ export class RunStore {
     await this.stateWrite;
     const run = await json<PersistedRun>(join(this.directory, "state.json"));
     if (resolve(run.cwd) !== this.cwd || run.sessionId !== this.sessionId || run.id !== this.runId) throw new WorkflowError("RESUME_INCOMPATIBLE", "Persisted run belongs to another cwd or Pi session");
+    const persisted = run as unknown as Record<string, unknown>;
+    if (!Array.isArray(persisted.agentSessions) || Object.hasOwn(persisted, "nativeSessions")) throw new WorkflowError("RESUME_INCOMPATIBLE", "Persisted run uses an unsupported agent session format");
     return { run, snapshot: loadLaunchSnapshot(await json<LaunchSnapshot>(join(this.directory, "snapshot.json"))) };
   }
   async loadSummary(): Promise<RunSummary> {

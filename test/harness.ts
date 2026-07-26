@@ -54,7 +54,7 @@ export interface RunInput {
   phase?: string;
   agents?: AgentInput[];
   error?: WorkflowErrorShape;
-  nativeSessions?: readonly { sessionId: string; sessionFile: string }[];
+  agentSessions?: readonly { transport: string; sessionId: string; locator?: JsonValue }[];
   snapshot?: Partial<{
     script: string;
     args: JsonValue;
@@ -161,7 +161,7 @@ export class TestHarness {
       ...(input.phase ? { phase: input.phase } : {}),
       agents,
       ...(input.error ? { error: input.error } : {}),
-      nativeSessions: input.nativeSessions ?? [],
+      agentSessions: (input.agentSessions ?? []).map((session) => ({ transport: session.transport, sessionId: session.sessionId, ...(session.locator === undefined ? {} : { locator: session.locator }) })),
     };
 
     const store = new RunStore(this.cwd, this.sessionId, id);

@@ -530,32 +530,19 @@ export function runWorkflow(script: string, args: JsonValue = null, bridge: Work
   if (signal?.aborted) cancel(); else signal?.addEventListener("abort", cancel, { once: true });
   return { result, cancel };
 }
-function workflowSessionReference(attempt: AgentAttempt): WorkflowAgentSessionReference | undefined {
-  if (attempt.session) return attempt.session;
-  if (attempt.sessionId) return { transport: attempt.transport ?? "local", sessionId: attempt.sessionId, ...(attempt.sessionFile ? { locator: { sessionFile: attempt.sessionFile } } : {}) };
-  return undefined;
-}
 function attemptSummary(attempt: AgentAttempt, accounting = attempt.accounting): AgentAttemptSummary {
-  const session = workflowSessionReference(attempt);
-  const summary = { attempt: attempt.attempt, transport: attempt.transport ?? session?.transport ?? "local", ...(session ? { session } : {}), ...(attempt.error ? { error: attempt.error } : {}), accounting, ...(attempt.setup ? { setup: attempt.setup } : {}), ...(!attempt.transport ? { sessionId: attempt.sessionId, sessionFile: attempt.sessionFile } : {}) };
-  return summary;
+  return { attempt: attempt.attempt, transport: attempt.transport, ...(attempt.session ? { session: attempt.session } : {}), ...(attempt.error ? { error: attempt.error } : {}), accounting, setup: attempt.setup };
 }
-type ActiveAttemptInput = AgentAttempt | Pick<AgentAttempt, "attempt" | "sessionId" | "sessionFile">;
-export async function persistActiveAgentAttempt(store: RunStore, id: string, active: ActiveAttemptInput): Promise<void> {
-  const normalized: AgentAttempt = "accounting" in active ? active : { ...active, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } };
+export async function persistActiveAgentAttempt(store: RunStore, id: string, active: AgentAttempt): Promise<void> {
   await store.updateState((run) => {
     const agent = run.agents.find((candidate) => candidate.id === id);
     if (!agent) throw new WorkflowError("INTERNAL_ERROR", `Missing production ownership record: ${id}`);
     const accounting = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-    const detail = attemptSummary(normalized, accounting);
-    const details = [...(agent.attemptDetails ?? []).filter((candidate) => candidate.attempt !== normalized.attempt), detail];
-    const session = workflowSessionReference(normalized);
-    if (!normalized.transport) {
-      const nativeSessions = session && normalized.sessionId && normalized.sessionFile && !(run.nativeSessions ?? []).some(({ sessionId }) => sessionId === normalized.sessionId) ? [...(run.nativeSessions ?? []), { sessionId: normalized.sessionId, sessionFile: normalized.sessionFile }] : run.nativeSessions ?? [];
-      return { ...run, agents: run.agents.map((candidate) => candidate.id === id ? { ...candidate, attempts: Math.max(candidate.attempts, normalized.attempt), attemptDetails: details } : candidate), nativeSessions };
-    }
-    const agentSessions = session && !(run.agentSessions ?? []).some(({ transport, sessionId }) => transport === session.transport && sessionId === session.sessionId) ? [...(run.agentSessions ?? []), session] : run.agentSessions ?? [];
-    return { ...run, agents: run.agents.map((candidate) => candidate.id === id ? { ...candidate, attempts: Math.max(candidate.attempts, normalized.attempt), attemptDetails: details } : candidate), agentSessions };
+    const detail = attemptSummary(active, accounting);
+    const details = [...(agent.attemptDetails ?? []).filter((candidate) => candidate.attempt !== active.attempt), detail];
+    const session = active.session;
+    const agentSessions = session && !run.agentSessions.some(({ transport, sessionId }) => transport === session.transport && sessionId === session.sessionId) ? [...run.agentSessions, session] : run.agentSessions;
+    return { ...run, agents: run.agents.map((candidate) => candidate.id === id ? { ...candidate, attempts: Math.max(candidate.attempts, active.attempt), attemptDetails: details } : candidate), agentSessions };
   });
 }
 
@@ -565,14 +552,9 @@ export async function persistAgentAttempts(store: RunStore, id: string, attempts
     if (!agent) throw new WorkflowError("INTERNAL_ERROR", `Missing production ownership record: ${id}`);
     const total = attempts.reduce((sum, attempt) => ({ input: sum.input + attempt.accounting.input, output: sum.output + attempt.accounting.output, cacheRead: sum.cacheRead + attempt.accounting.cacheRead, cacheWrite: sum.cacheWrite + attempt.accounting.cacheWrite, cost: sum.cost + attempt.accounting.cost }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 });
     const attemptDetails = attempts.map((attempt) => attemptSummary(attempt));
-    const sessions = attempts.map(workflowSessionReference).filter((session): session is WorkflowAgentSessionReference => session !== undefined);
-    if (attempts.every((attempt) => !attempt.transport)) {
-      const nativeSessions = attempts.map((attempt) => attempt.sessionId && attempt.sessionFile ? { sessionId: attempt.sessionId, sessionFile: attempt.sessionFile } : undefined).filter((session): session is { sessionId: string; sessionFile: string } => session !== undefined);
-      const sessionIds = new Set(nativeSessions.map(({ sessionId }) => sessionId));
-      return { ...run, agents: run.agents.map((candidate) => candidate.id === id ? { ...candidate, attempts: attempts.length, attemptDetails, accounting: total } : candidate), nativeSessions: [...(run.nativeSessions ?? []).filter(({ sessionId }) => !sessionIds.has(sessionId)), ...nativeSessions] };
-    }
+    const sessions = attempts.map((attempt) => attempt.session).filter((session): session is WorkflowAgentSessionReference => session !== undefined);
     const sessionKeys = new Set(sessions.map(({ transport, sessionId }) => `${transport}:${sessionId}`));
-    return { ...run, agents: run.agents.map((candidate) => candidate.id === id ? { ...candidate, attempts: attempts.length, attemptDetails, accounting: total } : candidate), agentSessions: [...(run.agentSessions ?? []).filter(({ transport, sessionId }) => !sessionKeys.has(`${transport}:${sessionId}`)), ...sessions] };
+    return { ...run, agents: run.agents.map((candidate) => candidate.id === id ? { ...candidate, attempts: attempts.length, attemptDetails, accounting: total } : candidate), agentSessions: [...run.agentSessions.filter(({ transport, sessionId }) => !sessionKeys.has(`${transport}:${sessionId}`)), ...sessions] };
   });
 }
 

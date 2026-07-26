@@ -28,7 +28,7 @@ function agent(id: string, state: AgentRecord["state"] = "completed", parentId?:
 }
 
 function run(state: PersistedRun["state"], agents: readonly AgentRecord[] = [], phaseHistory?: PersistedRun["phaseHistory"]): PersistedRun {
-  return { id: "run", workflowName: "phases", cwd: "/repo", sessionId: "session", state, agents, nativeSessions: [], ...(phaseHistory ? { phaseHistory } : {}) };
+  return { id: "run", workflowName: "phases", cwd: "/repo", sessionId: "session", state, agents, agentSessions: [], ...(phaseHistory ? { phaseHistory } : {}) };
 }
 
 function snapshot(phases?: readonly string[]) {

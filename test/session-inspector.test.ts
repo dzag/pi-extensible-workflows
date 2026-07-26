@@ -40,8 +40,8 @@ void test("loads workflow scripts, runtime prompts, models, and costs from stati
   const store = new RunStore(cwd, sessionId, runId, home);
   await store.create({
     id: runId, workflowName: "audit", cwd, sessionId, state: "completed",
-    agents: [{ id: `${runId}:1`, name: "scout", path: "scout", state: "completed", role: "scout", model: { provider: "openai-codex", model: "gpt-5.6-luna", thinking: "high" }, tools: ["read"], attempts: 1, attemptDetails: [{ attempt: 1, sessionId: "child-session", sessionFile: childPath, accounting: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.25 } }], accounting: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.25 } }],
-    nativeSessions: [{ sessionId: "child-session", sessionFile: childPath }],
+    agents: [{ id: `${runId}:1`, name: "scout", path: "scout", state: "completed", role: "scout", model: { provider: "openai-codex", model: "gpt-5.6-luna", thinking: "high" }, tools: ["read"], attempts: 1, attemptDetails: [{ attempt: 1, transport: "local", session: { transport: "local", sessionId: "child-session", locator: { sessionFile: childPath } }, setup: { hookNames: [], model: { provider: "openai", model: "gpt" }, tools: [], cwd: "/repo" }, accounting: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.25 } }], accounting: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.25 } }],
+    agentSessions: [{ transport: "local", sessionId: "child-session", locator: { sessionFile: childPath } }],
   }, createLaunchSnapshot({ script, args: null, metadata: { name: "audit", description: "Audit code" }, settings: { concurrency: 1 }, models: ["openai-codex/gpt-5.6-luna"], tools: ["read"], agentTypes: ["scout"], schemas: [] }));
 
   const report = await loadSessionReport(parentPath, home);
@@ -82,7 +82,7 @@ void test("session inspector prefers persisted registered function identity over
     { type: "message", id: "parent-assistant", parentId: null, timestamp: "2026-01-01T00:00:01.000Z", message: { role: "assistant", content: [{ type: "toolCall", id: "call-registered", name: "workflow", arguments: { name: "alias", workflow: "registeredFunction", args: {}, foreground: true } }], api: "openai-responses", provider: "provider-root", model: "model-root", usage: usage(0), stopReason: "toolUse", timestamp: 1 } },
     { type: "message", id: "parent-result", parentId: "parent-assistant", timestamp: "2026-01-01T00:00:02.000Z", message: { role: "toolResult", toolCallId: "call-registered", toolName: "workflow", content: [{ type: "text", text: "done" }], details: { runId }, isError: false, timestamp: 2 } },
   ]);
-  await new RunStore(cwd, sessionId, runId, home).create({ id: runId, workflowName: "registeredFunction", cwd, sessionId, state: "completed", agents: [], nativeSessions: [] }, createLaunchSnapshot({
+  await new RunStore(cwd, sessionId, runId, home).create({ id: runId, workflowName: "registeredFunction", cwd, sessionId, state: "completed", agents: [], agentSessions: [] }, createLaunchSnapshot({
     script: "return null;", args: {}, metadata: { name: "registeredFunction" }, settings: { concurrency: 1 }, functionName: "registeredFunction", models: [], tools: [], agentTypes: [], schemas: [],
   }));
   const report = await loadSessionReport(parentPath, home);
@@ -113,11 +113,11 @@ void test("reports transcript policy per attempt and persisted fallback policy",
   writeJsonl(parentPath, [session(sessionId), { type: "message", id: "parent-assistant", parentId: null, timestamp: "2026-01-01T00:00:01.000Z", message: { role: "assistant", content: [{ type: "toolCall", id: "call-policy", name: "workflow", arguments: { name: "policy", script, foreground: true } }], api: "openai-responses", provider: "provider-root", model: "model-root", usage: usage(0.05), stopReason: "toolUse", timestamp: 1 } }, { type: "message", id: "parent-result", parentId: "parent-assistant", timestamp: "2026-01-01T00:00:02.000Z", message: { role: "toolResult", toolCallId: "call-policy", toolName: "workflow", content: [{ type: "text", text: "done" }], details: { runId }, isError: false, timestamp: 2 } }]);
   const store = new RunStore(cwd, sessionId, runId, home);
   await store.create({ id: runId, workflowName: "policy", cwd, sessionId, state: "completed", agents: [
-    { id: `${runId}:1`, name: "top-label", path: "top", state: "completed", role: "shared", model: { provider: "persisted", model: "fallback", thinking: "max" }, tools: [], attempts: 2, attemptDetails: [{ attempt: 1, sessionId: "attempt-one", sessionFile: attemptOnePath, accounting: account(0.3), error: { code: "AGENT_FAILED", message: "retry" } }, { attempt: 2, sessionId: "attempt-two", sessionFile: attemptTwoPath, accounting: account(0.3) }], accounting: account(0.3) },
-    { id: `${runId}:2`, name: "nested-label", path: "nested", parentId: `${runId}:1`, state: "completed", role: "shared", model: { provider: "persisted", model: "nested-fallback", thinking: "medium" }, tools: [], attempts: 1, attemptDetails: [{ attempt: 1, sessionId: "missing", sessionFile: missingPath, accounting: account(0.4) }], accounting: account(0.4) },
-    { id: `${runId}:3`, name: "corrupt-label", path: "corrupt", state: "failed", model: { provider: "persisted", model: "corrupt-fallback", thinking: "low" }, tools: [], attempts: 1, attemptDetails: [{ attempt: 1, sessionId: "corrupt", sessionFile: corruptPath, accounting: account(0.5) }], accounting: account(0.5) },
+    { id: `${runId}:1`, name: "top-label", path: "top", state: "completed", role: "shared", model: { provider: "persisted", model: "fallback", thinking: "max" }, tools: [], attempts: 2, attemptDetails: [{ attempt: 1, transport: "local", session: { transport: "local", sessionId: "attempt-one", locator: { sessionFile: attemptOnePath } }, setup: { hookNames: [], model: { provider: "openai", model: "gpt" }, tools: [], cwd: "/repo" }, accounting: account(0.3), error: { code: "AGENT_FAILED", message: "retry" } }, { attempt: 2, transport: "local", session: { transport: "local", sessionId: "attempt-two", locator: { sessionFile: attemptTwoPath } }, setup: { hookNames: [], model: { provider: "openai", model: "gpt" }, tools: [], cwd: "/repo" }, accounting: account(0.3) }], accounting: account(0.3) },
+    { id: `${runId}:2`, name: "nested-label", path: "nested", parentId: `${runId}:1`, state: "completed", role: "shared", model: { provider: "persisted", model: "nested-fallback", thinking: "medium" }, tools: [], attempts: 1, attemptDetails: [{ attempt: 1, transport: "local", session: { transport: "local", sessionId: "missing", locator: { sessionFile: missingPath } }, setup: { hookNames: [], model: { provider: "persisted", model: "nested-fallback", thinking: "medium" }, tools: [], cwd: "/repo" }, accounting: account(0.4) }], accounting: account(0.4) },
+    { id: `${runId}:3`, name: "corrupt-label", path: "corrupt", state: "failed", model: { provider: "persisted", model: "corrupt-fallback", thinking: "low" }, tools: [], attempts: 1, attemptDetails: [{ attempt: 1, transport: "local", session: { transport: "local", sessionId: "corrupt", locator: { sessionFile: corruptPath } }, setup: { hookNames: [], model: { provider: "persisted", model: "corrupt-fallback", thinking: "low" }, tools: [], cwd: "/repo" }, accounting: account(0.5) }], accounting: account(0.5) },
     { id: `${runId}:4`, name: "default-label", path: "default", state: "completed", model: { provider: "persisted", model: "default-fallback", thinking: "off" }, tools: [], attempts: 0, accounting: account(0.6) },
-  ], nativeSessions: [] }, createLaunchSnapshot({ script, args: null, metadata: { name: "policy" }, settings: { concurrency: 1 }, models: ["persisted/fallback", "persisted/nested-fallback", "persisted/corrupt-fallback", "persisted/default-fallback"], tools: [], agentTypes: ["shared"], roles: {}, schemas: [] }));
+  ], agentSessions: [] }, createLaunchSnapshot({ script, args: null, metadata: { name: "policy" }, settings: { concurrency: 1 }, models: ["persisted/fallback", "persisted/nested-fallback", "persisted/corrupt-fallback", "persisted/default-fallback"], tools: [], agentTypes: ["shared"], roles: {}, schemas: [] }));
   const report = await loadSessionReport(parentPath, home);
   const workflow = report.workflows[0];
   assert.ok(workflow);
@@ -239,7 +239,7 @@ void test("non-TTY inspection discovers persisted runs without a transcript", as
   const cwd = join(home, "project");
   const sessionId = "session-persisted";
   const store = new RunStore(cwd, sessionId, "run-persisted", home);
-  await store.create({ id: "run-persisted", workflowName: "persisted", cwd, sessionId, state: "completed", agents: [], nativeSessions: [] }, createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "persisted" }, settings: { concurrency: 1 }, models: [], tools: [], agentTypes: [], schemas: [] }));
+  await store.create({ id: "run-persisted", workflowName: "persisted", cwd, sessionId, state: "completed", agents: [], agentSessions: [] }, createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "persisted" }, settings: { concurrency: 1 }, models: [], tools: [], agentTypes: [], schemas: [] }));
   const previousHome = process.env.HOME;
   process.env.HOME = home;
   try {
@@ -261,8 +261,8 @@ void test("filters persisted inspection to failed runs", async () => {
   const cwd = join(home, "project");
   const sessionId = "session-failed";
   const snapshot = (name: string) => createLaunchSnapshot({ script: "return true;", args: null, metadata: { name }, settings: { concurrency: 1 }, models: [], tools: [], agentTypes: [], schemas: [] });
-  await new RunStore(cwd, sessionId, "completed-run", home).create({ id: "completed-run", workflowName: "completed", cwd, sessionId, state: "completed", agents: [], nativeSessions: [] }, snapshot("completed"));
-  await new RunStore(cwd, sessionId, "failed-run", home).create({ id: "failed-run", workflowName: "failed", cwd, sessionId, state: "failed", agents: [], nativeSessions: [] }, snapshot("failed"));
+  await new RunStore(cwd, sessionId, "completed-run", home).create({ id: "completed-run", workflowName: "completed", cwd, sessionId, state: "completed", agents: [], agentSessions: [] }, snapshot("completed"));
+  await new RunStore(cwd, sessionId, "failed-run", home).create({ id: "failed-run", workflowName: "failed", cwd, sessionId, state: "failed", agents: [], agentSessions: [] }, snapshot("failed"));
   const previousHome = process.env.HOME;
   process.env.HOME = home;
   try {

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
 import { copyToClipboard, getAgentDir, SettingsManager, truncateToVisualLines, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
-import { FairAgentScheduler, WorkflowAgentExecutor, localAgentTransport, type AgentActivity, type AgentAttempt, type AgentDefinition, type AgentProgress, type AgentProviderFailure, type AgentProviderRecovery, type AgentTransport, type PiSessionFactory } from "./agent-execution.js";
+import { FairAgentScheduler, WorkflowAgentExecutor, localAgentTransport, type AgentActivity, type AgentAttempt, type AgentDefinition, type AgentProgress, type AgentProviderFailure, type AgentProviderRecovery } from "./agent-execution.js";
 import { acquireSessionLease, listRunIds, RunStore, SessionLease, structuralPath as operationPath } from "./persistence.js";
 import type { AwaitingCheckpoint, PersistedRun, WorktreeReference } from "./persistence.js";
 import { budgetRelaxed, budgetUsage, mergeBudget, resumeBudgetAllowed, validateBudget, validateBudgetPatch, WorkflowBudgetRuntime } from "./budget.js";
@@ -16,7 +16,7 @@ import { launchScriptForSnapshot, loadAgentDefinitions, preflight, resolveAgentR
 import { beginWorkflowExtensionLoading, loadingRegistry, resetWorkflowRegistry, type WorkflowRegistryApi } from "./registry.js";
 import { agentIdentityPath, agentWorktree, encoded, executeShellCommand, persistActiveAgentAttempt, persistAgentAttempts, readShellResult, runWorkflow, shellIdentityPath } from "./execution.js";
 import { openWorkflowArtifact, workflowResultArtifact, workflowScriptArtifact, type WorkflowArtifact } from "./workflow-artifacts.js";
-import { ERROR_CODES, LAUNCH_SNAPSHOT_IDENTITY_VERSION, WORKFLOW_AGENT_STALL_THRESHOLD_MS, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentAttemptActionContext, type AgentAttemptSummary, type AgentOptions, type AgentRecord, type AgentResourcePolicy, type BudgetApprovalRequest, type BudgetEvent, type JsonValue, type LaunchSnapshot, type ModelSpec, type RunState, type ShellIdentity, type ShellOptions, type ShellResult, type WorkflowBridge, type WorkflowCatalogFunction, type WorkflowCatalogIndex, type WorkflowCatalogVariable, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowFailureAgent, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowExecution, type WorkflowMetadata, type WorkflowModelAliasResolverContext, type WorkflowRetryProvenance, type WorkflowRunContext, type WorkflowSettings, type WorkflowSettingsResolution, type WorkflowSiblingAgent, type WorkflowWorktreeReference } from "./types.js";
+import { ERROR_CODES, LAUNCH_SNAPSHOT_IDENTITY_VERSION, WORKFLOW_AGENT_STALL_THRESHOLD_MS, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentAttemptActionContext, type AgentAttemptSummary, type AgentOptions, type AgentRecord, type AgentResourcePolicy, type AgentTransport, type BudgetApprovalRequest, type BudgetEvent, type JsonValue, type LaunchSnapshot, type ModelSpec, type RunState, type ShellIdentity, type ShellOptions, type ShellResult, type WorkflowBridge, type WorkflowCatalogFunction, type WorkflowCatalogIndex, type WorkflowCatalogVariable, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowFailureAgent, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowExecution, type WorkflowMetadata, type WorkflowModelAliasResolverContext, type WorkflowRetryProvenance, type WorkflowRunContext, type WorkflowSettings, type WorkflowSettingsResolution, type WorkflowSiblingAgent, type WorkflowWorktreeReference } from "./types.js";
 const SETTLED_AGENT_STATES: ReadonlySet<import("./types.js").AgentState> = new Set(["completed", "failed", "cancelled"]);
 const INTERNAL_WORKFLOW_TOOLS: readonly string[] = ["workflow", "workflow_respond", "workflow_stop", "workflow_resume", "workflow_retry", "workflow_catalog"];
 const HARD_TERMINAL_RUN_STATES: ReadonlySet<string> = new Set(["completed", "failed", "stopped"]);
@@ -918,7 +918,7 @@ export function formatNavigatorRun(loaded: { run: PersistedRun; snapshot: Readon
   if (!checkpoints.length) lines.push("  (none)");
   for (const checkpoint of checkpoints) lines.push(`  ${checkpoint.name}: ${checkpoint.prompt} context=${JSON.stringify(checkpoint.context)}`);
   lines.push(`Worktrees: ${String(worktrees.length)}`);
-  lines.push(run.agentSessions ? `Agent sessions: ${String(run.agentSessions.length)}` : `Native Pi transcripts: ${String(run.nativeSessions?.length ?? 0)}`);
+  lines.push(`Agent sessions: ${String(run.agentSessions.length)}`);
   return lines.join("\n");
 }
 export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readonly<LaunchSnapshot>, width: number, selection: WorkflowPhaseSelection = {}, styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES, now = Date.now()): string[] {
@@ -1054,8 +1054,6 @@ function boundedWorkflowFailureDiagnostics(value: WorkflowFailureDiagnostics): W
       attempt: value.failedAgent.attempt,
       ...(value.failedAgent.transport ? { transport: utf8Prefix(value.failedAgent.transport, 128) } : {}),
       ...(value.failedAgent.session ? { session: structuredClone(value.failedAgent.session) } : {}),
-      ...(value.failedAgent.sessionId ? { sessionId: utf8Prefix(value.failedAgent.sessionId, 256) } : {}),
-      ...(value.failedAgent.sessionFile ? { sessionFile: utf8Prefix(value.failedAgent.sessionFile, 1024) } : {}),
     } } : {}),
     completedSiblingAgents: (value.completedSiblingAgents ?? []).slice(0, 16).map((agent) => ({
       id: utf8Prefix(agent.id, 128),
@@ -1081,8 +1079,6 @@ function boundedWorkflowFailureDiagnostics(value: WorkflowFailureDiagnostics): W
       bounded = { ...bounded, retry };
       continue;
     }
-    if (bounded.failedAgent?.sessionFile) { const failedAgent = { ...bounded.failedAgent }; delete failedAgent.sessionFile; bounded = { ...bounded, failedAgent }; continue; }
-    if (bounded.failedAgent?.sessionId) { const failedAgent = { ...bounded.failedAgent }; delete failedAgent.sessionId; bounded = { ...bounded, failedAgent }; continue; }
     if (Buffer.byteLength(bounded.artifacts.runDirectory) > 256) { bounded = { ...bounded, artifacts: { ...bounded.artifacts, runDirectory: utf8Prefix(bounded.artifacts.runDirectory, 256) } }; continue; }
     if (Buffer.byteLength(bounded.error.message) > 256) { bounded = { ...bounded, error: { ...bounded.error, message: utf8Prefix(bounded.error.message, 256) } }; continue; }
     if (bounded.failedAt !== null && Buffer.byteLength(bounded.failedAt) > 256) { bounded = { ...bounded, failedAt: utf8Prefix(bounded.failedAt, 256) }; continue; }
@@ -1124,8 +1120,6 @@ async function createWorkflowFailureDiagnostics(store: RunStore, metadata: Workf
     attempt: Math.max(1, failedAttempt?.attempt ?? failedAgentRecord.attempts),
     ...(failedAttempt?.transport ? { transport: failedAttempt.transport } : {}),
     ...(failedAttempt?.session ? { session: failedAttempt.session } : {}),
-    ...(failedAttempt?.sessionId ? { sessionId: failedAttempt.sessionId } : {}),
-    ...(failedAttempt?.sessionFile ? { sessionFile: failedAttempt.sessionFile } : {}),
   } satisfies WorkflowFailureAgent : undefined;
   const completedSiblingAgents = run.agents.filter((agent) => {
     if (agent.state !== "completed" || agent.id === failedAgentRecord?.id) return false;
@@ -1159,7 +1153,7 @@ async function createWorkflowFailureDiagnostics(store: RunStore, metadata: Workf
 }
 
 export function formatWorkflowFailureDiagnostics(diagnostic: WorkflowFailureDiagnostics): string {
-  const failedAgent = diagnostic.failedAgent ? `${diagnostic.failedAgent.label ?? diagnostic.failedAgent.id}${diagnostic.failedAgent.role ? ` role=${diagnostic.failedAgent.role}` : ""} attempt=${String(diagnostic.failedAgent.attempt)} path=${diagnostic.failedAgent.structuralPath.join(" > ") || "(root)"}${diagnostic.failedAgent.session ? ` session=${diagnostic.failedAgent.session.transport}/${diagnostic.failedAgent.session.sessionId}` : diagnostic.failedAgent.sessionFile ? ` session=${diagnostic.failedAgent.sessionFile}` : ""}` : "(not persisted)";
+  const failedAgent = diagnostic.failedAgent ? `${diagnostic.failedAgent.label ?? diagnostic.failedAgent.id}${diagnostic.failedAgent.role ? ` role=${diagnostic.failedAgent.role}` : ""} attempt=${String(diagnostic.failedAgent.attempt)} path=${diagnostic.failedAgent.structuralPath.join(" > ") || "(root)"}${diagnostic.failedAgent.session ? ` session=${diagnostic.failedAgent.session.transport}/${diagnostic.failedAgent.session.sessionId}` : ""}` : "(not persisted)";
   const siblingAgents = diagnostic.completedSiblingAgents;
   const siblings = siblingAgents ? siblingAgents.map((agent) => `${agent.label ?? agent.id}${agent.role ? ` role=${agent.role}` : ""} path=${agent.structuralPath.join(" > ") || "(root)"}`).join(", ") || "(none)" : diagnostic.completedSiblingPaths.map((path) => path.join(" > ") || "(root)").join(", ") || "(none)";
   const retry = diagnostic.retry ? [`  Retry: ${diagnostic.retry.action}`, `  Replayable completed paths: ${diagnostic.retry.completedPaths.join(", ") || "(none)"}`, `  Incomplete paths: ${diagnostic.retry.incompletePaths.join(", ") || "(unknown)"}`, `  Named worktrees: ${diagnostic.retry.namedWorktrees.join(", ") || "(none)"}`, `  Warning: ${diagnostic.retry.warning}`] : [];
@@ -1542,7 +1536,7 @@ function workflowKeyLabel(keybindings: unknown, binding: string, fallback: strin
   return [...new Set(vim ? [...configured, vim] : configured)].join("/");
 }
 
-export default function workflowExtension(pi: ExtensionAPI, home?: string, clipboard = copyToClipboard, createSession: AgentTransport | PiSessionFactory = localAgentTransport, agentDir?: string, additionalSkillPaths: readonly string[] = []) {
+export default function workflowExtension(pi: ExtensionAPI, home?: string, clipboard = copyToClipboard, transport: AgentTransport = localAgentTransport, agentDir?: string, additionalSkillPaths: readonly string[] = []) {
   beginWorkflowExtensionLoading();
   const registry = loadingRegistry();
   const extensionAgentDir = agentDir ?? getAgentDir();
@@ -1988,7 +1982,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     });
     catalogRegistered = true;
   };
-  const createAgentExecutor = (root: Omit<import("./agent-execution.js").AgentExecutionRoot, "agentDir" | "agentSetupHooks">) => new WorkflowAgentExecutor({ ...root, agentDir: extensionAgentDir, ...(additionalSkillPaths.length ? { additionalSkillPaths } : {}), agentSetupHooks: registry.agentSetupHooks() }, createSession);
+  const createAgentExecutor = (root: Omit<import("./agent-execution.js").AgentExecutionRoot, "agentDir" | "agentSetupHooks">) => new WorkflowAgentExecutor({ ...root, agentDir: extensionAgentDir, ...(additionalSkillPaths.length ? { additionalSkillPaths } : {}), agentSetupHooks: registry.agentSetupHooks() }, transport);
   const activeSnapshotTools = (tools: readonly string[], active: ReadonlySet<string> | "session") => active === "session"
     ? new Set(tools.filter((tool) => pi.getActiveTools().includes(tool) && tool !== "workflow_catalog"))
     : new Set(tools.filter((tool) => active.has(tool) || tool === "workflow_catalog"));
@@ -2261,7 +2255,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const childBudget = new WorkflowBudgetRuntime(budget, loaded.run.budgetVersion ?? 1, loaded.run.usage, loaded.run.budgetEvents);
       const childInitialBudget = childBudget.snapshot();
       const retry: WorkflowRetryProvenance = { sourceRunId: loaded.run.id, lineageRootRunId, completedPaths, incompletePaths, namedWorktrees };
-      await childStore.create({ id: childRunId, workflowName: loaded.snapshot.metadata.name, cwd, sessionId, state: "interrupted", parentRunId: loaded.run.id, retry, agents: [], ...(typeof createSession === "function" ? { nativeSessions: [] } : { agentSessions: [] }), ...(budget ? { budget } : {}), budgetVersion: loaded.run.budgetVersion ?? 1, ...childInitialBudget }, childSnapshot);
+      await childStore.create({ id: childRunId, workflowName: loaded.snapshot.metadata.name, cwd, sessionId, state: "interrupted", parentRunId: loaded.run.id, retry, agents: [], agentSessions: [], ...(budget ? { budget } : {}), budgetVersion: loaded.run.budgetVersion ?? 1, ...childInitialBudget }, childSnapshot);
       const fallbackModel: ModelSpec = { provider: hostModel.provider, model: hostModel.id, thinking: pi.getThinkingLevel() };
       const model = modelSpec(loaded.snapshot.models[0] ?? "", fallbackModel);
       const lifecycle = lifecycleFor(childStore, "interrupted", childBudget, loaded.snapshot.metadata);
@@ -2442,7 +2436,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       } : undefined;
       const budgetRuntime = new WorkflowBudgetRuntime(budget);
       const initialBudget = budgetRuntime.snapshot();
-      await store.create({ id: runId, workflowName: checked.metadata.name, cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId(), state: "running", ...(parentRunId !== undefined ? { parentRunId } : {}), agents: [], ...(typeof createSession === "function" ? { nativeSessions: [] } : { agentSessions: [] }), delivery: params.foreground ? { mode: "foreground", state: "attached", toolCallId } : { mode: "background", state: "pending" }, ...(budget ? { budget } : {}), budgetVersion: 1, ...initialBudget }, snapshot);
+      await store.create({ id: runId, workflowName: checked.metadata.name, cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId(), state: "running", ...(parentRunId !== undefined ? { parentRunId } : {}), agents: [], agentSessions: [], delivery: params.foreground ? { mode: "foreground", state: "attached", toolCallId } : { mode: "background", state: "pending" }, ...(budget ? { budget } : {}), budgetVersion: 1, ...initialBudget }, snapshot);
       if (params.foreground) foregroundDeliveries.set(toolCallId, { store, inline: false });
       const lifecycle = lifecycleFor(store, "running", budgetRuntime, checked.metadata);
       const background = !params.foreground;
@@ -2783,7 +2777,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           const agentAttemptActionContext = (dashboard: Awaited<ReturnType<typeof loadDashboard>>, agent: AgentRecord): AgentAttemptActionContext | undefined => {
             const attempt = (agent.attemptDetails ?? []).reduce<AgentAttemptSummary | undefined>((latest, candidate) => !latest || candidate.attempt > latest.attempt ? candidate : latest, undefined);
             if (!attempt) return undefined;
-            const live = liveAgentSessions.get(`${dashboard.run.id}:${agent.id}`);
+            const liveCandidate = liveAgentSessions.get(`${dashboard.run.id}:${agent.id}`);
+            const live = liveCandidate && attempt.session && liveCandidate.reference.transport === attempt.session.transport && liveCandidate.reference.sessionId === attempt.session.sessionId ? liveCandidate : undefined;
             const run = runs.get(dashboard.run.id);
             const ui = { notify: (message: string, level: "info" | "warning" | "error" = "info") => { ctx.ui.notify(message, level); }, confirm: (title: string, message: string) => ctx.ui.confirm(title, message), select: (title: string, options: readonly string[]) => { return ctx.ui.select(title, [...options]); }, input: (title: string, placeholder?: string) => ctx.ui.input(title, placeholder) };
             const attemptSnapshot = deepFreeze(structuredClone(attempt));
