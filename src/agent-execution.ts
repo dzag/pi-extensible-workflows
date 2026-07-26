@@ -661,6 +661,7 @@ type ScheduledNode = {
   id: string;
   runId: string;
   parentId?: string;
+  prompt?: string;
   options: Readonly<ScheduledAgentOptions>;
   children: Set<string>;
   collected: boolean;
@@ -674,7 +675,7 @@ type ScheduledNode = {
 };
 
 type ScheduledRun = { limit: number; beforeLaunch?: () => void; logical: number; active: number; queue: Array<{ node?: ScheduledNode; start: () => void }> };
-export type OwnershipRecord = { id: string; parentId?: string; label: string; state: ScheduledNode["state"]; options: Readonly<ScheduledAgentOptions> };
+export type OwnershipRecord = { id: string; parentId?: string; prompt?: string; label: string; state: ScheduledNode["state"]; options: Readonly<ScheduledAgentOptions> };
 type OwnershipWriter = (runId: string, ownership: readonly OwnershipRecord[]) => void | Promise<void>;
 
 export class FairAgentScheduler {
@@ -713,7 +714,7 @@ export class FairAgentScheduler {
     const id = `${runId}:${String(++this.#nextId)}`;
     let resolveResult: (result: ScheduledAgentResult) => void = () => undefined;
     const promise = new Promise<ScheduledAgentResult>((resolve) => { resolveResult = resolve; });
-    const node: ScheduledNode = { id, runId, ...(parentId ? { parentId } : {}), options: effective, children: new Set<string>(), collected: false, state: "queued", controller: new AbortController(), promise, resolve: resolveResult, task: async () => undefined, restored: false };
+    const node: ScheduledNode = { id, runId, ...(parentId ? { parentId } : {}), prompt, options: effective, children: new Set<string>(), collected: false, state: "queued", controller: new AbortController(), promise, resolve: resolveResult, task: async () => undefined, restored: false };
     node.task = async () => {
       if (node.controller.signal.aborted) { this.#release(node.runId); return; }
       node.state = "running";
@@ -829,7 +830,7 @@ export class FairAgentScheduler {
   }
 
   snapshot(): readonly OwnershipRecord[] {
-    return [...this.#nodes.values()].map(({ id, parentId, options, state }) => ({ id, ...(parentId ? { parentId } : {}), label: options.label, state, options }));
+    return [...this.#nodes.values()].map(({ id, parentId, prompt, options, state }) => ({ id, ...(parentId ? { parentId } : {}), ...(prompt === undefined ? {} : { prompt }), label: options.label, state, options }));
   }
 
   restoreRun(runId: string, limit: number, ownership: readonly OwnershipRecord[], beforeLaunch?: () => void): void {
@@ -839,7 +840,7 @@ export class FairAgentScheduler {
       if (record.id.split(":").slice(0, -1).join(":") !== runId) throw new WorkflowError("RESUME_INCOMPATIBLE", `Persisted agent belongs to another run: ${record.id}`);
       let resolveResult: (result: ScheduledAgentResult) => void = () => undefined;
       const promise = new Promise<ScheduledAgentResult>((resolve) => { resolveResult = resolve; });
-      const node: ScheduledNode = { id: record.id, runId, ...(record.parentId ? { parentId: record.parentId } : {}), options: this.#inherit(undefined, record.options), children: new Set(), collected: false, state: record.state, controller: new AbortController(), promise, resolve: resolveResult, task: async () => undefined, restored: true };
+      const node: ScheduledNode = { id: record.id, runId, ...(record.parentId ? { parentId: record.parentId } : {}), ...(record.prompt === undefined ? {} : { prompt: record.prompt }), options: this.#inherit(undefined, record.options), children: new Set(), collected: false, state: record.state, controller: new AbortController(), promise, resolve: resolveResult, task: async () => undefined, restored: true };
       this.#nodes.set(node.id, node);
       run.logical += 1;
       this.#nextId = Math.max(this.#nextId, Number(node.id.slice(node.id.lastIndexOf(":") + 1)) || 0);

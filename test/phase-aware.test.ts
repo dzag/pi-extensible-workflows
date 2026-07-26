@@ -17,6 +17,7 @@ import {
   preflight,
   preserveWorkflowPhaseSelection,
   workflowScriptArtifact,
+  workflowPromptArtifact,
   workflowResultArtifact,
   type AgentRecord,
   type PersistedRun,
@@ -236,6 +237,7 @@ void test("phase tree navigation collapses, expands, and moves through visible r
 
 void test("workflow artifact views use type-appropriate temporary file content", () => {
   assert.deepEqual(workflowScriptArtifact("export const value = 1;"), { extension: ".js", content: "export const value = 1;" });
+  assert.deepEqual(workflowPromptArtifact("Inspect the target"), { extension: ".md", content: "Inspect the target" });
   assert.deepEqual(workflowResultArtifact("plain result"), { extension: ".md", content: "plain result" });
   assert.deepEqual(workflowResultArtifact({ answer: 42 }), { extension: ".json", content: "{\n  \"answer\": 42\n}\n" });
 });

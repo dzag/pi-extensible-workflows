@@ -59,7 +59,7 @@ function validateAgentSetup(value: unknown, label: string): void {
 }
 function validateAgent(value: unknown, label: string): void {
   if (!object(value) || typeof value.id !== "string" || !value.id || typeof value.name !== "string" || !value.name || typeof value.path !== "string" || !value.path || typeof value.state !== "string" || !AGENT_STATES.has(value.state)) throw new Error(`${label} is invalid`);
-  optionalString(value.systemPrompt, `${label}.systemPrompt`); optionalString(value.label, `${label}.label`); optionalString(value.parentId, `${label}.parentId`);
+  optionalString(value.systemPrompt, `${label}.systemPrompt`); optionalString(value.prompt, `${label}.prompt`); optionalString(value.label, `${label}.label`); optionalString(value.parentId, `${label}.parentId`);
   if (value.structuralPath !== undefined) stringList(value.structuralPath, `${label}.structuralPath`); optionalString(value.parentBreadcrumb, `${label}.parentBreadcrumb`); optionalString(value.worktreeOwner, `${label}.worktreeOwner`); optionalString(value.role, `${label}.role`); optionalString(value.requestedModel, `${label}.requestedModel`);
   model(value.model, `${label}.model`); stringList(value.tools, `${label}.tools`); nonNegativeInteger(value.attempts, `${label}.attempts`);
   if (value.attemptDetails !== undefined) {
@@ -178,6 +178,7 @@ async function validateRunArtifacts(store: RunStore, workflowScript: string, sta
     if (!object(record) || typeof record.id !== "string" || !record.id || ownershipIds.has(record.id) || typeof record.label !== "string" || !record.label || typeof record.state !== "string" || !SCHEDULER_STATES.has(record.state)) throw new Error(`${label} is invalid`);
     ownershipIds.add(record.id);
     optionalString(record.parentId, `${label}.parentId`);
+    optionalString(record.prompt, `${label}.prompt`);
     validateScheduledOptions(record.options, `${label}.options`);
   }
   for (const record of ownership) if (object(record) && record.parentId !== undefined && (typeof record.parentId !== "string" || !ownershipIds.has(record.parentId))) throw new Error("Persisted ownership parent is missing");

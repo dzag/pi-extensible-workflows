@@ -2056,13 +2056,13 @@ void test("external artifact failures restore the TUI and remove temporary copie
   assert.equal(await openWorkflowArtifact(tui, join(home, "missing-editor"), { extension: ".js", content: "return true;" }), null);
   assert.deepEqual(events, ["stop", "start", "render", "stop", "start", "render"]);
 });
-void test("navigator opens a persisted top-level agent result in the external editor", async () => {
+void test("navigator opens a persisted top-level agent prompt and result in the external editor", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-agent-result-editor-"));
   const cwd = join(home, "project");
   const store = new RunStore(cwd, "session", "run", home);
   const resultPath = "agent/reviewer/callsite%3Areviewer/occurrence%3A1";
   const snapshot = createLaunchSnapshot({ script: "return true", args: null, metadata: { name: "agent-result" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
-  await store.create({ id: "run", workflowName: "agent-result", cwd, sessionId: "session", state: "completed", phase: "review", agents: [{ id: "agent", name: "reviewer", path: "agent", state: "completed", resultPath, structuralPath: ["reviewer"], model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 }], agentSessions: [] }, snapshot);
+  await store.create({ id: "run", workflowName: "agent-result", cwd, sessionId: "session", state: "completed", phase: "review", agents: [{ id: "agent", name: "reviewer", path: "agent", state: "completed", prompt: "PROMPT_START\nInspect the target\nPROMPT_END", resultPath, structuralPath: ["reviewer"], model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 }], agentSessions: [] }, snapshot);
   await store.complete(resultPath, { answer: 42 });
   const editorPath = join(home, "fake-editor.sh");
   const editedPath = join(home, "edited-content");
@@ -2091,17 +2091,30 @@ void test("navigator opens a persisted top-level agent result in the external ed
         component.handleInput?.("tui.select.confirm");
         const actions = component.render(120).join("\n");
         assert.match(actions, /Agent actions/);
-        assert.match(actions, /Open result in editor/);
+        assert.match(actions, /Open prompt in editor/);
+        for (let index = 0; index < 12; index += 1) {
+          if (component.render(120).join("\n").includes("→ Open prompt in editor")) { component.handleInput?.("tui.select.confirm"); break; }
+          component.handleInput?.("tui.select.down");
+        }
+        let deadline = Date.now() + 5_000;
+        while (Date.now() < deadline) {
+          if (existsSync(editedPath) && readFileSync(editedPath, "utf8").includes("PROMPT_START")) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        assert.ok(existsSync(editedPath), "external editor was not invoked for the prompt");
+        assert.match(readFileSync(editedPath, "utf8"), /PROMPT_START[\s\S]*PROMPT_END/);
+        assert.match(readFileSync(openedPath, "utf8"), /artifact.*\.md$/);
+        while (starts < 1) await new Promise((resolve) => setTimeout(resolve, 10));
         for (let index = 0; index < 12; index += 1) {
           if (component.render(120).join("\n").includes("→ Open result in editor")) { component.handleInput?.("tui.select.confirm"); break; }
           component.handleInput?.("tui.select.down");
         }
-        const deadline = Date.now() + 5_000;
+        deadline = Date.now() + 5_000;
         while (Date.now() < deadline) {
           if (existsSync(editedPath) && readFileSync(editedPath, "utf8").includes("\"answer\": 42")) break;
           await new Promise((resolve) => setTimeout(resolve, 10));
         }
-        assert.ok(existsSync(editedPath), "external editor was not invoked");
+        assert.ok(existsSync(editedPath), "external editor was not invoked for the result");
         assert.match(readFileSync(editedPath, "utf8"), /"answer": 42/);
         assert.match(readFileSync(openedPath, "utf8"), /artifact.*\.json$/);
         const artifactPath = readFileSync(openedPath, "utf8");
@@ -2115,8 +2128,8 @@ void test("navigator opens a persisted top-level agent result in the external ed
   };
   try {
     await commands[0]?.handler("", ctx as never);
-    assert.equal(stops, 1);
-    assert.equal(starts, 1);
+    assert.equal(stops, 2);
+    assert.equal(starts, 2);
   } finally {
     if (previousVisual === undefined) delete process.env.VISUAL; else process.env.VISUAL = previousVisual;
     if (previousEditor === undefined) delete process.env.EDITOR; else process.env.EDITOR = previousEditor;
