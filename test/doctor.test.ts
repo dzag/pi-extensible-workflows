@@ -508,7 +508,7 @@ void test("portable bundles load method shorthand functions and selected payload
   writeFileSync(resource, "portable resource\n");
   const destination = join(root, "bundle");
   const workflow = { name: "methodWorkflow", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle method", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
-  const manifest = writePortableWorkflowBundle({ destination, command: "method-workflow", workflow, functionSource: "async run(input) { return input.value; }", aliasTargets: { fast: "openai/gpt" }, resources: { static: [resource] }, piVersion: ">=0.80.9 <0.81.0", engineVersion: ">=3.2.0 <3.3.0" });
+  const manifest = writePortableWorkflowBundle({ destination, command: "method-workflow", workflow, functionSource: "async run(input) { return input.value; }", aliasTargets: { fast: "openai/gpt" }, resources: { static: [resource] }, piVersion: ">=0.80.9 <0.81.0", engineVersion: ">=3.3.0 <3.4.0" });
   assert.match(manifest.runtime.pi, /^>=/);
   assert.deepEqual(manifest.aliasTargets, { fast: "openai/gpt" });
   assert.deepEqual(manifest.payload?.static, ["resource.txt"]);
@@ -538,7 +538,7 @@ void test("portable bundle setup resolves an external runtime, launches, and fai
   writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:pi-extensible-workflows"] }));
   const workflow = { name: "e2e", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle e2e", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
   const environment = { ...process.env, PATH: `${join(piRoot, "dist")}:${process.env.PATH ?? ""}`, HOME: root, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" };
-  const create = (name: string, requirements: Record<string, readonly string[]>) => { const destination = join(root, name); writePortableWorkflowBundle({ destination, command: name, workflow, functionSource: "async run(input) { return input.value; }", requirements, piVersion: ">=0.82.0 <0.83.0", engineVersion: ">=3.2.0 <3.3.0" }); return destination; };
+  const create = (name: string, requirements: Record<string, readonly string[]>) => { const destination = join(root, name); writePortableWorkflowBundle({ destination, command: name, workflow, functionSource: "async run(input) { return input.value; }", requirements, piVersion: ">=0.82.0 <0.83.0", engineVersion: ">=3.3.0 <3.4.0" }); return destination; };
   const bundle = create("e2e", { roles: [], aliases: [], tools: [], commands: [], environment: [] });
   execFileSync(join(bundle, "e2e"), ["setup", "--yes"], { env: environment, encoding: "utf8" });
   assert.ok(existsSync(join(bundle, "bundle-state.json")));
@@ -549,7 +549,7 @@ void test("portable bundle setup resolves an external runtime, launches, and fai
   mkdirSync(skillSource);
   writeFileSync(join(skillSource, "SKILL.md"), "---\nname: selected-skill\ndescription: Selected bundle skill\n---\nSelected skill instructions");
   const skillBundle = join(root, "skill-bundle");
-  writePortableWorkflowBundle({ destination: skillBundle, command: "skill-bundle", workflow, functionSource: "async run(input) { return input.value; }", resources: { skills: [skillSource] }, piVersion: ">=0.82.0 <0.83.0", engineVersion: ">=3.2.0 <3.3.0" });
+  writePortableWorkflowBundle({ destination: skillBundle, command: "skill-bundle", workflow, functionSource: "async run(input) { return input.value; }", resources: { skills: [skillSource] }, piVersion: ">=0.82.0 <0.83.0", engineVersion: ">=3.3.0 <3.4.0" });
   const skillManifest = JSON.parse(readFileSync(join(skillBundle, "manifest.json"), "utf8")) as { payload?: { skills?: string[] } };
   assert.deepEqual(skillManifest.payload?.skills, ["selected-skill"]);
   execFileSync(join(skillBundle, "skill-bundle"), ["setup", "--yes"], { env: environment, encoding: "utf8" });
@@ -565,7 +565,7 @@ void test("portable bundles can load a selected workflow extension with its modu
   const extension = join(root, "workflow.mjs");
   writeFileSync(extension, `import { registerWorkflowExtension } from "pi-extensible-workflows";\nconst suffix = "!";\nexport default function extension() { registerWorkflowExtension({ version: "1.0.0", headline: "Bundled extension", description: "Bundled extension", functions: { extensionSelected: { description: "Selected", input: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }, output: { type: "string" }, run(input) { return input.value + suffix; } } } }); }\n`);
   const destination = join(root, "bundle");
-  writePortableWorkflowBundle({ destination, command: "selected", workflow: { name: "selected", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle", input: { type: "object" }, output: { type: "string" } }, functionSource: '() => "workflow"', resources: { extensions: [extension] }, piVersion: ">=0.80.9 <0.81.0", engineVersion: ">=3.2.0 <3.3.0" });
+  writePortableWorkflowBundle({ destination, command: "selected", workflow: { name: "selected", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle", input: { type: "object" }, output: { type: "string" } }, functionSource: '() => "workflow"', resources: { extensions: [extension] }, piVersion: ">=0.80.9 <0.81.0", engineVersion: ">=3.3.0 <3.4.0" });
   type BundleFunction = { run: (input: Record<string, unknown>) => unknown };
   type BundleExtension = { functions?: Record<string, BundleFunction> };
   const registrations: BundleExtension[] = [];
