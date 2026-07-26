@@ -27,7 +27,7 @@ Await `parallel(...)` or `pipeline(...)` results before interpolation. Runs are 
 ## Runtime and safety rules
 
 
-Inline launches require a non-empty `name`. Registered function launches must omit `name`; they use `workflow` as the run name:
+Inline launches require a non-empty `name`. A reviewed JavaScript file can use `scriptPath` instead of `script`; it is read once at launch and its exact contents are captured for retry and resume. Registered function launches must omit `name`; they use `workflow` as the run name:
 
 ```json
 { "workflow": "workflowName", "args": { "issue": 42 } }

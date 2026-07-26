@@ -682,6 +682,14 @@ export function validateWorkflowLaunch(params: WorkflowValidationParameters, con
 export function validateWorkflowLaunchWithRegistry(params: WorkflowValidationParameters, context: WorkflowValidationContext, registry?: WorkflowRegistryApi): ValidatedWorkflowLaunch {
   if (Object.prototype.hasOwnProperty.call(params, "maxAgentLaunches")) fail("INVALID_METADATA", "maxAgentLaunches has been removed; use budget.agentLaunches");
   if (params.script !== undefined && params.workflow !== undefined) fail("INVALID_METADATA", "Provide either script or workflow, not both");
+  if (params.scriptPath !== undefined && (typeof params.scriptPath !== "string" || !params.scriptPath.trim())) fail("INVALID_METADATA", "scriptPath must be a non-empty path");
+  if ((params.script !== undefined || params.workflow !== undefined) && params.scriptPath !== undefined) fail("INVALID_METADATA", "Provide either script, scriptPath, or workflow, not more than one");
+  const scriptPath = typeof params.scriptPath === "string" ? params.scriptPath.trim() : undefined;
+  let fileScript: string | undefined;
+  if (scriptPath !== undefined) {
+    try { fileScript = readFileSync(resolve(context.cwd, scriptPath), "utf8"); }
+    catch (error) { fail("INVALID_SYNTAX", `Cannot read workflow script file ${scriptPath}: ${errorText(error)}`); }
+  }
   const functionName = typeof params.workflow === "string" ? params.workflow : undefined;
   if (functionName !== undefined && params.name !== undefined) fail("INVALID_METADATA", "Registered function launches do not accept name; workflow is the run name");
   const workflowName = functionName ?? (typeof params.name === "string" ? params.name.trim() : "");
@@ -690,8 +698,8 @@ export function validateWorkflowLaunchWithRegistry(params: WorkflowValidationPar
   if (functionName !== undefined && !registry) fail("MISSING_WORKFLOW", `Registered function is unavailable: ${functionName}`);
   const args = params.args === undefined ? null : params.args;
   if (functionName !== undefined && fn && (!object(args) || !jsonValue(args) || !Value.Check(fn.input, args))) fail("RESULT_INVALID", `Invalid input for ${functionName}`);
-  const script = functionName !== undefined && fn ? functionLaunchScript(functionName) : typeof params.script === "string" && params.script.trim() ? params.script : "";
-  if (!script) fail("INVALID_SYNTAX", "Provide script or registered function");
+  const script = functionName !== undefined && fn ? functionLaunchScript(functionName) : typeof params.script === "string" && params.script.trim() ? params.script : fileScript ?? "";
+  if (!script) fail("INVALID_SYNTAX", "Provide script, scriptPath, or registered function");
   const metadata = validateWorkflowMetadata({ name: workflowName, ...(typeof params.description === "string" ? { description: params.description } : fn?.description ? { description: fn.description } : {}) });
   const globalAgentDefinitions = loadAgentDefinitions(context.cwd, context.agentDir, false, registry && typeof registry.roleDirectoryRegistrations === "function" ? registry.roleDirectoryRegistrations() : registry && typeof registry.roleDirectories === "function" ? registry.roleDirectories() : undefined);
   const projectAgentDefinitions = context.projectTrusted ? readRoleDefinitions(projectRoleDirectories(join(context.cwd, ".pi"))) : {};

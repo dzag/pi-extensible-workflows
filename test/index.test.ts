@@ -206,6 +206,23 @@ void test("registers the workflow tool, command, and conditional skill", async (
   await assert.rejects(tool.execute("id", { workflow: "missing", name: " " }, new AbortController().signal, undefined, { model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   await assert.rejects(tool.execute("id", { script: "" }, undefined, undefined, { model: undefined }), (error: unknown) => error instanceof WorkflowError && error.code === "UNKNOWN_MODEL");
 });
+void test("workflow launches from a script file and snapshots its exact source", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-script-file-"));
+  const script = "export const meta={name:'file-launch'}; return 'from-file';\r\n";
+  const scriptPath = join(home, "workflow.js");
+  writeFileSync(scriptPath, script);
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  const workflow = tools.find(({ name }) => name === "workflow");
+  assert.ok(workflow);
+  const result = await workflow.execute("file", { name: "file-launch", scriptPath: "workflow.js", foreground: true }, new AbortController().signal, undefined, { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }) as { content: Array<{ text: string }>; details: { runId: string } };
+  assert.equal(result.content[0]?.text, '"from-file"');
+  writeFileSync(scriptPath, "return 'changed';\n");
+  const store = new RunStore(home, "session", result.details.runId, home);
+  const loaded = await store.load();
+  assert.equal(loaded.snapshot.script, script);
+  assert.equal(readFileSync(join(store.directory, "workflow.js"), "utf8"), script);
+});
 void test("workflow_retry links children, replays parallel branches, inherits budgets, and supports retry chains", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-retry-tool-"));
   let sessions = 0;

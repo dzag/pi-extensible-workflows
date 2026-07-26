@@ -85,7 +85,7 @@
         <h2>Tool API</h2>
         <p>The extension registers these core tools and one command:</p>
         <ul>
-          <li><code>workflow</code> runs an inline or registered-function deterministic JavaScript workflow.</li>
+          <li><code>workflow</code> runs an inline, file-backed, or registered-function deterministic JavaScript workflow.</li>
           <li><code>workflow_resume</code> resumes a budget-exhausted run with an optional budget patch and preserves its foreground/background launch mode unless overridden.</li>
           <li><code>workflow_retry</code> creates a linked child for an explicitly failed run, replays its completed journal operations, and preserves its launch mode unless overridden.</li>
           <li><code>workflow_respond</code> approves or rejects a pending checkpoint or budget decision.</li>
@@ -99,7 +99,8 @@
           <tbody>
             <tr><td><code>name</code></td><td>string</td><td>Required non-empty name for inline launches. Invalid for registered function launches, which use <code>workflow</code> as the run name.</td></tr>
             <tr><td><code>description</code></td><td>string</td><td>Optional human-readable metadata.</td></tr>
-            <tr><td><code>script</code></td><td>string</td><td>Immutable workflow source. Mutually exclusive with <code>workflow</code>.</td></tr>
+            <tr><td><code>script</code></td><td>string</td><td>Immutable workflow source. Mutually exclusive with <code>scriptPath</code> and <code>workflow</code>.</td></tr>
+            <tr><td><code>scriptPath</code></td><td>string</td><td>Path to a JavaScript workflow file, resolved from the launch project directory and read once at launch. Its exact contents become the immutable persisted inline source. Mutually exclusive with <code>script</code> and <code>workflow</code>.</td></tr>
             <tr><td><code>workflow</code></td><td>string</td><td>Registered function by its unqualified name.</td></tr>
             <tr><td><code>args</code></td><td>JSON value</td><td>Available inside an inline script as <code>args</code>; for a registered function it must satisfy the function input schema. Defaults to <code>null</code> for inline scripts.</td></tr>
             <tr><td><code>foreground</code></td><td>boolean</td><td>Wait for the final value instead of returning a run ID; the model-visible result also includes the completed run ID.</td></tr>

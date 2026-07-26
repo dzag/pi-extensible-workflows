@@ -160,6 +160,6 @@ export interface WorkflowCatalogIndexFunction { name: string; description: strin
 export interface WorkflowCatalogIndexVariable { name: string; description: string; schema: JsonSchema }
 export interface WorkflowCatalogIndex { functions: readonly WorkflowCatalogIndexFunction[]; variables: readonly WorkflowCatalogIndexVariable[]; modelAliases?: Readonly<Record<string, string>>; modelAliasEntries?: readonly WorkflowCatalogModelAlias[]; settings?: WorkflowCatalogSettings }
 export interface WorkflowCatalogError { error: { code: "NOT_FOUND"; name: string; message: string } }
-export interface WorkflowValidationParameters { name?: string; description?: string; script?: string; workflow?: string; args?: unknown }
+export interface WorkflowValidationParameters { name?: string; description?: string; script?: string; scriptPath?: string; workflow?: string; args?: unknown }
 export interface WorkflowValidationContext { cwd: string; projectTrusted: boolean; availableModels: ReadonlySet<string>; rootTools: ReadonlySet<string>; modelAliases?: Readonly<Record<string, string>>; knownModels?: ReadonlySet<string>; settingsPath?: string; agentDir?: string }
 export interface ValidatedWorkflowLaunch { script: string; checked: PreflightResult; agentDefinitions: Readonly<Record<string, AgentDefinition>>; projectAgentDefinitions: Readonly<Record<string, AgentDefinition>>; roleNames: readonly string[]; functionName?: string }

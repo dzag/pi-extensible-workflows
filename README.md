@@ -20,7 +20,7 @@ For source installs and local development, see the [installation guide](https://
 
 ## Capabilities
 
-The default path is a named inline workflow: write a `script` that fans out independent work with `parallel(...)`, awaits the keyed results, passes them into one summarizing `agent(...)`, and returns. Inline launches require a non-empty `name`; registered function launches reject `name` and use their registered function name as the run name. Runs are backgrounded by default; set `foreground: true` when the final value must be returned in the same tool call. If a foreground tool call detaches before its result is accepted by the next event-loop turn, the terminal success or failure is promoted to exactly one follow-up message.
+The default path is a named inline workflow: write a `script` that fans out independent work with `parallel(...)`, awaits the keyed results, passes them into one summarizing `agent(...)`, and returns. Inline launches require a non-empty `name`; a reviewed JavaScript file can be launched with `scriptPath` instead of `script`, and its contents are captured in the run at launch. Registered function launches reject `name` and use their registered function name as the run name. Runs are backgrounded by default; set `foreground: true` when the final value must be returned in the same tool call. If a foreground tool call detaches before its result is accepted by the next event-loop turn, the terminal success or failure is promoted to exactly one follow-up message.
 
 ```js
 const reviews = await parallel("review", {
@@ -36,7 +36,7 @@ return await agent(
 
 **Advanced capabilities:** Use registered functions, `outputSchema`, budgets, checkpoints, worktrees, retry/resume, CLI export, and `pipeline(...)` when the task requires them. They remain available without complicating the basic inline path. Workflow worktree scopes always use the explicit `withWorktree(name, callback)` form.
 
-The main Pi agent writes these scripts on the fly for each task; extensions can add reusable functions and variables, and completed workflows can resume without rerunning completed work.
+The main Pi agent writes these scripts on the fly for each task; an external review or approval flow can write one to a JavaScript file and launch it with `scriptPath`. Extensions can add reusable functions and variables, and completed workflows can resume without rerunning completed work.
 
 Learn more about roles, workflow contracts, and extension APIs in the documentation:
 
