@@ -1920,7 +1920,10 @@ void test("navigator opens the workflow script in the configured external editor
         component.handleInput?.("tui.select.down");
         component.handleInput?.("tui.select.confirm");
         const deadline = Date.now() + 5_000;
-        while (!existsSync(editedPath) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+        while (Date.now() < deadline) {
+          if (existsSync(editedPath) && readFileSync(editedPath, "utf8").includes("SCRIPT_START")) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
         assert.ok(existsSync(editedPath), "external editor was not invoked");
         assert.match(readFileSync(editedPath, "utf8"), /SCRIPT_START/);
         assert.match(readFileSync(editedPath, "utf8"), /SCRIPT_END/);
@@ -1997,11 +2000,17 @@ void test("navigator opens a persisted top-level agent result in the external ed
           component.handleInput?.("tui.select.down");
         }
         const deadline = Date.now() + 5_000;
-        while (!existsSync(editedPath) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+        while (Date.now() < deadline) {
+          if (existsSync(editedPath) && readFileSync(editedPath, "utf8").includes("\"answer\": 42")) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
         assert.ok(existsSync(editedPath), "external editor was not invoked");
         assert.match(readFileSync(editedPath, "utf8"), /"answer": 42/);
         assert.match(readFileSync(openedPath, "utf8"), /artifact.*\.json$/);
-        assert.equal(existsSync(readFileSync(openedPath, "utf8")), false);
+        const artifactPath = readFileSync(openedPath, "utf8");
+        const cleanupDeadline = Date.now() + 5_000;
+        while (existsSync(artifactPath) && Date.now() < cleanupDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+        assert.equal(existsSync(artifactPath), false);
         component.dispose?.();
         return undefined;
       },
