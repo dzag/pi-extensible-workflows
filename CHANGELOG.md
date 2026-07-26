@@ -3,12 +3,33 @@
 
 ## [3.3.0] - 2026-07-26
 
-### Highlights
+### New capabilities
 
-- Added workflow-specific `SYSTEM.md` files and role-level system prompt replacement for workflow agents.
-- Added orange stalled-agent warnings after ten minutes without observable session events.
-- Show active shell operations in workflow progress while agents are settled.
-- Deliver concise human-readable background failure follow-ups and support `inspect --failed` for persisted runs.
+- Added per-run summaries and non-TTY/headless run inspection, including best-effort summary projection and journal-derived timestamps ([#129](https://github.com/vekexasia/pi-extensible-workflows/issues/129); [1908ae5](https://github.com/vekexasia/pi-extensible-workflows/commit/1908ae5), [a911588](https://github.com/vekexasia/pi-extensible-workflows/commit/a911588), [d91d29a](https://github.com/vekexasia/pi-extensible-workflows/commit/d91d29a), [6800fdd](https://github.com/vekexasia/pi-extensible-workflows/commit/6800fdd)).
+- Added per-agent token and spend accounting to workflow inspection ([#134](https://github.com/vekexasia/pi-extensible-workflows/issues/134); [4bce545](https://github.com/vekexasia/pi-extensible-workflows/commit/4bce545)).
+- Added portable workflow bundles with dependency preflight, selected payload resources, skills, extension modules, and self-contained launchers ([#123](https://github.com/vekexasia/pi-extensible-workflows/issues/123); [76dbc40](https://github.com/vekexasia/pi-extensible-workflows/commit/76dbc40), [0d6c91b](https://github.com/vekexasia/pi-extensible-workflows/commit/0d6c91b), [cc81808](https://github.com/vekexasia/pi-extensible-workflows/commit/cc81808)).
+- Added workflow-specific `SYSTEM.md` files and role-level system prompt replacement ([#137](https://github.com/vekexasia/pi-extensible-workflows/issues/137); [cc1082e](https://github.com/vekexasia/pi-extensible-workflows/commit/cc1082e), [0ada062](https://github.com/vekexasia/pi-extensible-workflows/commit/0ada062)).
+- Added orange stalled-agent warnings after ten minutes without observable session events ([#138](https://github.com/vekexasia/pi-extensible-workflows/issues/138); [30ab4a1](https://github.com/vekexasia/pi-extensible-workflows/commit/30ab4a1), [5577f69](https://github.com/vekexasia/pi-extensible-workflows/commit/5577f69), [4f594ec](https://github.com/vekexasia/pi-extensible-workflows/commit/4f594ec)).
+- Added concise human-readable background failure follow-ups and `inspect --failed` for persisted runs ([#130](https://github.com/vekexasia/pi-extensible-workflows/issues/130); [90acffe](https://github.com/vekexasia/pi-extensible-workflows/commit/90acffe), [387643f](https://github.com/vekexasia/pi-extensible-workflows/commit/387643f), [30e67b2](https://github.com/vekexasia/pi-extensible-workflows/commit/30e67b2)).
+- Added active shell operations to workflow progress and cleared stale shell activity during recovery ([#141](https://github.com/vekexasia/pi-extensible-workflows/issues/141); [cf62485](https://github.com/vekexasia/pi-extensible-workflows/commit/cf62485), [a7e4386](https://github.com/vekexasia/pi-extensible-workflows/commit/a7e4386)).
+
+### Recovery, reliability, and navigation
+
+- Continued TUI provider retries in the same native session, preserved results, and recovered thrown provider errors before disposal ([#135](https://github.com/vekexasia/pi-extensible-workflows/issues/135); [d75cb5b](https://github.com/vekexasia/pi-extensible-workflows/commit/d75cb5b), [0b09509](https://github.com/vekexasia/pi-extensible-workflows/commit/0b09509), [d7ca8e7](https://github.com/vekexasia/pi-extensible-workflows/commit/d7ca8e7)).
+- Preserved registered workflow role definitions across retries ([#136](https://github.com/vekexasia/pi-extensible-workflows/issues/136); [3fcbf76](https://github.com/vekexasia/pi-extensible-workflows/commit/3fcbf76), [1755c30](https://github.com/vekexasia/pi-extensible-workflows/commit/1755c30)).
+- Preserved foreground/background launch mode across resume and retry, including detached interactive budget recovery ([#142](https://github.com/vekexasia/pi-extensible-workflows/issues/142); [326f6bc](https://github.com/vekexasia/pi-extensible-workflows/commit/326f6bc), [fa58b94](https://github.com/vekexasia/pi-extensible-workflows/commit/fa58b94), [bfbd909](https://github.com/vekexasia/pi-extensible-workflows/commit/bfbd909)).
+- Delivered detached foreground workflow completion and failure follow-ups correctly ([#143](https://github.com/vekexasia/pi-extensible-workflows/issues/143); [3d2a190](https://github.com/vekexasia/pi-extensible-workflows/commit/3d2a190)).
+- Improved workflow navigator hierarchy and Back behavior, and added vim key support ([#139](https://github.com/vekexasia/pi-extensible-workflows/issues/139); [0dec3df](https://github.com/vekexasia/pi-extensible-workflows/commit/0dec3df); [#144](https://github.com/vekexasia/pi-extensible-workflows/issues/144); [3b34e78](https://github.com/vekexasia/pi-extensible-workflows/commit/3b34e78)).
+- Completed external-editor artifact cleanup ([#133](https://github.com/vekexasia/pi-extensible-workflows/issues/133); [897f8fd](https://github.com/vekexasia/pi-extensible-workflows/commit/897f8fd)).
+
+### Validation and acceptance coverage
+
+- Added trust-boundary adversarial regression coverage ([#128](https://github.com/vekexasia/pi-extensible-workflows/issues/128); [3e5e6a3](https://github.com/vekexasia/pi-extensible-workflows/commit/3e5e6a3)).
+- Added targeted recovery-selection, evaluation-argument, and partial-shell retry acceptance coverage ([#132](https://github.com/vekexasia/pi-extensible-workflows/issues/132); [245a956](https://github.com/vekexasia/pi-extensible-workflows/commit/245a956), [458f564](https://github.com/vekexasia/pi-extensible-workflows/commit/458f564), [50581d5](https://github.com/vekexasia/pi-extensible-workflows/commit/50581d5), [63e6901](https://github.com/vekexasia/pi-extensible-workflows/commit/63e6901)).
+
+### Verification
+
+- Package check passed: 405 tests, 404 passed, 1 skipped; lint, documentation checks, package dry-run, and npm publication passed.
 
 ## [3.2.0] - 2026-07-25
 
