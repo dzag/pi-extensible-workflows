@@ -226,7 +226,7 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
   let aborting: Promise<void> | undefined;
   let prompting: Promise<WorkflowAgentTurnResult> | undefined;
   let disposed = false;
-  const startAbort = () => aborting ??= Promise.resolve().then(() => native.abort?.()).then(() => undefined);
+  const startAbort = () => aborting ??= Promise.resolve().then(() => native.abort?.()).then(() => undefined).finally(() => { aborting = undefined; });
   const reference: WorkflowAgentSessionReference = { transport: "local", sessionId: native.sessionId, ...(native.sessionFile ? { locator: { sessionFile: native.sessionFile } } : {}) };
   const session = {
     reference,
@@ -241,7 +241,7 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
       try { return await prompt; } finally { if (prompting === prompt) prompting = undefined; }
     },
     async steer(text: string) { if (!native.steer) throw new WorkflowError("INTERNAL_ERROR", "Local workflow session does not support steering"); await native.steer(text); },
-    async abort() { await startAbort(); },
+    async abort() { if (disposed) return; await startAbort(); },
     async dispose() {
       disposal ??= (async () => {
         disposed = true;
