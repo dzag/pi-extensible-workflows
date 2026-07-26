@@ -37,7 +37,7 @@ async function openNavigator(h: TestHarness): Promise<string> {
   await h.addRun({
     workflowName: "test-suite",
     state: "failed",
-    agents: [{ name: "tester", state: "failed", attempts: 2, attemptDetails: [{ attempt: 2, sessionId: "s", sessionFile: "/s", error: { code: "AGENT_FAILED", message: "assertion failed" }, accounting: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 } }] }],
+    agents: [{ name: "tester", state: "failed", attempts: 2, attemptDetails: [{ attempt: 2, transport: "local", session: { transport: "local", sessionId: "s", locator: { sessionFile: "/s" } }, setup: { hookNames: [], model: { provider: "openai", model: "gpt" }, tools: [], cwd: "/repo" }, error: { code: "AGENT_FAILED", message: "assertion failed" }, accounting: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 } }] }],
   });
 
   await h.launch();

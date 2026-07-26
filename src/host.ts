@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
 import { copyToClipboard, getAgentDir, SettingsManager, truncateToVisualLines, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
-import { createNativeAgentSession, FairAgentScheduler, WorkflowAgentExecutor, type AgentActivity, type AgentAttempt, type AgentDefinition, type AgentProgress, type AgentProviderFailure, type AgentProviderRecovery, type SessionFactory } from "./agent-execution.js";
+import { FairAgentScheduler, WorkflowAgentExecutor, localAgentTransport, type AgentActivity, type AgentAttempt, type AgentDefinition, type AgentProgress, type AgentProviderFailure, type AgentProviderRecovery } from "./agent-execution.js";
 import { herdrPaneId, openHerdrPane } from "./herdr.js";
 import { acquireSessionLease, listRunIds, RunStore, SessionLease, structuralPath as operationPath } from "./persistence.js";
 import type { AwaitingCheckpoint, PersistedRun, WorktreeReference } from "./persistence.js";
@@ -17,7 +17,7 @@ import { launchScriptForSnapshot, loadAgentDefinitions, preflight, resolveAgentR
 import { beginWorkflowExtensionLoading, loadingRegistry, resetWorkflowRegistry, type WorkflowRegistryApi } from "./registry.js";
 import { agentIdentityPath, agentWorktree, encoded, executeShellCommand, persistActiveAgentAttempt, persistAgentAttempts, readShellResult, runWorkflow, shellIdentityPath } from "./execution.js";
 import { openWorkflowArtifact, workflowResultArtifact, workflowScriptArtifact, type WorkflowArtifact } from "./workflow-artifacts.js";
-import { ERROR_CODES, LAUNCH_SNAPSHOT_IDENTITY_VERSION, WORKFLOW_AGENT_STALL_THRESHOLD_MS, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentOptions, type AgentRecord, type AgentResourcePolicy, type BudgetApprovalRequest, type BudgetEvent, type JsonValue, type LaunchSnapshot, type ModelSpec, type RunState, type ShellIdentity, type ShellOptions, type ShellResult, type WorkflowBridge, type WorkflowCatalogFunction, type WorkflowCatalogIndex, type WorkflowCatalogVariable, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowFailureAgent, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowExecution, type WorkflowMetadata, type WorkflowModelAliasResolverContext, type WorkflowRetryProvenance, type WorkflowRunContext, type WorkflowSettings, type WorkflowSettingsResolution, type WorkflowSiblingAgent, type WorkflowWorktreeReference } from "./types.js";
+import { ERROR_CODES, LAUNCH_SNAPSHOT_IDENTITY_VERSION, WORKFLOW_AGENT_STALL_THRESHOLD_MS, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentAttemptActionContext, type AgentAttemptSummary, type AgentOptions, type AgentRecord, type AgentResourcePolicy, type AgentTransport, type BudgetApprovalRequest, type BudgetEvent, type JsonValue, type LaunchSnapshot, type ModelSpec, type RunState, type ShellIdentity, type ShellOptions, type ShellResult, type WorkflowBridge, type WorkflowCatalogFunction, type WorkflowCatalogIndex, type WorkflowCatalogVariable, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowFailureAgent, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowExecution, type WorkflowMetadata, type WorkflowModelAliasResolverContext, type WorkflowRetryProvenance, type WorkflowRunContext, type WorkflowSettings, type WorkflowSettingsResolution, type WorkflowSiblingAgent, type WorkflowWorktreeReference } from "./types.js";
 const SETTLED_AGENT_STATES: ReadonlySet<import("./types.js").AgentState> = new Set(["completed", "failed", "cancelled"]);
 const INTERNAL_WORKFLOW_TOOLS: readonly string[] = ["workflow", "workflow_respond", "workflow_stop", "workflow_resume", "workflow_retry", "workflow_catalog"];
 const HARD_TERMINAL_RUN_STATES: ReadonlySet<string> = new Set(["completed", "failed", "stopped"]);
@@ -939,7 +939,7 @@ export function formatNavigatorRun(loaded: { run: PersistedRun; snapshot: Readon
   if (!checkpoints.length) lines.push("  (none)");
   for (const checkpoint of checkpoints) lines.push(`  ${checkpoint.name}: ${checkpoint.prompt} context=${JSON.stringify(checkpoint.context)}`);
   lines.push(`Worktrees: ${String(worktrees.length)}`);
-  lines.push(`Native Pi transcripts: ${String(run.nativeSessions.length)}`);
+  lines.push(`Agent sessions: ${String(run.agentSessions.length)}`);
   return lines.join("\n");
 }
 export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readonly<LaunchSnapshot>, width: number, selection: WorkflowPhaseSelection = {}, styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES, now = Date.now()): string[] {
@@ -991,7 +991,7 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
     const agent = node.agent;
     if (!agent) return [styles.muted("Agent details are unavailable")];
     const byId = new Map(run.agents.map((candidate) => [candidate.id, candidate]));
-    const result = [styles.bold(`Selected agent: ${agentBreadcrumb(agent, byId, true)}`), `State: ${phaseStyle(agent.state)(agent.state)}`, `Structural path: ${agent.structuralPath?.join(" > ") || "(root)"}`, `Model: ${agent.model.provider}/${agent.model.model}${agent.model.thinking ? `:${agent.model.thinking}` : ""}`, `Role: ${agent.role ?? "(none)"}`, `Tools: ${agent.tools.join(", ") || "(none)"}`, `Attempts: ${String(agent.attempts)}`, ...(agent.accounting ? formatAgentAccounting(agent.accounting) : []), ...(selection.actions ? [] : [styles.muted("enter for agent actions")])];
+    const result = [styles.bold(`Selected agent: ${agentBreadcrumb(agent, byId, true)}`), `State: ${phaseStyle(agent.state)(agent.state)}`, `Structural path: ${agent.structuralPath?.join(" > ") || "(root)"}`, `Model: ${agent.model.provider}/${agent.model.model}${agent.model.thinking ? `:${agent.model.thinking}` : ""}`, `Role: ${agent.role ?? "(none)"}`, `Tools: ${agent.tools.join(", ") || "(none)"}`, ...(agent.systemPrompt === undefined ? [] : [`System prompt: ${agent.systemPrompt}`]), `Attempts: ${String(agent.attempts)}`, ...(agent.accounting ? formatAgentAccounting(agent.accounting) : []), ...(selection.actions ? [] : [styles.muted("enter for agent actions")])];
     const error = agent.attemptDetails?.at(-1)?.error;
     if (error) result.push(styles.error(`Error: ${error.code}: ${error.message}`));
     if (agent.activity) result.push(`Activity: ${agent.activity.text}`);
@@ -1073,8 +1073,8 @@ function boundedWorkflowFailureDiagnostics(value: WorkflowFailureDiagnostics): W
       ...(value.failedAgent.role ? { role: utf8Prefix(value.failedAgent.role, 128) } : {}),
       structuralPath: value.failedAgent.structuralPath.slice(0, 8).map((part) => utf8Prefix(part, 128)),
       attempt: value.failedAgent.attempt,
-      ...(value.failedAgent.sessionId ? { sessionId: utf8Prefix(value.failedAgent.sessionId, 256) } : {}),
-      ...(value.failedAgent.sessionFile ? { sessionFile: utf8Prefix(value.failedAgent.sessionFile, 1024) } : {}),
+      ...(value.failedAgent.transport ? { transport: utf8Prefix(value.failedAgent.transport, 128) } : {}),
+      ...(value.failedAgent.session ? { session: structuredClone(value.failedAgent.session) } : {}),
     } } : {}),
     completedSiblingAgents: (value.completedSiblingAgents ?? []).slice(0, 16).map((agent) => ({
       id: utf8Prefix(agent.id, 128),
@@ -1100,8 +1100,6 @@ function boundedWorkflowFailureDiagnostics(value: WorkflowFailureDiagnostics): W
       bounded = { ...bounded, retry };
       continue;
     }
-    if (bounded.failedAgent?.sessionFile) { const failedAgent = { ...bounded.failedAgent }; delete failedAgent.sessionFile; bounded = { ...bounded, failedAgent }; continue; }
-    if (bounded.failedAgent?.sessionId) { const failedAgent = { ...bounded.failedAgent }; delete failedAgent.sessionId; bounded = { ...bounded, failedAgent }; continue; }
     if (Buffer.byteLength(bounded.artifacts.runDirectory) > 256) { bounded = { ...bounded, artifacts: { ...bounded.artifacts, runDirectory: utf8Prefix(bounded.artifacts.runDirectory, 256) } }; continue; }
     if (Buffer.byteLength(bounded.error.message) > 256) { bounded = { ...bounded, error: { ...bounded.error, message: utf8Prefix(bounded.error.message, 256) } }; continue; }
     if (bounded.failedAt !== null && Buffer.byteLength(bounded.failedAt) > 256) { bounded = { ...bounded, failedAt: utf8Prefix(bounded.failedAt, 256) }; continue; }
@@ -1141,8 +1139,8 @@ async function createWorkflowFailureDiagnostics(store: RunStore, metadata: Workf
     ...(failedAgentRecord.role ? { role: failedAgentRecord.role } : {}),
     structuralPath: [...(failedAgentRecord.structuralPath ?? [])],
     attempt: Math.max(1, failedAttempt?.attempt ?? failedAgentRecord.attempts),
-    ...(failedAttempt?.sessionId ? { sessionId: failedAttempt.sessionId } : {}),
-    ...(failedAttempt?.sessionFile ? { sessionFile: failedAttempt.sessionFile } : {}),
+    ...(failedAttempt?.transport ? { transport: failedAttempt.transport } : {}),
+    ...(failedAttempt?.session ? { session: failedAttempt.session } : {}),
   } satisfies WorkflowFailureAgent : undefined;
   const completedSiblingAgents = run.agents.filter((agent) => {
     if (agent.state !== "completed" || agent.id === failedAgentRecord?.id) return false;
@@ -1176,7 +1174,7 @@ async function createWorkflowFailureDiagnostics(store: RunStore, metadata: Workf
 }
 
 export function formatWorkflowFailureDiagnostics(diagnostic: WorkflowFailureDiagnostics): string {
-  const failedAgent = diagnostic.failedAgent ? `${diagnostic.failedAgent.label ?? diagnostic.failedAgent.id}${diagnostic.failedAgent.role ? ` role=${diagnostic.failedAgent.role}` : ""} attempt=${String(diagnostic.failedAgent.attempt)} path=${diagnostic.failedAgent.structuralPath.join(" > ") || "(root)"}${diagnostic.failedAgent.sessionFile ? ` session=${diagnostic.failedAgent.sessionFile}` : ""}` : "(not persisted)";
+  const failedAgent = diagnostic.failedAgent ? `${diagnostic.failedAgent.label ?? diagnostic.failedAgent.id}${diagnostic.failedAgent.role ? ` role=${diagnostic.failedAgent.role}` : ""} attempt=${String(diagnostic.failedAgent.attempt)} path=${diagnostic.failedAgent.structuralPath.join(" > ") || "(root)"}${diagnostic.failedAgent.session ? ` session=${diagnostic.failedAgent.session.transport}/${diagnostic.failedAgent.session.sessionId}` : ""}` : "(not persisted)";
   const siblingAgents = diagnostic.completedSiblingAgents;
   const siblings = siblingAgents ? siblingAgents.map((agent) => `${agent.label ?? agent.id}${agent.role ? ` role=${agent.role}` : ""} path=${agent.structuralPath.join(" > ") || "(root)"}`).join(", ") || "(none)" : diagnostic.completedSiblingPaths.map((path) => path.join(" > ") || "(root)").join(", ") || "(none)";
   const retry = diagnostic.retry ? [`  Retry: ${diagnostic.retry.action}`, `  Replayable completed paths: ${diagnostic.retry.completedPaths.join(", ") || "(none)"}`, `  Incomplete paths: ${diagnostic.retry.incompletePaths.join(", ") || "(unknown)"}`, `  Named worktrees: ${diagnostic.retry.namedWorktrees.join(", ") || "(none)"}`, `  Warning: ${diagnostic.retry.warning}`] : [];
@@ -1559,7 +1557,7 @@ function workflowKeyLabel(keybindings: unknown, binding: string, fallback: strin
   return [...new Set(vim ? [...configured, vim] : configured)].join("/");
 }
 
-export default function workflowExtension(pi: ExtensionAPI, home?: string, clipboard = copyToClipboard, createSession: SessionFactory = createNativeAgentSession, agentDir?: string, additionalSkillPaths: readonly string[] = []) {
+export default function workflowExtension(pi: ExtensionAPI, home?: string, clipboard = copyToClipboard, transport: AgentTransport = localAgentTransport, agentDir?: string, additionalSkillPaths: readonly string[] = []) {
   beginWorkflowExtensionLoading();
   const registry = loadingRegistry();
   const extensionAgentDir = agentDir ?? getAgentDir();
@@ -1607,6 +1605,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
   const foregroundDeliveries = new Map<string, { store: RunStore; inline: boolean; timer?: ReturnType<typeof setTimeout> }>();
   const liveActivities = new Map<string, Map<string, AgentActivity>>();
   const liveEventTimes = new Map<string, Map<string, number>>();
+  const liveAgentSessions = new Map<string, import("./types.js").WorkflowAgentSession>();
+  const setLiveAgentSession = (runId: string, agentId: string, session?: import("./types.js").WorkflowAgentSession) => { const key = `${runId}:${agentId}`; if (session) liveAgentSessions.set(key, session); else liveAgentSessions.delete(key); };
   const setLiveActivity = (runId: string, agentId: string, activity?: AgentActivity) => {
     const activities = liveActivities.get(runId);
     if (activity) {
@@ -1767,18 +1767,19 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const onProgress = async (progress: AgentProgress) => {
         let runState: PersistedRun;
         if (progress.persist) {
-          runState = await persistRunState(run.store, run.metadata, (current) => current.agents.some((agent) => agent.id === id) ? { ...current, ...run.budget.snapshot(), agents: current.agents.map((agent) => agent.id === id ? { ...agent, accounting: progress.accounting, toolCalls: progress.toolCalls, activity: progress.activity, ...(progress.lastEventAt === undefined ? {} : { lastEventAt: progress.lastEventAt }) } : agent) } : current);
+          runState = await persistRunState(run.store, run.metadata, (current) => current.agents.some((agent) => agent.id === id) ? { ...current, ...run.budget.snapshot(), agents: current.agents.map((agent) => agent.id === id ? { ...agent, accounting: progress.accounting, toolCalls: progress.toolCalls, ...(progress.state ? { model: progress.state.model, tools: progress.state.tools, ...(progress.state.systemPrompt === undefined ? {} : { systemPrompt: progress.state.systemPrompt }) } : {}), activity: progress.activity, ...(progress.lastEventAt === undefined ? {} : { lastEventAt: progress.lastEventAt }) } : agent) } : current);
         } else {
           const loaded = await run.store.load();
           if (!loaded.run.agents.some((agent) => agent.id === id)) return;
-          runState = { ...loaded.run, ...run.budget.snapshot(), agents: loaded.run.agents.map((agent) => agent.id === id ? { ...agent, accounting: progress.accounting, toolCalls: progress.toolCalls, activity: progress.activity, ...(progress.lastEventAt === undefined ? {} : { lastEventAt: progress.lastEventAt }) } : agent) };
+          runState = { ...loaded.run, ...run.budget.snapshot(), agents: loaded.run.agents.map((agent) => agent.id === id ? { ...agent, accounting: progress.accounting, toolCalls: progress.toolCalls, ...(progress.state ? { model: progress.state.model, tools: progress.state.tools, ...(progress.state.systemPrompt === undefined ? {} : { systemPrompt: progress.state.systemPrompt }) } : {}), activity: progress.activity, ...(progress.lastEventAt === undefined ? {} : { lastEventAt: progress.lastEventAt }) } : agent) };
         }
         if (!runState.agents.some((agent) => agent.id === id)) return;
         setLiveActivity(runId, id, progress.activity);
         setLiveEventTime(runId, id, progress.lastEventAt);
         run.update?.(workflowToolUpdate(withLiveActivities(runState)));
       };
-      const onAttempt = async (attempt: Pick<AgentAttempt, "attempt" | "sessionId" | "sessionFile" | "setup">) => {
+      const onAttempt = async (attempt: AgentAttempt) => {
+        setLiveAgentSession(runId, id, attempt.liveSession);
         await scheduler.flush();
         scheduler.attemptStarted(id);
         const lastEventAt = Date.now();
@@ -1798,9 +1799,11 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       await eventPublisher.agentStates(run.store, run.metadata, before.agents, completed.agents);
       const persisted = await persistRunState(run.store, run.metadata, (current) => ({ ...current, ...run.budget.snapshot() }));
       setLiveActivity(runId, id);
+      setLiveAgentSession(runId, id);
       run.update?.(workflowToolUpdate(withLiveActivities(persisted)));
       return result.value;
     } catch (error) {
+      setLiveAgentSession(runId, id);
       const attempts = (error as WorkflowError & { attempts?: readonly AgentAttempt[] }).attempts;
       if (attempts?.length) {
         const before = (await run.store.load()).run;
@@ -1829,7 +1832,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         catch { effective = previous ? { model: previous.model, ...(previous.requestedModel ? { requestedModel: previous.requestedModel } : {}), tools: previous.tools } : { model: node.options.model ? modelSpec(node.options.model, run.model) : { ...run.model, ...(node.options.thinking ? { thinking: node.options.thinking } : {}) }, ...(node.options.model ? { requestedModel: node.options.model } : {}), tools: node.options.tools }; }
         const resultPath = !node.parentId && node.options.agentIdentity ? agentIdentityPath(node.options.agentIdentity) : undefined;
         const lastEventAt = node.state === "running" ? previous?.state === "running" && previous.lastEventAt !== undefined ? previous.lastEventAt : Date.now() : previous?.lastEventAt;
-        return { id: node.id, name: node.label, ...(node.options.requestedLabel ? { label: node.options.requestedLabel } : {}), path: node.id, state: node.state, ...(node.parentId ? { parentId: node.parentId } : {}), structuralPath: [...(node.options.agentIdentity?.structuralPath ?? [])], ...(resultPath ? { resultPath } : {}), ...(node.options.parentBreadcrumb ? { parentBreadcrumb: node.options.parentBreadcrumb } : {}), ...(node.options.worktreeOwner ? { worktreeOwner: node.options.worktreeOwner } : {}), ...(node.options.role ? { role: node.options.role } : {}), ...(effective.requestedModel ? { requestedModel: effective.requestedModel } : {}), model: effective.model, tools: effective.tools, attempts: previous?.attempts ?? 0, ...(previous?.attemptDetails ? { attemptDetails: previous.attemptDetails } : {}), ...(previous?.accounting ? { accounting: previous.accounting } : {}), ...(previous?.toolCalls ? { toolCalls: previous.toolCalls } : {}), ...(previous?.activity ? { activity: previous.activity } : {}), ...(lastEventAt === undefined ? {} : { lastEventAt }) };
+        return { ...(previous?.systemPrompt === undefined ? {} : { systemPrompt: previous.systemPrompt }), id: node.id, name: node.label, ...(node.options.requestedLabel ? { label: node.options.requestedLabel } : {}), path: node.id, state: node.state, ...(node.parentId ? { parentId: node.parentId } : {}), structuralPath: [...(node.options.agentIdentity?.structuralPath ?? [])], ...(resultPath ? { resultPath } : {}), ...(node.options.parentBreadcrumb ? { parentBreadcrumb: node.options.parentBreadcrumb } : {}), ...(node.options.worktreeOwner ? { worktreeOwner: node.options.worktreeOwner } : {}), ...(node.options.role ? { role: node.options.role } : {}), ...(effective.requestedModel ? { requestedModel: effective.requestedModel } : {}), model: effective.model, tools: effective.tools, attempts: previous?.attempts ?? 0, ...(previous?.attemptDetails ? { attemptDetails: previous.attemptDetails } : {}), ...(previous?.accounting ? { accounting: previous.accounting } : {}), ...(previous?.toolCalls ? { toolCalls: previous.toolCalls } : {}), ...(previous?.activity ? { activity: previous.activity } : {}), ...(lastEventAt === undefined ? {} : { lastEventAt }) };
       });
       return { ...current, agents };
     });
@@ -1847,6 +1850,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     run.checkpointResolvers.clear();
     liveActivities.delete(runId);
     liveEventTimes.delete(runId);
+    for (const key of liveAgentSessions.keys()) if (key.startsWith(`${runId}:`)) liveAgentSessions.delete(key);
     eventPublisher.removeRun(runId);
     runs.delete(runId);
   };
@@ -1999,7 +2003,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     });
     catalogRegistered = true;
   };
-  const createAgentExecutor = (root: Omit<import("./agent-execution.js").AgentExecutionRoot, "agentDir" | "agentSetupHooks">) => new WorkflowAgentExecutor({ ...root, agentDir: extensionAgentDir, ...(additionalSkillPaths.length ? { additionalSkillPaths } : {}), agentSetupHooks: registry.agentSetupHooks() }, createSession);
+  const createAgentExecutor = (root: Omit<import("./agent-execution.js").AgentExecutionRoot, "agentDir" | "agentSetupHooks">) => new WorkflowAgentExecutor({ ...root, agentDir: extensionAgentDir, ...(additionalSkillPaths.length ? { additionalSkillPaths } : {}), agentSetupHooks: registry.agentSetupHooks() }, transport);
   const activeSnapshotTools = (tools: readonly string[], active: ReadonlySet<string> | "session") => active === "session"
     ? new Set(tools.filter((tool) => pi.getActiveTools().includes(tool) && tool !== "workflow_catalog"))
     : new Set(tools.filter((tool) => active.has(tool) || tool === "workflow_catalog"));
@@ -2272,7 +2276,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const childBudget = new WorkflowBudgetRuntime(budget, loaded.run.budgetVersion ?? 1, loaded.run.usage, loaded.run.budgetEvents);
       const childInitialBudget = childBudget.snapshot();
       const retry: WorkflowRetryProvenance = { sourceRunId: loaded.run.id, lineageRootRunId, completedPaths, incompletePaths, namedWorktrees };
-      await childStore.create({ id: childRunId, workflowName: loaded.snapshot.metadata.name, cwd, sessionId, state: "interrupted", parentRunId: loaded.run.id, retry, agents: [], nativeSessions: [], ...(budget ? { budget } : {}), budgetVersion: loaded.run.budgetVersion ?? 1, ...childInitialBudget }, childSnapshot);
+      await childStore.create({ id: childRunId, workflowName: loaded.snapshot.metadata.name, cwd, sessionId, state: "interrupted", parentRunId: loaded.run.id, retry, agents: [], agentSessions: [], ...(budget ? { budget } : {}), budgetVersion: loaded.run.budgetVersion ?? 1, ...childInitialBudget }, childSnapshot);
       const fallbackModel: ModelSpec = { provider: hostModel.provider, model: hostModel.id, thinking: pi.getThinkingLevel() };
       const model = modelSpec(loaded.snapshot.models[0] ?? "", fallbackModel);
       const lifecycle = lifecycleFor(childStore, "interrupted", childBudget, loaded.snapshot.metadata);
@@ -2453,7 +2457,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       } : undefined;
       const budgetRuntime = new WorkflowBudgetRuntime(budget);
       const initialBudget = budgetRuntime.snapshot();
-      await store.create({ id: runId, workflowName: checked.metadata.name, cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId(), state: "running", ...(parentRunId !== undefined ? { parentRunId } : {}), agents: [], nativeSessions: [], delivery: params.foreground ? { mode: "foreground", state: "attached", toolCallId } : { mode: "background", state: "pending" }, ...(budget ? { budget } : {}), budgetVersion: 1, ...initialBudget }, snapshot);
+      await store.create({ id: runId, workflowName: checked.metadata.name, cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId(), state: "running", ...(parentRunId !== undefined ? { parentRunId } : {}), agents: [], agentSessions: [], delivery: params.foreground ? { mode: "foreground", state: "attached", toolCallId } : { mode: "background", state: "pending" }, ...(budget ? { budget } : {}), budgetVersion: 1, ...initialBudget }, snapshot);
       if (params.foreground) foregroundDeliveries.set(toolCallId, { store, inline: false });
       const lifecycle = lifecycleFor(store, "running", budgetRuntime, checked.metadata);
       const background = !params.foreground;
@@ -2820,32 +2824,30 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             return { dashboard: formatWorkflowPhaseDashboard(liveRun, loaded.snapshot, process.stdout.columns || 80).join("\n"), phaseModel: buildWorkflowPhaseModel(liveRun, loaded.snapshot), run: liveRun, snapshot: loaded.snapshot, actions, copies, reviews, agentResults, agents: liveRun.agents, worktrees, cwd: liveRun.cwd };
           };
           const agentWorktreeFor = (dashboard: Awaited<ReturnType<typeof loadDashboard>>, agent: AgentRecord): WorktreeReference | undefined => agent.worktreeOwner ? dashboard.worktrees.find((candidate) => candidate.owner === agent.worktreeOwner) : undefined;
+          const agentAttemptActionContext = (dashboard: Awaited<ReturnType<typeof loadDashboard>>, agent: AgentRecord): AgentAttemptActionContext | undefined => {
+            const attempt = (agent.attemptDetails ?? []).reduce<AgentAttemptSummary | undefined>((latest, candidate) => !latest || candidate.attempt > latest.attempt ? candidate : latest, undefined);
+            if (!attempt) return undefined;
+            const liveCandidate = liveAgentSessions.get(`${dashboard.run.id}:${agent.id}`);
+            const live = liveCandidate && attempt.session && liveCandidate.reference.transport === attempt.session.transport && liveCandidate.reference.sessionId === attempt.session.sessionId ? liveCandidate : undefined;
+            const run = runs.get(dashboard.run.id);
+            const ui = { notify: (message: string, level: "info" | "warning" | "error" = "info") => { ctx.ui.notify(message, level); }, confirm: (title: string, message: string) => ctx.ui.confirm(title, message), select: (title: string, options: readonly string[]) => { return ctx.ui.select(title, [...options]); }, input: (title: string, placeholder?: string) => ctx.ui.input(title, placeholder) };
+            const attemptSnapshot = deepFreeze(structuredClone(attempt));
+            return { run: deepFreeze(structuredClone(dashboard.run)), agent: deepFreeze(structuredClone(agent)), attempt: attemptSnapshot, ...(attemptSnapshot.session ? { session: attemptSnapshot.session } : {}), ...(live ? { liveSession: live } : {}), signal: run?.abortController.signal ?? new AbortController().signal, ui: Object.freeze(ui) };
+          };
+          const visibleAgentAttemptActions = (dashboard: Awaited<ReturnType<typeof loadDashboard>>, agent: AgentRecord): readonly [string, import("./types.js").AgentAttemptAction][] => {
+            const context = agentAttemptActionContext(dashboard, agent);
+            if (!context) return [];
+            return Object.entries(registry.agentAttemptActions()).filter(([, action]) => { try { return action.visible(context); } catch { return false; } });
+          };
           const agentActionLabels = (dashboard: Awaited<ReturnType<typeof loadDashboard>>, agent: AgentRecord): string[] => {
             const worktree = agentWorktreeFor(dashboard, agent);
             return [
-              ...(agent.attemptDetails?.length && herdrPaneId() ? ["Fork as Pi session in pane"] : []),
+              ...visibleAgentAttemptActions(dashboard, agent).map(([, action]) => action.label),
               ...(worktree ? ["Copy branch", "Copy worktree path"] : []),
               ...(ctx.mode === "tui" && dashboard.agentResults.has(agent.id) ? ["Open result in editor"] : []),
               "Copy agent ID",
               "Back",
             ];
-          };
-          const forkAgentSession = async (dashboard: Awaited<ReturnType<typeof loadDashboard>>, agent: AgentRecord): Promise<void> => {
-            const attempts = [...(agent.attemptDetails ?? [])].sort((left, right) => left.attempt - right.attempt);
-            const worktree = agentWorktreeFor(dashboard, agent);
-            const choices = attempts.map((attempt) => `Attempt ${String(attempt.attempt)}`);
-            const choice = choices.length === 1 ? choices[0] : await ctx.ui.select("Fork attempts", [...choices, "Back"]);
-            const index = choice ? choices.indexOf(choice) : -1;
-            const attempt = index >= 0 ? attempts[index] : undefined;
-            if (!attempt) return;
-            const running = !SETTLED_AGENT_STATES.has(agent.state) && attempt.attempt === attempts.at(-1)?.attempt && !attempt.error;
-            if (running && !await ctx.ui.confirm("Fork running attempt?", "This attempt is still running. The snapshot may end mid-turn and will not receive later updates. It opens read-only to avoid concurrent changes to the workflow agent's working directory. Continue?")) return;
-            try {
-              await openHerdrPane({ action: "fork", cwd: worktree?.cwd ?? attempt.setup?.cwd ?? dashboard.cwd, original: attempt.sessionFile, ...(running ? { readOnly: true } : {}) });
-              ctx.ui.notify("Forked Pi session in pane.", "info");
-            } catch (error) {
-              ctx.ui.notify(`Cannot fork Pi session in pane: ${error instanceof Error ? error.message : String(error)}`, "warning");
-            }
           };
           const selectAgent = async (dashboard: Awaited<ReturnType<typeof loadDashboard>>, requestedAgentId?: string): Promise<void> => {
             const byId = new Map(dashboard.agents.map((agent) => [agent.id, agent]));
@@ -2864,10 +2866,15 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             for (;;) {
               const action = await ctx.ui.select(title(selected), actions);
               if (!action || action === "Back") return;
+              const extensionAction = visibleAgentAttemptActions(dashboard, selected).find(([, candidate]) => candidate.label === action);
+              if (extensionAction) {
+                const context = agentAttemptActionContext(dashboard, selected);
+                if (context) { try { await extensionAction[1].run(context); } catch (error) { ctx.ui.notify(`Agent attempt action failed: ${error instanceof Error ? error.message : String(error)}`, "error"); } }
+                return;
+              }
               if (action === "Copy agent ID") { await copyArtifact(selected.id, "agent ID"); continue; }
               if (action === "Copy branch" && worktree) { await copyArtifact(worktree.branch, "branch"); continue; }
               if (action === "Copy worktree path" && worktree) { await copyArtifact(worktree.path, "worktree path"); continue; }
-              if (action === "Fork as Pi session in pane") await forkAgentSession(dashboard, selected);
             }
           };
           for (;;) {
@@ -3021,7 +3028,14 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                             else if (action === "Copy agent ID") void copyArtifact(agent.id, "agent ID");
                             else if (action === "Copy branch" && worktree) void copyArtifact(worktree.branch, "branch");
                             else if (action === "Copy worktree path" && worktree) void copyArtifact(worktree.path, "worktree path");
-                            else done(`__workflow_fork__:${agent.id}`);
+                            else {
+                              const extensionAction = visibleAgentAttemptActions(view, agent).find(([, candidate]) => candidate.label === action);
+                              const actionContext = extensionAction ? agentAttemptActionContext(view, agent) : undefined;
+                              if (extensionAction && actionContext) {
+                                actionMode = false;
+                                void Promise.resolve(extensionAction[1].run(actionContext)).catch((error: unknown) => { ctx.ui.notify(`Agent attempt action failed: ${error instanceof Error ? error.message : String(error)}`, "error"); }).finally(() => { void updateDashboard(); });
+                              }
+                            }
                           }
                           else if (action === "Open script in editor") void openArtifact(readFile(join(store.directory, "workflow.js"), "utf8").then(workflowScriptArtifact), "workflow script");
                           else if (action === "Stop") requestStop();
@@ -3068,12 +3082,6 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             if (!actionChoice || actionChoice === "Back") { stores = await loadStores(); break; }
             if (actionChoice === "Agents...") { await selectAgent(view); continue; }
             if (actionChoice.startsWith("__workflow_agent__:")) { await selectAgent(view, actionChoice.slice("__workflow_agent__:".length)); continue; }
-            if (actionChoice.startsWith("__workflow_fork__:")) {
-              const agentId = actionChoice.slice("__workflow_fork__:".length);
-              const agent = view.agents.find((candidate) => candidate.id === agentId);
-              if (agent) await forkAgentSession(view, agent);
-              continue;
-            }
             if (actionChoice === "Refresh") continue;
             const copy = view.copies.get(actionChoice);
             if (copy) { await copyArtifact(copy.value, copy.artifact); continue; }

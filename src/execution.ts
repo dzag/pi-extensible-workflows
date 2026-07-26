@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { RunStore, structuralPath as operationPath } from "./persistence.js";
 import type { AgentAttempt } from "./agent-execution.js";
-import type { AgentIdentity, JsonValue, ShellIdentity, ShellOptions, ShellResult, WorkflowBridge, WorkflowErrorCode, WorkflowExecution } from "./types.js";
+import type { AgentIdentity, AgentAttemptSummary, JsonValue, ShellIdentity, ShellOptions, ShellResult, WorkflowAgentSessionReference, WorkflowBridge, WorkflowErrorCode, WorkflowExecution } from "./types.js";
 import { WorkflowError } from "./types.js";
 import { asWorkflowError, errorText, fail, isWorkflowAuthored, jsonValue, markWorkflowAuthored, object, positiveInteger } from "./utils.js";
 import { instrumentWorkflow, validateAgentOptions, validateShellCommand, validateShellOptions } from "./validation.js";
@@ -530,18 +530,19 @@ export function runWorkflow(script: string, args: JsonValue = null, bridge: Work
   if (signal?.aborted) cancel(); else signal?.addEventListener("abort", cancel, { once: true });
   return { result, cancel };
 }
-function nativeSessionReference(attempt: Pick<AgentAttempt, "sessionId" | "sessionFile">): { sessionId: string; sessionFile: string } {
-  return { sessionId: attempt.sessionId, sessionFile: attempt.sessionFile };
+function attemptSummary(attempt: AgentAttempt, accounting = attempt.accounting): AgentAttemptSummary {
+  return { attempt: attempt.attempt, transport: attempt.transport, ...(attempt.session ? { session: attempt.session } : {}), ...(attempt.error ? { error: attempt.error } : {}), accounting, setup: attempt.setup };
 }
-
-export async function persistActiveAgentAttempt(store: RunStore, id: string, active: Pick<AgentAttempt, "attempt" | "sessionId" | "sessionFile" | "setup">): Promise<void> {
+export async function persistActiveAgentAttempt(store: RunStore, id: string, active: AgentAttempt): Promise<void> {
   await store.updateState((run) => {
     const agent = run.agents.find((candidate) => candidate.id === id);
     if (!agent) throw new WorkflowError("INTERNAL_ERROR", `Missing production ownership record: ${id}`);
     const accounting = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-    const details = [...(agent.attemptDetails ?? []).filter((candidate) => candidate.attempt !== active.attempt), { ...active, accounting }];
-    const nativeSessions = run.nativeSessions.some(({ sessionId }) => sessionId === active.sessionId) ? run.nativeSessions : [...run.nativeSessions, nativeSessionReference(active)];
-    return { ...run, agents: run.agents.map((candidate) => candidate.id === id ? { ...candidate, attempts: Math.max(candidate.attempts, active.attempt), attemptDetails: details } : candidate), nativeSessions };
+    const detail = attemptSummary(active, accounting);
+    const details = [...(agent.attemptDetails ?? []).filter((candidate) => candidate.attempt !== active.attempt), detail];
+    const session = active.session;
+    const agentSessions = session && !run.agentSessions.some(({ transport, sessionId }) => transport === session.transport && sessionId === session.sessionId) ? [...run.agentSessions, session] : run.agentSessions;
+    return { ...run, agents: run.agents.map((candidate) => candidate.id === id ? { ...candidate, attempts: Math.max(candidate.attempts, active.attempt), attemptDetails: details } : candidate), agentSessions };
   });
 }
 
@@ -550,9 +551,10 @@ export async function persistAgentAttempts(store: RunStore, id: string, attempts
     const agent = run.agents.find((candidate) => candidate.id === id);
     if (!agent) throw new WorkflowError("INTERNAL_ERROR", `Missing production ownership record: ${id}`);
     const total = attempts.reduce((sum, attempt) => ({ input: sum.input + attempt.accounting.input, output: sum.output + attempt.accounting.output, cacheRead: sum.cacheRead + attempt.accounting.cacheRead, cacheWrite: sum.cacheWrite + attempt.accounting.cacheWrite, cost: sum.cost + attempt.accounting.cost }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 });
-    const attemptDetails = attempts.map(({ attempt, sessionId, sessionFile, error, accounting, setup }) => ({ attempt, sessionId, sessionFile, ...(error ? { error } : {}), accounting, ...(setup ? { setup } : {}) }));
-    const sessionIds = new Set(attempts.map(({ sessionId }) => sessionId));
-    return { ...run, agents: run.agents.map((candidate) => candidate.id === id ? { ...candidate, attempts: attempts.length, attemptDetails, accounting: total } : candidate), nativeSessions: [...run.nativeSessions.filter(({ sessionId }) => !sessionIds.has(sessionId)), ...attempts.map((attempt) => nativeSessionReference(attempt))] };
+    const attemptDetails = attempts.map((attempt) => attemptSummary(attempt));
+    const sessions = attempts.map((attempt) => attempt.session).filter((session): session is WorkflowAgentSessionReference => session !== undefined);
+    const sessionKeys = new Set(sessions.map(({ transport, sessionId }) => `${transport}:${sessionId}`));
+    return { ...run, agents: run.agents.map((candidate) => candidate.id === id ? { ...candidate, attempts: attempts.length, attemptDetails, accounting: total } : candidate), agentSessions: [...run.agentSessions.filter(({ transport, sessionId }) => !sessionKeys.has(`${transport}:${sessionId}`)), ...sessions] };
   });
 }
 

@@ -119,6 +119,12 @@ function readTranscript(path: string): TranscriptSummary | undefined {
     return summary.model === undefined ? undefined : summary;
   } catch { return undefined; }
 }
+function attemptTranscriptPath(attempt: NonNullable<PersistedRun["agents"][number]["attemptDetails"]>[number]): string | undefined {
+  const session = attempt.session;
+  if (!session || session.transport !== "local" || typeof session.locator !== "object" || session.locator === null || Array.isArray(session.locator)) return undefined;
+  const path = session.locator.sessionFile;
+  return typeof path === "string" && path ? path : undefined;
+}
 
 function resultRunId(result: ToolResult | undefined): string | undefined {
   if (!result) return undefined;
@@ -157,33 +163,18 @@ async function agentReport(agent: PersistedRun["agents"][number]): Promise<Agent
   const fallbackThinking = agent.model.thinking;
   const attempts: AttemptReport[] = [];
   for (const attempt of agent.attemptDetails ?? []) {
-    const log = readTranscript(attempt.sessionFile);
+    const setup = attempt.setup;
+    const path = attemptTranscriptPath(attempt);
+    const log = path ? readTranscript(path) : undefined;
     if (log) {
-      const model = log.model ?? fallbackModel;
+      const model = log.model ?? `${setup.model.provider}/${setup.model.model}`;
       const cost = log.cost;
-      attempts.push({
-        attempt: attempt.attempt,
-        prompt: log.prompt ?? "(transcript unavailable)",
-        model,
-        ...(log.thinking !== undefined ? { thinking: log.thinking } : {}),
-        cost,
-        models: log.models.length ? log.models : [{ model, cost }],
-        ...(attempt.error ? { error: `${attempt.error.code}: ${attempt.error.message}` } : {}),
-        ...(attempt.setup ? { setup: attempt.setup } : {}),
-      });
+      attempts.push({ attempt: attempt.attempt, prompt: log.prompt ?? "(transcript unavailable)", model, ...(log.thinking !== undefined ? { thinking: log.thinking } : {}), cost, models: log.models.length ? log.models : [{ model, cost }], ...(attempt.error ? { error: `${attempt.error.code}: ${attempt.error.message}` } : {}), setup });
       continue;
     }
+    const model = `${setup.model.provider}/${setup.model.model}`;
     const cost = attempt.accounting.cost;
-    attempts.push({
-      attempt: attempt.attempt,
-      prompt: "(transcript unavailable)",
-      model: fallbackModel,
-      ...(fallbackThinking !== undefined ? { thinking: fallbackThinking } : {}),
-      cost,
-      models: [{ model: fallbackModel, cost }],
-      ...(attempt.error ? { error: `${attempt.error.code}: ${attempt.error.message}` } : {}),
-      ...(attempt.setup ? { setup: attempt.setup } : {}),
-    });
+    attempts.push({ attempt: attempt.attempt, prompt: "(transcript unavailable)", model, ...(setup.model.thinking !== undefined ? { thinking: setup.model.thinking } : {}), cost, models: [{ model, cost }], ...(attempt.error ? { error: `${attempt.error.code}: ${attempt.error.message}` } : {}), setup });
   }
   if (!attempts.length) {
     const cost = agent.accounting?.cost ?? 0;

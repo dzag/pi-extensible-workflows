@@ -63,7 +63,7 @@
       </section>
       <section id="registration">
         <h2>Registration contract</h2>
-        <p><code>WorkflowExtension</code> is the only top-level registration object. Its own keys are strict, and at least one of <code>functions</code>, <code>variables</code>, <code>modelAliases</code>, or <code>agentSetupHooks</code> must contain an entry. The accepted fields are:</p>
+        <p><code>WorkflowExtension</code> is the only top-level registration object. Its own keys are strict, and at least one of <code>functions</code>, <code>variables</code>, <code>modelAliases</code>, <code>agentSetupHooks</code>, or <code>agentAttemptActions</code> must contain an entry. The accepted fields are:</p>
         <div class="table-wrap"><table>
           <thead><tr><th>Field</th><th>Type</th><th>Contract</th></tr></thead>
           <tbody>
@@ -74,6 +74,7 @@
             <tr><td><code>variables</code></td><td>record of <code>WorkflowVariable</code></td><td>Optional named launch-scoped globals. Names share the function namespace.</td></tr>
             <tr><td><code>modelAliases</code></td><td>record of <code>WorkflowModelAlias</code></td><td>Optional named dynamic model resolvers. Alias names are case-sensitive and must match <code>[A-Za-z][A-Za-z0-9_-]*</code>; names are unique across extensions.</td></tr>
             <tr><td><code>agentSetupHooks</code></td><td>record of <code>AgentSetupHook</code></td><td>Optional trusted hooks. Hook names must be identifiers and unique across extensions.</td></tr>
+            <tr><td><code>agentAttemptActions</code></td><td>record of <code>AgentAttemptAction</code></td><td>Optional collision-checked actions for the selected agent's latest attempt in <code>/workflow</code>. Visibility is synchronous; the live session is supplied only while that attempt is active.</td></tr>
             <tr><td><code>roleDirectories</code></td><td>array of absolute paths or <code>file:</code> URLs</td><td>Optional packaged role directories. They are scanned as extension defaults; standard global and trusted project roles override matching names, while duplicate extension role names are rejected.</td></tr>
           </tbody>
         </table></div>
@@ -226,19 +227,19 @@
       </section>
       <section id="hooks">
         <h2>Agent setup hooks</h2>
-        <p>An <code>AgentSetupHook</code> is trusted code that runs after normal model, tool, cwd, and role resolution but before the native Pi session is created. It has <code>priority?: number</code> and <code>setup(agent, context)</code>. The priority must be finite; it defaults to <code>10</code>. Hooks run in ascending priority order, with the stable hook name breaking ties.</p>
+        <p>An <code>AgentSetupHook</code> is trusted code that runs after normal model, tool, cwd, and role resolution but before the selected agent transport creates a session. It has <code>priority?: number</code> and <code>setup(agent, context)</code>. The priority must be finite; it defaults to <code>10</code>. Hooks run in ascending priority order, with the stable hook name breaking ties. Hooks may replace or wrap <code>agent.transport</code>; the final prepared policy remains the capability ceiling.</p>
         <h3><code>AgentSetup</code> and <code>AgentSetupContext</code></h3>
         <div class="table-wrap"><table>
           <thead><tr><th>Contract</th><th>Fields</th></tr></thead>
           <tbody>
-            <tr><td><code>AgentSetup</code></td><td><code>prompt: string</code>, mutable; <code>options: AgentOptions</code>, mutable; <code>sessionInput: SessionInput</code>, mutable; and <code>createSession: SessionFactory</code>, a function returning <code>Promise&lt;NativeSession&gt;</code> for the prepared input.</td></tr>
+            <tr><td><code>AgentSetup</code></td><td><code>prompt: string</code>, mutable; <code>options: AgentOptions</code>, mutable; mutable <code>sessionInput: SessionInput</code>; immutable <code>prepared: PreparedAgentSession</code>; and the current <code>transport: AgentTransport</code>.</td></tr>
             <tr><td><code>SessionInput</code></td><td><code>cwd: string</code>, <code>model: ModelSpec</code>, <code>tools: SessionTools</code>, and <code>sessionLabel: string</code>; optional <code>agentDir: string</code>, <code>customTools: ToolDefinition[]</code>, <code>resultTool: ToolDefinition</code>, <code>systemPromptAppend: string</code>, <code>extensionFactories: InlineExtension[]</code>, <code>resourcePolicy: AgentResourcePolicy</code>, and <code>options: AgentOptions</code>.</td></tr>
             <tr><td><code>AgentSetupContext</code></td><td>Read-only <code>run: WorkflowRunContext</code>, read-only <code>identity: AgentIdentity</code>, <code>attempt: number</code> starting at 1, and cancellation <code>signal: AbortSignal</code>.</td></tr>
             <tr><td><code>AgentIdentity</code></td><td>Read-only <code>structuralPath: string[]</code>, <code>callSite: string</code>, and <code>occurrence: number</code>; optional <code>parentBreadcrumb: string</code> and <code>worktreeOwner: string</code>.</td></tr>
           </tbody>
         </table></div>
         <p>Hook execution is outside the agent <code>timeoutMs</code> clock. Every retry starts from a fresh setup baseline and runs every hook again. Cancellation is checked before and after hooks. A hook exception stops the hook chain, prevents session creation, and fails the setup; it is not retried as a native-session failure. Keep hooks short and cancellation-aware.</p>
-        <p>The setup surfaces are intentionally powerful. A hook can change the prompt, JSON options, model, thinking, tools, cwd, system prompt, custom tools, extension factories, resource policy, or session factory. Those mutations can bypass ordinary workflow policy, so hook code must remain trusted. Unknown JSON-compatible options are preserved for the current setup but are not inherited by child agents. A hook's custom session input is not serialized into run snapshots; cold resume loads the hooks currently registered by the host.</p>
+        <p>The setup surfaces are intentionally powerful. A hook can change the prompt, JSON options, model, thinking, tools, cwd, system prompt, custom tools, extension factories, resource policy, or transport. The immutable prepared launch cannot widen inherited tools, trust, skills, or extensions. Unknown JSON-compatible options are preserved for the current setup but are not inherited by child agents. A transport owns session materialization; core persists only its reference and never reconnects it during cold resume.</p>
         <h3>One scoped customization</h3>
         <pre><code class="language-typescript"><span class="tok-keyword">import</span> <span class="tok-punctuation">{</span> registerWorkflowExtension<span class="tok-punctuation">,</span> <span class="tok-keyword">type</span> WorkflowExtension <span class="tok-punctuation">}</span> <span class="tok-keyword">from</span> <span class="tok-string">"pi-extensible-workflows"</span><span class="tok-punctuation">;</span>
 <span class="tok-keyword">const</span> advisorExtension<span class="tok-punctuation">:</span> WorkflowExtension <span class="tok-punctuation">=</span> <span class="tok-punctuation">{</span>
@@ -259,10 +260,19 @@
 <span class="tok-punctuation">}</span><span class="tok-punctuation">;</span>
 <span class="tok-keyword">export</span> <span class="tok-keyword">default</span> <span class="tok-keyword">function</span> extension<span class="tok-punctuation">()</span> <span class="tok-punctuation">{</span> <span class="tok-function">registerWorkflowExtension</span><span class="tok-punctuation">(</span>advisorExtension<span class="tok-punctuation">)</span><span class="tok-punctuation">;</span> <span class="tok-punctuation">}</span></code></pre>
         <pre><code class="language-javascript"><span class="tok-keyword">return</span> <span class="tok-keyword">await</span> <span class="tok-function">agent</span><span class="tok-punctuation">(</span><span class="tok-string">"Review the package"</span><span class="tok-punctuation">,</span> <span class="tok-punctuation">{</span> <span class="tok-property">advisor</span><span class="tok-punctuation">:</span> <span class="tok-boolean">true</span> <span class="tok-punctuation">}</span><span class="tok-punctuation">)</span><span class="tok-punctuation">;</span></code></pre>
+        <h2>Latest-attempt actions</h2>
+        <p><code>agentAttemptActions</code> registers trusted actions for the selected agent's latest attempt in <code>/workflow</code>. Action IDs are unique across extensions. Each action has a display <code>label</code>, synchronous <code>visible(context)</code>, and <code>run(context)</code>. The context contains immutable run, agent, and attempt snapshots, the persisted session reference when present, the exact live session only for the active attempt, an <code>AbortSignal</code>, and a UI facade limited to <code>notify</code>, <code>confirm</code>, <code>select</code>, and <code>input</code>. Visibility must not perform connectivity checks; action failures are reported and the dashboard refreshes after execution.</p>
+        <pre><code class="language-typescript"><span class="tok-property">agentAttemptActions</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
+  inspect<span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
+    <span class="tok-property">label</span><span class="tok-punctuation">:</span> <span class="tok-string">"Inspect latest attempt"</span><span class="tok-punctuation">,</span>
+    <span class="tok-function">visible</span><span class="tok-punctuation">(</span>context<span class="tok-punctuation">)</span> <span class="tok-punctuation">{</span> <span class="tok-keyword">return</span> Boolean<span class="tok-punctuation">(</span>context<span class="tok-punctuation">.</span>attempt<span class="tok-punctuation">.</span>session<span class="tok-punctuation">)</span><span class="tok-punctuation">;</span> <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
+    <span class="tok-keyword">async</span> <span class="tok-function">run</span><span class="tok-punctuation">(</span>context<span class="tok-punctuation">)</span> <span class="tok-punctuation">{</span> context<span class="tok-punctuation">.</span>ui<span class="tok-punctuation">.</span>notify<span class="tok-punctuation">(</span><span class="tok-string">`Transport: ${context.attempt.transport}`</span><span class="tok-punctuation">)</span><span class="tok-punctuation">;</span> <span class="tok-punctuation">}</span>
+  <span class="tok-punctuation">}</span>
+<span class="tok-punctuation">}</span></code></pre>
       </section>
       <section id="resources">
         <h2>Other extension-provided resources</h2>
-        <p>The shipped <code>WorkflowExtension</code> has five capability fields: functions, variables, dynamic model aliases, agent setup hooks, and packaged role directories. Role directories use absolute filesystem paths or <code>file:</code> URLs and provide default role files; standard global and trusted project roles override matching names.</p>
+        <p>The shipped <code>WorkflowExtension</code> has six capability fields: functions, variables, dynamic model aliases, agent setup hooks, latest-attempt actions, and packaged role directories. Role directories use absolute filesystem paths or <code>file:</code> URLs and provide default role files; standard global and trusted project roles override matching names.</p>
         <p>Do not document proposed or lower-level resources as extension capabilities. A role may restrict workflow-agent skills and extension sources through its <code>disabledAgentResources</code> frontmatter, but that is role policy, not a <code>WorkflowExtension</code> field.</p>
       </section>
       <section id="catalog">

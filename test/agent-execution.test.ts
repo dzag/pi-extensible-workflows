@@ -4,20 +4,209 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { Type } from "@earendil-works/pi-ai";
-import { createNativeAgentSession, FairAgentScheduler, WorkflowAgentExecutor, type AgentExecutionRoot, type AgentProgress, type SessionFactory } from "../src/agent-execution.js";
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { createLocalPiSession, FairAgentScheduler, localAgentTransport, WorkflowAgentExecutor, type AgentExecutionRoot, type AgentProgress, type SessionInput } from "../src/agent-execution.js";
+import { AgentSession, type AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { WorkflowError } from "../src/index.js";
 import type { AgentResourcePolicy } from "../src/types.js";
 import type { RunStore } from "../src/persistence.js";
+import { testTransport } from "./test-transport.js";
 
 const root: AgentExecutionRoot = { cwd: "/repo", model: { provider: "openai", model: "gpt", thinking: "medium" }, availableModels: new Set(["openai/gpt", "anthropic/opus", "google/gemini"]), tools: new Set(["read", "grep", "find", "bash"]), agentDefinitions: { reviewer: { prompt: "Review carefully", model: "anthropic/opus", thinking: "high", tools: ["read"] }, scout: { prompt: "Inspect broadly", model: "google/gemini", thinking: "low", tools: ["read", "grep"] } } };
 const usage = { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, cost: { total: 0.25 } };
 function assistant(text: string) { return { role: "assistant", content: [{ type: "text", text }], usage }; }
 function terminalAssistant(errorMessage: string) { return { ...assistant(""), stopReason: "error", errorMessage }; }
 function sessionStats(cost = usage.cost.total) { return { tokens: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, total: usage.input + usage.output + usage.cacheRead + usage.cacheWrite }, cost }; }
+void test("uses a transport-neutral session and persists its final reference shape", async () => {
+  const events: string[] = [];
+  const transport = {
+    id: "test",
+    async createSession(prepared: Readonly<import("../src/types.js").PreparedAgentSession>, context: Readonly<import("../src/types.js").AgentTransportContext>) {
+      assert.equal(Object.isFrozen(prepared), true);
+      assert.equal(context.attempt, 1);
+      return {
+        reference: { transport: "test", sessionId: "external-1" },
+        getState: () => ({ model: prepared.model, tools: prepared.tools }),
+        getSessionStats: sessionStats,
+        subscribe(listener: (event: import("../src/types.js").WorkflowAgentSessionEvent) => void) { listener({ type: "state_changed", state: { model: prepared.model, tools: prepared.tools } }); return () => undefined; },
+        async prompt() { events.push("prompt"); return { assistant: { role: "assistant", content: [{ type: "text", text: "transport result" }] } }; },
+        async steer() {},
+        async abort() {},
+        async dispose() { events.push("dispose"); },
+      };
+    },
+  } satisfies import("../src/types.js").AgentTransport;
+  const result = await new WorkflowAgentExecutor({ ...root, agentSetupHooks: [{ name: "replace", priority: 1, setup(agent) { agent.transport = transport; } }] }, localAgentTransport).execute("work", { label: "worker", workflowName: "flow" });
+  assert.equal(result.value, "transport result");
+  const attempt = result.attempts[0];
+  assert.ok(attempt);
+  assert.equal(attempt.session?.transport, "test");
+  assert.equal(attempt.session.sessionId, "external-1");
+  assert.deepEqual(events, ["prompt", "dispose"]);
+});
+void test("does not retry after terminal success persistence fails and preserves attempt history", async () => {
+  let prompts = 0;
+  let terminalAttempts = 0;
+  let thrownAttempts: readonly import("../src/agent-execution.js").AgentAttempt[] | undefined;
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ sessionId: "success-persist", messages: [assistant("done")], getSessionStats: sessionStats, async prompt() { prompts += 1; }, dispose() {} })));
+  await assert.rejects(executor.execute("work", { label: "worker", workflowName: "flow", retries: 1, onAttempt: (attempt) => { if (attempt.result !== undefined) { terminalAttempts += 1; throw new Error("persist failed"); } } }), (error: unknown) => {
+    if (!(error instanceof Error)) return false;
+    thrownAttempts = (error as WorkflowError & { attempts?: typeof thrownAttempts }).attempts;
+    return error.message === "persist failed";
+  });
+  assert.equal(prompts, 1);
+  assert.equal(terminalAttempts, 1);
+  assert.deepEqual(thrownAttempts?.map(({ attempt, result, error }) => ({ attempt, result, error })), [{ attempt: 1, result: "done", error: undefined }]);
+});
+void test("does not retry after terminal failure persistence fails and preserves attempt history", async () => {
+  let prompts = 0;
+  let terminalAttempts = 0;
+  let thrownAttempts: readonly import("../src/agent-execution.js").AgentAttempt[] | undefined;
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ sessionId: "failure-persist", messages: [assistant("done")], getSessionStats: sessionStats, async prompt() { prompts += 1; throw new Error("agent failed"); }, dispose() {} })));
+  await assert.rejects(executor.execute("work", { label: "worker", workflowName: "flow", retries: 1, onAttempt: (attempt) => { if (attempt.error !== undefined) { terminalAttempts += 1; throw new Error("persist failed"); } } }), (error: unknown) => {
+    if (!(error instanceof Error)) return false;
+    thrownAttempts = (error as WorkflowError & { attempts?: typeof thrownAttempts }).attempts;
+    return error.message === "persist failed";
+  });
+  assert.equal(prompts, 1);
+  assert.equal(terminalAttempts, 1);
+  assert.deepEqual(thrownAttempts?.map(({ attempt, error }) => ({ attempt, error })), [{ attempt: 1, error: { code: "AGENT_FAILED", message: "agent failed" } }]);
+});
+void test("does not retry after terminal success disposal fails and preserves attempt history", async () => {
+  let prompts = 0;
+  let disposals = 0;
+  let thrownAttempts: readonly import("../src/agent-execution.js").AgentAttempt[] | undefined;
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ sessionId: "success-dispose", messages: [assistant("done")], getSessionStats: sessionStats, async prompt() { prompts += 1; }, dispose() { disposals += 1; throw new Error("dispose failed"); } })));
+  await assert.rejects(executor.execute("work", { label: "worker", workflowName: "flow", retries: 1 }), (error: unknown) => {
+    if (!(error instanceof Error)) return false;
+    thrownAttempts = (error as WorkflowError & { attempts?: typeof thrownAttempts }).attempts;
+    return error.message === "dispose failed";
+  });
+  assert.equal(prompts, 1);
+  assert.equal(disposals, 1);
+  assert.deepEqual(thrownAttempts?.map(({ attempt, result, error }) => ({ attempt, result, error })), [{ attempt: 1, result: "done", error: undefined }]);
+});
+void test("reports terminal attempts without a live session before disposal", async () => {
+  const events: string[] = [];
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ sessionId: "terminal-attempt", messages: [assistant("done")], getSessionStats: sessionStats, async prompt() {}, dispose() { events.push("dispose"); } })));
+  const result = await executor.execute("work", { label: "worker", workflowName: "flow", onAttempt: (attempt) => { events.push(`${attempt.liveSession ? "live" : "not-live"}:${attempt.result === undefined ? "active" : "result"}`); } });
+  assert.equal(result.value, "done");
+  assert.deepEqual(events, ["not-live:active", "live:active", "not-live:result", "dispose"]);
+});
+void test("setup hooks can wrap the selected transport session", async () => {
+  const events: string[] = [];
+  const base = testTransport(async () => ({ sessionId: "wrapped-base", messages: [assistant("wrapped result")], getSessionStats: sessionStats, async prompt() { events.push("base-prompt"); }, dispose() { events.push("base-dispose"); } }));
+  const wrapped: import("../src/types.js").AgentTransport = {
+    id: "wrapped",
+    async createSession(prepared, context) {
+      const session = await base.createSession(prepared, context);
+      return {
+        ...session,
+        reference: { ...session.reference, transport: "wrapped" },
+        async prompt(text) { events.push(`wrapper-prompt:${text}`); const result = await session.prompt(text); events.push("wrapper-result"); return result; },
+        async dispose() { events.push("wrapper-dispose"); await session.dispose(); },
+      };
+    },
+  };
+  const result = await new WorkflowAgentExecutor({ ...root, agentSetupHooks: [{ name: "wrap", priority: 1, setup(agent) { agent.transport = wrapped; } }] }, localAgentTransport).execute("work", { label: "worker", workflowName: "flow" });
+  assert.equal(result.value, "wrapped result");
+  assert.equal(result.attempts[0]?.session?.transport, "wrapped");
+  assert.match(events[0] ?? "", /^wrapper-prompt:Workflow: flow\nAgent: worker/);
+  assert.deepEqual(events.slice(1), ["base-prompt", "wrapper-result", "wrapper-dispose", "base-dispose"]);
+});
+void test("reruns setup hooks and reselects the transport for ordinary retries", async () => {
+  const selected: string[] = [];
+  const makeTransport = (id: string, fail: boolean): import("../src/types.js").AgentTransport => ({
+    id,
+    async createSession(prepared) {
+      selected.push(id);
+      return {
+        reference: { transport: id, sessionId: id },
+        getState: () => ({ model: prepared.model, tools: prepared.tools }),
+        getSessionStats: sessionStats,
+        subscribe() { return () => undefined; },
+        async prompt() { if (fail) throw new Error("retry"); return { assistant: { role: "assistant", content: [{ type: "text", text: "done" }] } }; },
+        async steer() {},
+        async abort() {},
+        async dispose() {},
+      };
+    },
+  });
+  const first = makeTransport("first", true);
+  const second = makeTransport("second", false);
+  let hookAttempts = 0;
+  const executor = new WorkflowAgentExecutor({ ...root, agentSetupHooks: [{ name: "select", priority: 0, setup(agent, context) { hookAttempts += 1; agent.transport = context.attempt === 1 ? first : second; } }] }, localAgentTransport);
+  const result = await executor.execute("work", { label: "worker", workflowName: "flow", retries: 1 });
+  assert.equal(result.value, "done");
+  assert.deepEqual(selected, ["first", "second"]);
+  assert.equal(hookAttempts, 2);
+  assert.deepEqual(result.attempts.map(({ transport, session }) => [transport, session?.transport]), [["first", "first"], ["second", "second"]]);
+});
+
+void test("persists a selected transport when session creation fails", async () => {
+  const attempts: unknown[] = [];
+  const transport = {
+    id: "connect-failure",
+    async createSession() { throw new Error("connection failed"); },
+  } satisfies import("../src/types.js").AgentTransport;
+  await assert.rejects(new WorkflowAgentExecutor(root, transport).execute("work", { label: "worker", workflowName: "flow", onAttempt: (attempt) => { attempts.push(attempt); } }), (error: unknown) => {
+    const typed = error as WorkflowError & { attempts?: readonly { session?: unknown; transport?: string; error?: { message: string } }[] };
+    assert.equal(typed.code, "AGENT_FAILED");
+    const latest = typed.attempts?.at(-1);
+    assert.ok(latest);
+    assert.equal(latest.transport, "connect-failure");
+    assert.equal(latest.session, undefined);
+    assert.equal(latest.error?.message, "connection failed");
+    return true;
+  });
+  assert.equal(attempts.length, 2);
+});
+void test("rejects a session whose reference transport differs from the selected transport", async () => {
+  let disposed = 0;
+  const transport: import("../src/types.js").AgentTransport = {
+    id: "selected",
+    async createSession(prepared) {
+      return {
+        reference: { transport: "wrong", sessionId: "mismatch" },
+        getState: () => ({ model: prepared.model, tools: prepared.tools }),
+        getSessionStats: sessionStats,
+        subscribe() { return () => undefined; },
+        async prompt() { return { assistant: { role: "assistant", content: [{ type: "text", text: "unused" }] } }; },
+        async steer() {},
+        async abort() {},
+        async dispose() { disposed += 1; },
+      };
+    },
+  };
+  const attempts: Array<{ session?: unknown }> = [];
+  await assert.rejects(new WorkflowAgentExecutor(root, transport).execute("work", { label: "worker", workflowName: "flow", onAttempt: (attempt) => { attempts.push(attempt); } }), (error: unknown) => error instanceof WorkflowError && error.code === "INTERNAL_ERROR");
+  assert.equal(disposed, 1);
+  assert.equal(attempts.at(-1)?.session, undefined);
+});
+void test("rejects transport-reported tools outside the prepared capability ceiling", async () => {
+  let prompted = false;
+  let disposed = 0;
+  const transport: import("../src/types.js").AgentTransport = {
+    id: "widened",
+    async createSession(prepared) {
+      return {
+        reference: { transport: "widened", sessionId: "widened-session" },
+        getState: () => ({ model: prepared.model, tools: ["read", "write"] }),
+        getSessionStats: sessionStats,
+        subscribe() { return () => undefined; },
+        async prompt() { prompted = true; return { assistant: { role: "assistant", content: [{ type: "text", text: "unexpected" }] } }; },
+        async steer() {},
+        async abort() {},
+        async dispose() { disposed += 1; },
+      };
+    },
+  };
+  await assert.rejects(new WorkflowAgentExecutor(root, transport).execute("work", { label: "worker", workflowName: "flow" }), (error: unknown) => error instanceof WorkflowError && error.code === "INTERNAL_ERROR" && error.message === "Agent transport widened widened the prepared tool policy");
+  assert.equal(prompted, false);
+  assert.equal(disposed, 1);
+});
 
 void test("resolves explicit capabilities without widening least privilege", () => {
-  const executor = new WorkflowAgentExecutor(root, async () => { throw new Error("unused"); });
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => { throw new Error("unused"); }));
   assert.deepEqual(executor.resolve({ label: "a", workflowName: "w", role: "reviewer" }), { model: { provider: "anthropic", model: "opus", thinking: "high" }, tools: ["read"], systemPromptAppend: "Review carefully" });
   assert.deepEqual(executor.resolve({ label: "a", workflowName: "w", role: "scout" }).tools, ["read", "grep"]);
   assert.deepEqual(executor.resolve({ label: "a", workflowName: "w", model: "google/gemini" }), { model: { provider: "google", model: "gemini", thinking: "medium" }, tools: ["read", "grep", "find", "bash"], systemPromptAppend: "" });
@@ -29,14 +218,14 @@ void test("resolves explicit capabilities without widening least privilege", () 
   assert.throws(() => executor.resolve({ label: "a", workflowName: "w", role: "reviewer", model: "google/gemini" }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   assert.throws(() => executor.resolve({ label: "a", workflowName: "w", role: "reviewer", thinking: "low" }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   assert.throws(() => executor.resolve({ label: "a", workflowName: "w", role: "reviewer", tools: [] }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
-  const broken = new WorkflowAgentExecutor({ ...root, agentDefinitions: { broken: { tools: ["write"] } } }, async () => { throw new Error("must not launch"); });
+  const broken = new WorkflowAgentExecutor({ ...root, agentDefinitions: { broken: { tools: ["write"] } } }, testTransport(async () => { throw new Error("must not launch"); }));
   assert.throws(() => broken.resolve({ label: "a", workflowName: "w", role: "broken" }), (error: unknown) => error instanceof WorkflowError && error.code === "UNKNOWN_TOOL");
 });
 
 void test("passes role prompt as system append, not task text", async () => {
   let input: unknown;
   let prompt = "";
-  const executor = new WorkflowAgentExecutor(root, async (sessionInput) => { input = sessionInput; return { sessionId: "role", sessionFile: "/sessions/role.jsonl", messages: [assistant("done")], getSessionStats: sessionStats, prompt: async (text) => { prompt = text; }, dispose() {} }; });
+  const executor = new WorkflowAgentExecutor(root, testTransport(async (sessionInput) => { input = sessionInput; return { transport: "local", session: { transport: "local", sessionId: "role", locator: { sessionFile: "/sessions/role.jsonl" } }, messages: [assistant("done")], getSessionStats: sessionStats, prompt: async (text) => { prompt = text; }, dispose() {} }; }));
   await executor.execute("Do work", { label: "worker", workflowName: "flow", role: "reviewer", effectiveTools: ["read", "grep"] });
   assert.equal((input as { systemPromptAppend?: string }).systemPromptAppend, "Review carefully");
   assert.deepEqual((input as { tools?: readonly string[] }).tools, ["read"]);
@@ -47,7 +236,7 @@ void test("passes role prompt as system append, not task text", async () => {
 void test("uses a role body as the full system prompt when requested", async () => {
   const roleRoot: AgentExecutionRoot = { ...root, agentDefinitions: { ...root.agentDefinitions, override: { prompt: "Replace the system prompt", model: "anthropic/opus", thinking: "high", tools: ["read"], overrideSystemPrompt: true } } };
   let input: unknown;
-  const executor = new WorkflowAgentExecutor(roleRoot, async (sessionInput) => { input = sessionInput; return { sessionId: "override", sessionFile: "/sessions/override.jsonl", messages: [assistant("done")], getSessionStats: sessionStats, prompt: async () => {}, dispose() {} }; });
+  const executor = new WorkflowAgentExecutor(roleRoot, testTransport(async (sessionInput) => { input = sessionInput; return { transport: "local", session: { transport: "local", sessionId: "override", locator: { sessionFile: "/sessions/override.jsonl" } }, messages: [assistant("done")], getSessionStats: sessionStats, prompt: async () => {}, dispose() {} }; }));
   assert.deepEqual(executor.resolve({ label: "worker", workflowName: "flow", role: "override" }), { model: { provider: "anthropic", model: "opus", thinking: "high" }, tools: ["read"], systemPrompt: "Replace the system prompt", systemPromptAppend: "" });
   await executor.execute("Do work", { label: "worker", workflowName: "flow", role: "override" });
   assert.equal((input as { systemPrompt?: string }).systemPrompt, "Replace the system prompt");
@@ -58,13 +247,13 @@ void test("persists the effective role system prompt emitted for the native turn
   const saved: Array<{ sessionId: string; attempt: number; turn: number; prompt: string }> = [];
   let listener: ((event: AgentSessionEvent) => void) | undefined;
   const runStore = { recordSystemPrompt: async (entry: (typeof saved)[number]) => { saved.push(entry); } } as unknown as RunStore;
-  const executor = new WorkflowAgentExecutor({ ...root, runStore }, async (input) => ({
-    sessionId: "role", sessionFile: "/sessions/role.jsonl", messages: [assistant("done")], getSessionStats: sessionStats,
+  const executor = new WorkflowAgentExecutor({ ...root, runStore }, testTransport(async (input) => ({
+    transport: "local", session: { transport: "local", sessionId: "role", locator: { sessionFile: "/sessions/role.jsonl" } }, messages: [assistant("done")], getSessionStats: sessionStats,
     systemPrompt: `BASE\n\n${input.systemPromptAppend ?? ""}`,
     subscribe(candidate) { listener = candidate; return () => {}; },
     async prompt() { listener?.({ type: "agent_start" }); },
     dispose() {},
-  }));
+  })));
   await executor.execute("Do work", { label: "worker", workflowName: "flow", role: "reviewer" });
   assert.deepEqual(saved, [{ sessionId: "role", attempt: 1, turn: 1, prompt: "BASE\n\nReview carefully" }]);
 });
@@ -72,12 +261,12 @@ void test("persists the effective role system prompt emitted for the native turn
 void test("does not mask agent failures when system prompt persistence also fails", async () => {
   let listener: ((event: AgentSessionEvent) => void) | undefined;
   const runStore = { recordSystemPrompt: async () => { throw new Error("disk full"); } } as unknown as RunStore;
-  const executor = new WorkflowAgentExecutor({ ...root, runStore }, async () => ({
-    sessionId: "failed", sessionFile: "/sessions/failed.jsonl", messages: [], getSessionStats: sessionStats, systemPrompt: "effective",
+  const executor = new WorkflowAgentExecutor({ ...root, runStore }, testTransport(async () => ({
+    transport: "local", session: { transport: "local", sessionId: "failed", locator: { sessionFile: "/sessions/failed.jsonl" } }, messages: [], getSessionStats: sessionStats, systemPrompt: "effective",
     subscribe(candidate) { listener = candidate; return () => {}; },
     async prompt() { listener?.({ type: "agent_start" }); throw new Error("provider failed"); },
     dispose() {},
-  }));
+  })));
   await assert.rejects(executor.execute("Do work", { label: "worker", workflowName: "flow" }), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_FAILED" && error.message === "provider failed");
 });
 
@@ -91,23 +280,23 @@ void test("runs prioritized setup hooks with fresh retry baselines and safe atte
     { name: "early", priority: 1, setup(agent: { prompt: string; options: Record<string, unknown>; sessionInput: { tools: readonly string[]; cwd: string } }, context: { attempt: number }) { order.push(`${String(context.attempt)}:early`); agent.options.seen = true; } },
   ];
   let created = 0;
-  const executor = new WorkflowAgentExecutor({ ...root, agentSetupHooks: hooks }, async (input) => {
+  const executor = new WorkflowAgentExecutor({ ...root, agentSetupHooks: hooks }, testTransport(async (input) => {
     inputs.push({ prompt: input.options?.transient === "fresh" ? "fresh" : "baseline", options: input.options ?? {}, tools: input.tools, cwd: input.cwd });
     const attempt = ++created;
     return { sessionId: `hook-${String(attempt)}`, sessionFile: `/sessions/hook-${String(attempt)}.jsonl`, messages: [assistant("done")], getSessionStats: sessionStats, async prompt(text) { if (attempt === 1) throw new Error(text); }, dispose() {} };
-  });
+  }));
   const result = await executor.execute("original", { label: "hooked", workflowName: "flow", retries: 1, timeoutMs: 5, agentOptions: { advisor: true } });
   assert.equal(result.value, "done");
   assert.deepEqual(order, ["1:early", "1:a-first", "1:z-last", "2:early", "2:a-first", "2:z-last"]);
   assert.deepEqual(inputs.map(({ tools, cwd }) => ({ tools, cwd })), [{ tools: ["bash"], cwd: "/hooked" }, { tools: ["bash"], cwd: "/hooked" }]);
-  assert.deepEqual(result.attempts.map(({ setup }) => setup?.hookNames), [["early", "a-first", "z-last"], ["early", "a-first", "z-last"]]);
-  assert.equal(result.attempts[1]?.setup?.model.provider, "openai");
+  assert.deepEqual(result.attempts.map(({ setup }) => setup.hookNames), [["early", "a-first", "z-last"], ["early", "a-first", "z-last"]]);
+  assert.equal(result.attempts[1]?.setup.model.provider, "openai");
 });
 
 void test("provider limits pause and retry the same native session", async () => {
   let prompts = 0;
   let pauses = 0;
-  const executor = new WorkflowAgentExecutor({ ...root, providerPause: async () => { pauses += 1; } }, async () => ({ sessionId: "same", sessionFile: "/sessions/same.jsonl", messages: [assistant("continued")], getSessionStats: sessionStats, prompt: async () => { prompts += 1; if (prompts === 1) throw Object.assign(new Error("limited"), { status: 429 }); }, dispose() {} }));
+  const executor = new WorkflowAgentExecutor({ ...root, providerPause: async () => { pauses += 1; } }, testTransport(async () => ({ transport: "local", session: { transport: "local", sessionId: "same", locator: { sessionFile: "/sessions/same.jsonl" } }, messages: [assistant("continued")], getSessionStats: sessionStats, prompt: async () => { prompts += 1; if (prompts === 1) throw Object.assign(new Error("limited"), { status: 429 }); }, dispose() {} })));
   assert.equal((await executor.execute("work", { label: "worker", workflowName: "flow" })).value, "continued");
   assert.equal(prompts, 2);
   assert.equal(pauses, 1);
@@ -115,23 +304,23 @@ void test("provider limits pause and retry the same native session", async () =>
 
 void test("returns final text and captures persisted native session accounting", async () => {
   const prompts: string[] = [];
-  const executor = new WorkflowAgentExecutor(root, async () => ({ sessionId: "s1", sessionFile: "/sessions/s1.jsonl", messages: [assistant("done")], getSessionStats: sessionStats, prompt: async (prompt) => { prompts.push(prompt); }, dispose() {} }));
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ transport: "local", session: { transport: "local", sessionId: "s1", locator: { sessionFile: "/sessions/s1.jsonl" } }, messages: [assistant("done")], getSessionStats: sessionStats, prompt: async (prompt) => { prompts.push(prompt); }, dispose() {} })));
   const result = await executor.execute("Do work", { label: "worker", workflowName: "flow", phase: "build", parent: "root", cwd: root.cwd });
   assert.equal(result.value, "done");
   assert.equal(prompts.length, 1);
   assert.match(prompts[0] ?? "", /Workflow: flow[\s\S]*Phase: build[\s\S]*Parent: root[\s\S]*Task:\nDo work/);
-  assert.deepEqual(result.attempts[0], { attempt: 1, sessionId: "s1", sessionFile: "/sessions/s1.jsonl", result: "done", accounting: { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, cost: 0.25 } });
+  assert.deepEqual(result.attempts[0], { attempt: 1, transport: "local", session: { transport: "local", sessionId: "s1", locator: { sessionFile: "/sessions/s1.jsonl" } }, result: "done", accounting: { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, cost: 0.25 }, setup: { hookNames: [], model: root.model, tools: ["read", "grep", "find", "bash"], cwd: "/repo" } });
 });
 
 void test("exposes native attempt metadata before the prompt completes", async () => {
   let finish!: () => void;
   let promptStarted!: () => void;
   const started = new Promise<void>((resolve) => { promptStarted = resolve; });
-  let exposed!: (value: { attempt: number; sessionId: string; sessionFile: string }) => void;
-  const exposure = new Promise<{ attempt: number; sessionId: string; sessionFile: string }>((resolve) => { exposed = resolve; });
-  const executor = new WorkflowAgentExecutor(root, async () => ({ sessionId: "active", sessionFile: "/sessions/active.jsonl", messages: [assistant("done")], getSessionStats: sessionStats, prompt: () => new Promise<void>((resolve) => { finish = resolve; promptStarted(); }), dispose() {} }));
+  let exposed!: (value: import("../src/agent-execution.js").AgentAttempt) => void;
+  const exposure = new Promise<import("../src/agent-execution.js").AgentAttempt>((resolve) => { exposed = resolve; });
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ transport: "local", session: { transport: "local", sessionId: "active", locator: { sessionFile: "/sessions/active.jsonl" } }, messages: [assistant("done")], getSessionStats: sessionStats, prompt: () => new Promise<void>((resolve) => { finish = resolve; promptStarted(); }), dispose() {} })));
   const running = executor.execute("work", { label: "worker", workflowName: "flow", onAttempt: (attempt) => { exposed(attempt); } });
-  assert.deepEqual(await exposure, { attempt: 1, sessionId: "active", sessionFile: "/sessions/active.jsonl" });
+  assert.deepEqual(await exposure, { attempt: 1, transport: "local", accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, setup: { hookNames: [], model: root.model, tools: ["read", "grep", "find", "bash"], cwd: "/repo" } });
   await started;
   finish();
   await running;
@@ -141,8 +330,8 @@ void test("streams non-content and tool-call progress", async () => {
   let listener: ((event: AgentSessionEvent) => void) | undefined;
   const messages = [assistant("")];
   const updates: AgentProgress[] = [];
-  const executor = new WorkflowAgentExecutor(root, async () => ({
-    sessionId: "progress", sessionFile: "/sessions/progress.jsonl", messages, getSessionStats: sessionStats,
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({
+    transport: "local", session: { transport: "local", sessionId: "progress", locator: { sessionFile: "/sessions/progress.jsonl" } }, messages, getSessionStats: sessionStats,
     subscribe(next) { listener = next; return () => { listener = undefined; }; },
     async prompt() {
       listener?.({ type: "message_start", message: messages[0] } as AgentSessionEvent);
@@ -160,7 +349,7 @@ void test("streams non-content and tool-call progress", async () => {
       listener?.({ type: "message_end", message: messages[0] } as AgentSessionEvent);
     },
     dispose() {},
-  }));
+  })));
   const result = await executor.execute("work", { label: "worker", workflowName: "flow", onProgress: (update) => { updates.push(update); } });
   assert.equal(result.value, "done");
   assert.equal(updates.length, 8);
@@ -180,15 +369,15 @@ void test("uses cumulative session stats after compaction for progress, budget, 
   const budgetAccounting: AgentProgress["accounting"][] = [];
   const activeMessages = [assistant("compacted response")];
   const cumulative = { tokens: { input: 100, output: 50, cacheRead: 25, cacheWrite: 10, total: 185 }, cost: 9 };
-  const executor = new WorkflowAgentExecutor(root, async () => ({
-    sessionId: "compaction-safe", sessionFile: "/sessions/compaction-safe.jsonl", messages: activeMessages, getSessionStats: () => cumulative,
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({
+    transport: "local", session: { transport: "local", sessionId: "compaction-safe", locator: { sessionFile: "/sessions/compaction-safe.jsonl" } }, messages: activeMessages, getSessionStats: () => cumulative,
     subscribe(next) { listener = next; return () => {}; },
     async prompt() {
       listener?.({ type: "message_start", message: activeMessages[0] } as AgentSessionEvent);
       listener?.({ type: "message_end", message: activeMessages[0] } as AgentSessionEvent);
     },
     dispose() {},
-  }));
+  })));
   const budget = { beforeAttempt() {}, beforeTurn() {}, afterTurn(accounting: AgentProgress["accounting"]) { budgetAccounting.push(accounting); }, instruction() { return undefined; } };
   const result = await executor.execute("work", { label: "worker", workflowName: "flow", onProgress: (update) => { updates.push(update); }, budget });
   const expected = { input: 100, output: 50, cacheRead: 25, cacheWrite: 10, cost: 9 };
@@ -201,13 +390,13 @@ void test("keeps workflow_result present, validates invalid values, and allows o
   const responses: Array<unknown> = [{ wrong: true }, { wrong: true }, { answer: 9 }];
   const calls: Array<{ prompt: string; result: unknown }> = [];
   const toolResults: unknown[] = [];
-  const executor = new WorkflowAgentExecutor(root, async ({ resultTool }) => {
+  const executor = new WorkflowAgentExecutor(root, testTransport(async ({ resultTool }) => {
     assert.ok(resultTool);
-    return { sessionId: "schema", sessionFile: "/sessions/schema.jsonl", messages: [assistant("ignored")], getSessionStats: sessionStats, async prompt(prompt) {
+    return { transport: "local", session: { transport: "local", sessionId: "schema", locator: { sessionFile: "/sessions/schema.jsonl" } }, messages: [assistant("ignored")], getSessionStats: sessionStats, async prompt(prompt) {
       const result = responses.shift();
       if (result !== undefined) { calls.push({ prompt, result }); toolResults.push(await resultTool.execute("id", result, new AbortController().signal, () => {}, {} as never)); }
     }, dispose() {} };
-  });
+  }));
   const result = await executor.execute("structured", { label: "schema", workflowName: "flow", role: "reviewer", schema: { type: "object", properties: { answer: { type: "number" } }, required: ["answer"], additionalProperties: false } });
   assert.deepEqual(result.value, { answer: 9 });
   assert.equal(calls.length, 3);
@@ -223,11 +412,11 @@ void test("accepts workflow_result before agent_end without repair or overwrite"
   let listener: ((event: AgentSessionEvent) => void) | undefined;
   let prompts = 0;
   let aborts = 0;
-  const executor = new WorkflowAgentExecutor(root, async ({ resultTool }) => {
+  const executor = new WorkflowAgentExecutor(root, testTransport(async ({ resultTool }) => {
     assert.ok(resultTool);
     const message = { role: "assistant", content: [{ type: "toolCall", id: "early", name: "workflow_result", arguments: { answer: 7 } }] };
     return {
-      sessionId: "early-schema", sessionFile: "/sessions/early-schema.jsonl", messages: [assistant("ignored")], getSessionStats: sessionStats,
+      transport: "local", session: { transport: "local", sessionId: "early-schema", locator: { sessionFile: "/sessions/early-schema.jsonl" } }, messages: [assistant("ignored")], getSessionStats: sessionStats,
       subscribe(next) { listener = next; return () => { listener = undefined; }; },
       async prompt() {
         prompts += 1;
@@ -244,7 +433,7 @@ void test("accepts workflow_result before agent_end without repair or overwrite"
       async abort() { aborts += 1; },
       dispose() {},
     };
-  });
+  }));
   const result = await executor.execute("structured", { label: "schema", workflowName: "flow", schema: { type: "object", properties: { answer: { type: "number" } }, required: ["answer"], additionalProperties: false } });
   assert.deepEqual(result.value, { answer: 7 });
   assert.equal(prompts, 1);
@@ -255,29 +444,34 @@ void test("fails native terminal provider errors before structured finalization"
   const errorMessage = "OAuth refresh failed for anthropic";
   const messages = [terminalAssistant(errorMessage)];
   const prompts: string[] = [];
-  const executor = new WorkflowAgentExecutor(root, async () => ({ sessionId: "terminal", sessionFile: "/sessions/terminal.jsonl", messages, getSessionStats: sessionStats, async prompt(prompt) { prompts.push(prompt); }, dispose() {} }));
-  let attempts: readonly { sessionFile: string; error?: { code: string; message: string } }[] | undefined;
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ transport: "local", session: { transport: "local", sessionId: "terminal", locator: { sessionFile: "/sessions/terminal.jsonl" } }, messages, getSessionStats: sessionStats, async prompt(prompt) { prompts.push(prompt); }, dispose() {} })));
+  let attempts: readonly import("../src/agent-execution.js").AgentAttempt[] | undefined;
   await assert.rejects(executor.execute("structured", { label: "schema", workflowName: "flow", schema: { type: "object", properties: { answer: { type: "number" } }, required: ["answer"], additionalProperties: false } }), (error: unknown) => {
     if (!(error instanceof WorkflowError)) return false;
     attempts = (error as WorkflowError & { attempts?: typeof attempts }).attempts;
     return error.code === "AGENT_FAILED" && error.message === errorMessage;
   });
   assert.equal(prompts.length, 1);
-  assert.equal(attempts?.[0]?.sessionFile, "/sessions/terminal.jsonl");
+  assert.ok(attempts);
+  const session = attempts[0]?.session;
+  assert.ok(session);
+  const locator = session.locator;
+  assert.ok(locator && typeof locator === "object" && !Array.isArray(locator));
+  assert.equal((locator as { sessionFile?: string }).sessionFile, "/sessions/terminal.jsonl");
   const failedAttempt = attempts[0];
   assert.ok(failedAttempt);
   assert.deepEqual(failedAttempt.error, { code: "AGENT_FAILED", message: errorMessage });
 });
 void test("falls back when a terminal provider error omits errorMessage", async () => {
   const messages = [{ ...assistant(""), stopReason: "error" }];
-  const executor = new WorkflowAgentExecutor(root, async () => ({ sessionId: "terminal-without-message", sessionFile: "/sessions/terminal-without-message.jsonl", messages, getSessionStats: sessionStats, async prompt() {}, dispose() {} }));
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ transport: "local", session: { transport: "local", sessionId: "terminal-without-message", locator: { sessionFile: "/sessions/terminal-without-message.jsonl" } }, messages, getSessionStats: sessionStats, async prompt() {}, dispose() {} })));
   let attempts: readonly { error?: { code: string; message: string } }[] | undefined;
   await assert.rejects(executor.execute("work", { label: "worker", workflowName: "flow" }), (error: unknown) => {
     if (!(error instanceof WorkflowError)) return false;
     attempts = (error as WorkflowError & { attempts?: typeof attempts }).attempts;
-    return error.code === "AGENT_FAILED" && error.message === "Native Pi assistant ended with a terminal provider error";
+    return error.code === "AGENT_FAILED" && error.message === "Workflow agent session ended with a terminal provider error";
   });
-  assert.deepEqual(attempts?.[0]?.error, { code: "AGENT_FAILED", message: "Native Pi assistant ended with a terminal provider error" });
+  assert.deepEqual(attempts?.[0]?.error, { code: "AGENT_FAILED", message: "Workflow agent session ended with a terminal provider error" });
 });
 
 void test("fails terminal provider errors during finalization without repair", async () => {
@@ -285,7 +479,7 @@ void test("fails terminal provider errors during finalization without repair", a
   const messages = [assistant("ready")];
   const prompts: string[] = [];
   let promptCount = 0;
-  const executor = new WorkflowAgentExecutor(root, async () => ({ sessionId: "finalization-terminal", sessionFile: "/sessions/finalization-terminal.jsonl", messages, getSessionStats: sessionStats, async prompt(prompt) { prompts.push(prompt); promptCount += 1; if (promptCount === 2) messages.push(terminalAssistant(errorMessage)); }, dispose() {} }));
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ transport: "local", session: { transport: "local", sessionId: "finalization-terminal", locator: { sessionFile: "/sessions/finalization-terminal.jsonl" } }, messages, getSessionStats: sessionStats, async prompt(prompt) { prompts.push(prompt); promptCount += 1; if (promptCount === 2) messages.push(terminalAssistant(errorMessage)); }, dispose() {} })));
   await assert.rejects(executor.execute("structured", { label: "schema", workflowName: "flow", schema: { type: "object", properties: { answer: { type: "number" } }, required: ["answer"], additionalProperties: false } }), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_FAILED" && error.message === errorMessage);
   assert.equal(prompts.length, 2);
   assert.match(prompts[1] ?? "", /Submit the final result/);
@@ -296,17 +490,17 @@ void test("retries native terminal errors as fresh workflow attempts", async () 
   const errorMessage = "OAuth refresh failed for retry";
   const promptsByAttempt: string[][] = [];
   let created = 0;
-  const executor = new WorkflowAgentExecutor(root, async ({ resultTool }) => {
+  const executor = new WorkflowAgentExecutor(root, testTransport(async ({ resultTool }) => {
     const attempt = ++created;
     const prompts: string[] = [];
     promptsByAttempt.push(prompts);
     const messages = attempt === 1 ? [terminalAssistant(errorMessage)] : [assistant("ready")];
     return { sessionId: `terminal-retry-${String(attempt)}`, sessionFile: `/sessions/terminal-retry-${String(attempt)}.jsonl`, messages, getSessionStats: sessionStats, async prompt(prompt) { prompts.push(prompt); if (attempt === 2 && prompt.includes("Submit the final result")) { assert.ok(resultTool); await resultTool.execute("id", { answer: 42 }, new AbortController().signal, () => {}, {} as never); } }, dispose() {} };
-  });
+  }));
   const result = await executor.execute("structured", { label: "schema", workflowName: "flow", retries: 1, schema: { type: "object", properties: { answer: { type: "number" } }, required: ["answer"], additionalProperties: false } });
   assert.deepEqual(result.value, { answer: 42 });
   assert.deepEqual(promptsByAttempt.map((prompts) => prompts.length), [1, 2]);
-  assert.deepEqual(result.attempts.map(({ sessionId }) => sessionId), ["terminal-retry-1", "terminal-retry-2"]);
+  assert.deepEqual(result.attempts.map(({ session }) => session?.sessionId), ["terminal-retry-1", "terminal-retry-2"]);
   assert.deepEqual(result.attempts[0]?.error, { code: "AGENT_FAILED", message: errorMessage });
   assert.deepEqual(result.attempts[1]?.result, { answer: 42 });
 });
@@ -316,11 +510,11 @@ void test("continues terminal provider errors in the same native session when re
   const messages: Array<{ role: string; content: unknown; stopReason?: string; errorMessage?: string; usage?: typeof usage }> = [terminalAssistant("TRANSIENT_PROVIDER_ERROR")];
   let sessions = 0;
   let disposals = 0;
-  const executor = new WorkflowAgentExecutor(root, async ({ resultTool }) => {
+  const executor = new WorkflowAgentExecutor(root, testTransport(async ({ resultTool }) => {
     sessions += 1;
     assert.ok(resultTool);
     return {
-      sessionId: "same-session", sessionFile: "/sessions/same-session.jsonl", messages, getSessionStats: sessionStats,
+      transport: "local", session: { transport: "local", sessionId: "same-session", locator: { sessionFile: "/sessions/same-session.jsonl" } }, messages, getSessionStats: sessionStats,
       async prompt(prompt) {
         prompts.push(prompt);
         if (prompts.length === 2) messages[0] = assistant("continued");
@@ -328,7 +522,7 @@ void test("continues terminal provider errors in the same native session when re
       },
       dispose() { disposals += 1; },
     };
-  });
+  }));
   const result = await executor.execute("structured", {
     label: "schema", workflowName: "flow", schema: { type: "object", properties: { answer: { type: "number" } }, required: ["answer"], additionalProperties: false },
     providerErrorRecovery: async (failure) => { recoveries.push(failure); return "retry"; },
@@ -337,7 +531,7 @@ void test("continues terminal provider errors in the same native session when re
   assert.equal(sessions, 1);
   assert.equal(disposals, 1);
   assert.equal(recoveries.length, 1);
-  assert.deepEqual(result.attempts.map(({ attempt, sessionId }) => ({ attempt, sessionId })), [{ attempt: 1, sessionId: "same-session" }]);
+  assert.deepEqual(result.attempts.map(({ attempt, session }) => ({ attempt, sessionId: session?.sessionId })), [{ attempt: 1, sessionId: "same-session" }]);
   assert.equal(prompts.length, 3);
   assert.match(prompts[0] ?? "", /Task:\nstructured/);
   assert.equal(prompts[1], "The provider error was transient. Continue the task from your current state.");
@@ -347,15 +541,15 @@ void test("recovers a terminal provider error thrown by prompt before disposing 
   const messages: Array<{ role: string; content: unknown; stopReason?: string; errorMessage?: string; usage?: typeof usage }> = [terminalAssistant("THROWN_PROVIDER_ERROR")];
   let prompts = 0;
   let disposals = 0;
-  const executor = new WorkflowAgentExecutor(root, async () => ({
-    sessionId: "thrown-provider", sessionFile: "/sessions/thrown-provider.jsonl", messages, getSessionStats: sessionStats,
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({
+    transport: "local", session: { transport: "local", sessionId: "thrown-provider", locator: { sessionFile: "/sessions/thrown-provider.jsonl" } }, messages, getSessionStats: sessionStats,
     async prompt() {
       prompts += 1;
       if (prompts === 1) throw new Error("provider request failed");
       messages[0] = assistant("done");
     },
     dispose() { assert.equal(disposals, 0); disposals += 1; },
-  }));
+  })));
   const result = await executor.execute("work", { label: "worker", workflowName: "flow", providerErrorRecovery: async (failure) => {
     assert.equal(disposals, 0);
     assert.deepEqual(failure, { label: "worker", provider: "openai", model: "gpt", error: "THROWN_PROVIDER_ERROR" });
@@ -364,18 +558,18 @@ void test("recovers a terminal provider error thrown by prompt before disposing 
   assert.equal(result.value, "done");
   assert.equal(prompts, 2);
   assert.equal(disposals, 1);
-  assert.deepEqual(result.attempts.map(({ attempt, sessionId }) => ({ attempt, sessionId })), [{ attempt: 1, sessionId: "thrown-provider" }]);
+  assert.deepEqual(result.attempts.map(({ attempt, session }) => ({ attempt, sessionId: session?.sessionId })), [{ attempt: 1, sessionId: "thrown-provider" }]);
 });
 void test("keeps an accepted structured result when same-session continuation aborts its prompt", async () => {
   const messages: Array<{ role: string; content: unknown; stopReason?: string; errorMessage?: string; usage?: typeof usage }> = [terminalAssistant("TRANSIENT_PROVIDER_ERROR")];
   let prompts = 0;
   let sessions = 0;
   let disposals = 0;
-  const executor = new WorkflowAgentExecutor(root, async ({ resultTool }) => {
+  const executor = new WorkflowAgentExecutor(root, testTransport(async ({ resultTool }) => {
     sessions += 1;
     assert.ok(resultTool);
     return {
-      sessionId: "same-session-abort", sessionFile: "/sessions/same-session-abort.jsonl", messages, getSessionStats: sessionStats,
+      transport: "local", session: { transport: "local", sessionId: "same-session-abort", locator: { sessionFile: "/sessions/same-session-abort.jsonl" } }, messages, getSessionStats: sessionStats,
       async prompt(prompt) {
         prompts += 1;
         if (prompt === "The provider error was transient. Continue the task from your current state.") {
@@ -387,7 +581,7 @@ void test("keeps an accepted structured result when same-session continuation ab
       async abort() {},
       dispose() { disposals += 1; },
     };
-  });
+  }));
   const result = await executor.execute("structured", {
     label: "schema", workflowName: "flow", schema: { type: "object", properties: { answer: { type: "number" } }, required: ["answer"], additionalProperties: false },
     providerErrorRecovery: async () => "retry",
@@ -400,13 +594,13 @@ void test("keeps an accepted structured result when same-session continuation ab
 
 void test("retries in fresh persisted sessions and reports terminal attempt history", async () => {
   let created = 0;
-  const executor = new WorkflowAgentExecutor(root, async () => {
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => {
     const attempt = ++created;
     return { sessionId: `s${String(attempt)}`, sessionFile: `/sessions/s${String(attempt)}.jsonl`, messages: [assistant(attempt === 2 ? "ok" : "bad")], getSessionStats: sessionStats, async prompt() { if (attempt === 1) throw new Error("provider failed"); }, dispose() {} };
-  });
+  }));
   const result = await executor.execute("retry", { label: "retry", workflowName: "flow", retries: 1 });
   assert.equal(result.value, "ok");
-  assert.deepEqual(result.attempts.map(({ sessionId }) => sessionId), ["s1", "s2"]);
+  assert.deepEqual(result.attempts.map(({ session }) => session?.sessionId), ["s1", "s2"]);
   assert.equal(result.attempts[0]?.error?.code, "AGENT_FAILED");
 });
 
@@ -415,11 +609,11 @@ void test("top-level worktree cwd is inherited and reused by retries", async () 
   const snapshots: string[] = [];
   const worktreeRoot = { ...root, runStore: { worktree: async () => ({ owner: "worker", path: "/runs/worktree", branch: "pi-extensible-workflows/run/key", cwd: "/runs/worktree/subdir" }), validateWorktree: async () => ({ owner: "worker", path: "/runs/worktree", branch: "pi-extensible-workflows/run/key", cwd: "/runs/worktree/subdir" }), snapshotWorktree: async (owner: string) => { snapshots.push(owner); return "commit"; } } as unknown as RunStore };
   let attempt = 0;
-  const executor = new WorkflowAgentExecutor(worktreeRoot, async (input) => {
+  const executor = new WorkflowAgentExecutor(worktreeRoot, testTransport(async (input) => {
     cwds.push(input.cwd);
     const current = ++attempt;
     return { sessionId: `s${String(current)}`, sessionFile: `/sessions/s${String(current)}.jsonl`, messages: [assistant("ok")], getSessionStats: sessionStats, async prompt() { if (current === 1) throw new Error("retry"); }, dispose() {} };
-  });
+  }));
   const result = await executor.execute("worktree", { label: "worker", workflowName: "flow", worktreeOwner: "worker", retries: 1 });
   assert.deepEqual(cwds, ["/runs/worktree/subdir", "/runs/worktree/subdir"]);
   assert.deepEqual(snapshots, ["worker", "worker"]);
@@ -432,7 +626,7 @@ void test("top-level worktree cwd is inherited and reused by retries", async () 
 void test("concurrent siblings keep their own cwd and plain top-level calls use root cwd", async () => {
   const cwds: Record<string, string> = {};
   const worktreeRoot = { ...root, runStore: { worktree: async (owner: string) => ({ owner, path: `/runs/${owner}`, branch: `branch/${owner}`, cwd: `/runs/${owner}/repo` }), validateWorktree: async (owner: string, cwd: string) => ({ owner, path: `/runs/${owner}`, branch: `branch/${owner}`, cwd }), snapshotWorktree: async () => "commit" } as unknown as RunStore };
-  const executor = new WorkflowAgentExecutor(worktreeRoot, async (input) => ({ sessionId: input.sessionLabel, sessionFile: `/sessions/${input.sessionLabel}.jsonl`, messages: [assistant("ok")], getSessionStats: sessionStats, async prompt() { cwds[input.sessionLabel] = input.cwd; await Promise.resolve(); }, dispose() {} }));
+  const executor = new WorkflowAgentExecutor(worktreeRoot, testTransport(async (input) => ({ sessionId: input.sessionLabel, sessionFile: `/sessions/${input.sessionLabel}.jsonl`, messages: [assistant("ok")], getSessionStats: sessionStats, async prompt() { cwds[input.sessionLabel] = input.cwd; await Promise.resolve(); }, dispose() {} })));
   const [left, right] = await Promise.all([
     executor.execute("left", { label: "left", workflowName: "flow", worktreeOwner: "left" }),
     executor.execute("right", { label: "right", workflowName: "flow", worktreeOwner: "right" }),
@@ -450,51 +644,200 @@ void test("concurrent siblings keep their own cwd and plain top-level calls use 
 });
 
 void test("rejects arbitrary child cwd before launching a session", async () => {
-  const executor = new WorkflowAgentExecutor(root, async () => { throw new Error("must not launch"); });
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => { throw new Error("must not launch"); }));
   await assert.rejects(executor.execute("child", { label: "child", workflowName: "flow", parent: "root", cwd: "/tmp/arbitrary" }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
 });
 
 void test("stale worktree parent cwd fails before launching a session", async () => {
   const worktreeRoot = { ...root, runStore: { validateWorktree: async () => { throw new WorkflowError("WORKTREE_FAILED", "stale"); } } as unknown as RunStore };
-  const executor = new WorkflowAgentExecutor(worktreeRoot, async () => { throw new Error("must not launch"); });
+  const executor = new WorkflowAgentExecutor(worktreeRoot, testTransport(async () => { throw new Error("must not launch"); }));
   await assert.rejects(executor.execute("child", { label: "child", workflowName: "flow", parent: "worker", worktreeOwner: "worker", cwd: "/runs/stale" }), (error: unknown) => error instanceof WorkflowError && error.code === "WORKTREE_FAILED");
 });
 
 void test("worktree scope without persisted ownership fails without launching a session", async () => {
-  const executor = new WorkflowAgentExecutor(root, async () => { throw new Error("must not launch"); });
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => { throw new Error("must not launch"); }));
   await assert.rejects(executor.execute("worktree", { label: "worker", workflowName: "flow", worktreeOwner: "worker" }), (error: unknown) => error instanceof WorkflowError && error.code === "WORKTREE_FAILED");
 });
 
 void test("snapshot failures stay WORKTREE_FAILED without a second snapshot", async () => {
   let snapshots = 0;
   const worktreeRoot = { ...root, runStore: { worktree: async () => ({ owner: "worker", path: "/runs/worker", branch: "branch/worker", cwd: "/runs/worker/repo" }), snapshotWorktree: async () => { snapshots += 1; throw new WorkflowError("WORKTREE_FAILED", "snapshot failed"); } } as unknown as RunStore };
-  const executor = new WorkflowAgentExecutor(worktreeRoot, async () => ({ sessionId: "s", sessionFile: "/sessions/s.jsonl", messages: [assistant("ok")], getSessionStats: sessionStats, async prompt() {}, dispose() {} }));
+  const executor = new WorkflowAgentExecutor(worktreeRoot, testTransport(async () => ({ transport: "local", session: { transport: "local", sessionId: "s", locator: { sessionFile: "/sessions/s.jsonl" } }, messages: [assistant("ok")], getSessionStats: sessionStats, async prompt() {}, dispose() {} })));
   await assert.rejects(executor.execute("worktree", { label: "worker", workflowName: "flow", worktreeOwner: "worker" }), (error: unknown) => error instanceof WorkflowError && error.code === "WORKTREE_FAILED" && error.message === "snapshot failed");
   assert.equal(snapshots, 1);
 });
 
 void test("failed best-effort snapshots do not mask agent failures", async () => {
   const worktreeRoot = { ...root, runStore: { worktree: async () => ({ owner: "worker", path: "/runs/worker", branch: "branch/worker", cwd: "/runs/worker/repo" }), snapshotWorktree: async () => { throw new WorkflowError("WORKTREE_FAILED", "snapshot failed"); } } as unknown as RunStore };
-  const executor = new WorkflowAgentExecutor(worktreeRoot, async () => ({ sessionId: "s", sessionFile: "/sessions/s.jsonl", messages: [assistant("bad")], getSessionStats: sessionStats, async prompt() { throw new Error("agent failed"); }, dispose() {} }));
+  const executor = new WorkflowAgentExecutor(worktreeRoot, testTransport(async () => ({ transport: "local", session: { transport: "local", sessionId: "s", locator: { sessionFile: "/sessions/s.jsonl" } }, messages: [assistant("bad")], getSessionStats: sessionStats, async prompt() { throw new Error("agent failed"); }, dispose() {} })));
   await assert.rejects(executor.execute("worktree", { label: "worker", workflowName: "flow", worktreeOwner: "worker" }), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_FAILED" && error.message === "agent failed");
 });
 
 void test("per-attempt timeout is typed and terminal", async () => {
-  const executor = new WorkflowAgentExecutor(root, async () => ({ sessionId: "slow", sessionFile: "/sessions/slow.jsonl", messages: [], getSessionStats: sessionStats, prompt: () => new Promise(() => {}), dispose() {} }));
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ transport: "local", session: { transport: "local", sessionId: "slow", locator: { sessionFile: "/sessions/slow.jsonl" } }, messages: [], getSessionStats: sessionStats, prompt: () => new Promise(() => {}), dispose() {} })));
   await assert.rejects(executor.execute("slow", { label: "slow", workflowName: "flow", timeoutMs: 10 }), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_TIMEOUT" && Array.isArray((error as WorkflowError & { attempts: unknown[] }).attempts));
 });
 
 void test("production native Pi session installs nested scheduler tools", async () => {
   const nestedTool = { name: "agent", label: "Child Agent", description: "Start child", parameters: Type.Object({}), async execute() { return { content: [{ type: "text" as const, text: "ok" }], details: {} }; } };
-  const session = await createNativeAgentSession({ cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], customTools: [nestedTool], sessionLabel: "scheduler-production-seam" });
+  const session = await createLocalPiSession({ cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], customTools: [nestedTool], sessionLabel: "scheduler-production-seam" });
   assert.ok(session.agent?.state.tools.some(({ name }) => name === "agent"));
   session.dispose();
 });
-
+void test("local transport waits for an in-flight prompt and abort before disposing", async () => {
+  const originalAbort = Object.getOwnPropertyDescriptor(AgentSession.prototype, "abort");
+  const originalPrompt = Object.getOwnPropertyDescriptor(AgentSession.prototype, "prompt");
+  const originalDispose = Object.getOwnPropertyDescriptor(AgentSession.prototype, "dispose");
+  assert.ok(originalAbort && originalPrompt && originalDispose);
+  const events: string[] = [];
+  let releaseAbort!: () => void;
+  let releasePrompt!: () => void;
+  let markAbortStarted!: () => void;
+  let markPromptStarted!: () => void;
+  const abortGate = new Promise<void>((resolve) => { releaseAbort = resolve; });
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
+  const abortStarted = new Promise<void>((resolve) => { markAbortStarted = resolve; });
+  const promptStarted = new Promise<void>((resolve) => { markPromptStarted = resolve; });
+  AgentSession.prototype.abort = async function () { events.push("abort-start"); markAbortStarted(); await abortGate; events.push("abort-end"); };
+  AgentSession.prototype.prompt = async function () { events.push("prompt-start"); markPromptStarted(); await promptGate; events.push("prompt-end"); };
+  AgentSession.prototype.dispose = function (this: AgentSession) { events.push("dispose"); Reflect.apply(originalDispose.value as (this: AgentSession) => void, this, []); };
+  try {
+    const prepared = { cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], sessionLabel: "async-dispose-contract" } satisfies import("../src/types.js").PreparedAgentSession;
+    const session = await localAgentTransport.createSession(prepared, {} as never);
+    const prompt = session.prompt("work");
+    await promptStarted;
+    const abort = session.abort();
+    await abortStarted;
+    const firstDispose = session.dispose();
+    const secondDispose = session.dispose();
+    await Promise.resolve();
+    assert.deepEqual(events, ["prompt-start", "abort-start"]);
+    releaseAbort();
+    await Promise.resolve();
+    assert.deepEqual(events, ["prompt-start", "abort-start", "abort-end"]);
+    releasePrompt();
+    await Promise.all([prompt, abort, firstDispose, secondDispose]);
+    assert.deepEqual(events, ["prompt-start", "abort-start", "abort-end", "prompt-end", "dispose"]);
+    await session.abort();
+    assert.deepEqual(events, ["prompt-start", "abort-start", "abort-end", "prompt-end", "dispose"]);
+  } finally {
+    Object.defineProperty(AgentSession.prototype, "abort", originalAbort);
+    Object.defineProperty(AgentSession.prototype, "prompt", originalPrompt);
+    Object.defineProperty(AgentSession.prototype, "dispose", originalDispose);
+  }
+});
+void test("local transport resets abort state for each prompt and disposal", async () => {
+  const originalAbort = Object.getOwnPropertyDescriptor(AgentSession.prototype, "abort");
+  const originalPrompt = Object.getOwnPropertyDescriptor(AgentSession.prototype, "prompt");
+  const originalDispose = Object.getOwnPropertyDescriptor(AgentSession.prototype, "dispose");
+  assert.ok(originalAbort && originalPrompt && originalDispose);
+  const events: string[] = [];
+  let aborts = 0;
+  let releaseFirstPrompt!: () => void;
+  let releaseSecondPrompt!: () => void;
+  let markFirstPromptStarted!: () => void;
+  let markSecondPromptStarted!: () => void;
+  const firstPromptGate = new Promise<void>((resolve) => { releaseFirstPrompt = resolve; });
+  const secondPromptGate = new Promise<void>((resolve) => { releaseSecondPrompt = resolve; });
+  const firstPromptStarted = new Promise<void>((resolve) => { markFirstPromptStarted = resolve; });
+  const secondPromptStarted = new Promise<void>((resolve) => { markSecondPromptStarted = resolve; });
+  AgentSession.prototype.prompt = async function (text) {
+    events.push(`prompt-start:${text}`);
+    if (text === "first") { markFirstPromptStarted(); await firstPromptGate; } else { markSecondPromptStarted(); await secondPromptGate; }
+    events.push(`prompt-end:${text}`);
+  };
+  AgentSession.prototype.abort = async function () { events.push("abort-" + String(++aborts)); };
+  AgentSession.prototype.dispose = function (this: AgentSession) { events.push("dispose"); Reflect.apply(originalDispose.value as (this: AgentSession) => void, this, []); };
+  try {
+    const prepared = { cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], sessionLabel: "async-abort-lifecycle" } satisfies import("../src/types.js").PreparedAgentSession;
+    const session = await localAgentTransport.createSession(prepared, {} as never);
+    const firstPrompt = session.prompt("first");
+    await firstPromptStarted;
+    releaseFirstPrompt();
+    await firstPrompt;
+    await session.abort();
+    const secondPrompt = session.prompt("second");
+    await secondPromptStarted;
+    await session.abort();
+    releaseSecondPrompt();
+    await secondPrompt;
+    await session.dispose();
+    assert.deepEqual(events, ["prompt-start:first", "prompt-end:first", "abort-1", "prompt-start:second", "abort-2", "prompt-end:second", "abort-3", "dispose"]);
+  } finally {
+    Object.defineProperty(AgentSession.prototype, "abort", originalAbort);
+    Object.defineProperty(AgentSession.prototype, "prompt", originalPrompt);
+    Object.defineProperty(AgentSession.prototype, "dispose", originalDispose);
+  }
+});
+void test("local transport swallows an in-flight prompt rejection during idempotent disposal", async () => {
+  const originalAbort = Object.getOwnPropertyDescriptor(AgentSession.prototype, "abort");
+  const originalPrompt = Object.getOwnPropertyDescriptor(AgentSession.prototype, "prompt");
+  const originalDispose = Object.getOwnPropertyDescriptor(AgentSession.prototype, "dispose");
+  assert.ok(originalAbort && originalPrompt && originalDispose);
+  let rejectPrompt!: (error: Error) => void;
+  let markPromptStarted!: () => void;
+  const promptStarted = new Promise<void>((resolve) => { markPromptStarted = resolve; });
+  let releaseAbort!: () => void;
+  let markAbortStarted!: () => void;
+  const abortGate = new Promise<void>((resolve) => { releaseAbort = resolve; });
+  const abortStarted = new Promise<void>((resolve) => { markAbortStarted = resolve; });
+  AgentSession.prototype.abort = async function () { markAbortStarted(); await abortGate; };
+  AgentSession.prototype.prompt = async function () { markPromptStarted(); await new Promise<void>((_, reject) => { rejectPrompt = reject; }); };
+  try {
+    const prepared = { cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], sessionLabel: "rejected-prompt-dispose" } satisfies import("../src/types.js").PreparedAgentSession;
+    const session = await localAgentTransport.createSession(prepared, {} as never);
+    const prompt = session.prompt("work");
+    await promptStarted;
+    const firstDispose = session.dispose();
+    const secondDispose = session.dispose();
+    await abortStarted;
+    releaseAbort();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    rejectPrompt(new Error("prompt aborted"));
+    await assert.rejects(prompt, /prompt aborted/);
+    await assert.doesNotReject(Promise.all([firstDispose, secondDispose]));
+    await assert.doesNotReject(session.dispose());
+  } finally {
+    Object.defineProperty(AgentSession.prototype, "abort", originalAbort);
+    Object.defineProperty(AgentSession.prototype, "prompt", originalPrompt);
+    Object.defineProperty(AgentSession.prototype, "dispose", originalDispose);
+  }
+});
+void test("local transport ignores abort failure while finishing disposal", async () => {
+  const originalAbort = Object.getOwnPropertyDescriptor(AgentSession.prototype, "abort");
+  const originalPrompt = Object.getOwnPropertyDescriptor(AgentSession.prototype, "prompt");
+  const originalDispose = Object.getOwnPropertyDescriptor(AgentSession.prototype, "dispose");
+  assert.ok(originalAbort && originalPrompt && originalDispose);
+  const events: string[] = [];
+  let releasePrompt!: () => void;
+  let markPromptStarted!: () => void;
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
+  const promptStarted = new Promise<void>((resolve) => { markPromptStarted = resolve; });
+  AgentSession.prototype.abort = async function () { events.push("abort"); throw new Error("abort failed"); };
+  AgentSession.prototype.prompt = async function () { events.push("prompt-start"); markPromptStarted(); await promptGate; events.push("prompt-end"); };
+  AgentSession.prototype.dispose = function (this: AgentSession) { events.push("dispose"); Reflect.apply(originalDispose.value as (this: AgentSession) => void, this, []); };
+  try {
+    const prepared = { cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], sessionLabel: "abort-failure-dispose" } satisfies import("../src/types.js").PreparedAgentSession;
+    const session = await localAgentTransport.createSession(prepared, {} as never);
+    const prompt = session.prompt("work");
+    await promptStarted;
+    const disposal = session.dispose();
+    void disposal.catch(() => undefined);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    releasePrompt();
+    await prompt;
+    await assert.doesNotReject(Promise.all([disposal, session.dispose()]));
+    assert.deepEqual(events, ["prompt-start", "abort", "prompt-end", "dispose"]);
+  } finally {
+    Object.defineProperty(AgentSession.prototype, "abort", originalAbort);
+    Object.defineProperty(AgentSession.prototype, "prompt", originalPrompt);
+    Object.defineProperty(AgentSession.prototype, "dispose", originalDispose);
+  }
+});
 void test("executor registers the production native steering handler", async () => {
   const steered: string[] = [];
   let registered: ((message: string) => void | Promise<void>) | undefined;
-  const executor = new WorkflowAgentExecutor(root, async () => ({ sessionId: "steer", sessionFile: "/sessions/steer.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: sessionStats, prompt: async () => undefined, steer: async (message) => { steered.push(message); }, dispose() {} }));
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ transport: "local", session: { transport: "local", sessionId: "steer", locator: { sessionFile: "/sessions/steer.jsonl" } }, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: sessionStats, prompt: async () => undefined, steer: async (message) => { steered.push(message); }, dispose() {} })));
   await executor.execute("work", { label: "worker", workflowName: "flow" }, undefined, [], (handler) => { registered = handler; });
   assert.ok(registered);
   await registered("redirect");
@@ -707,26 +1050,29 @@ void test("nested agent roles resolve tools before scheduler spawn", async () =>
 });
 
 void test("explicit null timeout remains unlimited", async () => {
-  const executor = new WorkflowAgentExecutor(root, async () => ({ sessionId: "unlimited", sessionFile: "/sessions/unlimited.jsonl", messages: [assistant("done")], getSessionStats: sessionStats, prompt: async () => { await new Promise((resolve) => setTimeout(resolve, 20)); }, dispose() {} }));
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ transport: "local", session: { transport: "local", sessionId: "unlimited", locator: { sessionFile: "/sessions/unlimited.jsonl" } }, messages: [assistant("done")], getSessionStats: sessionStats, prompt: async () => { await new Promise((resolve) => setTimeout(resolve, 20)); }, dispose() {} })));
   assert.equal((await executor.execute("work", { label: "worker", workflowName: "flow", timeoutMs: null })).value, "done");
 });
 
 void test("setup hook errors stop later hooks and session creation", async () => {
   let later = false;
   let launched = false;
+  const attempts: string[] = [];
+  const selected: import("../src/types.js").AgentTransport = { id: "selected", async createSession() { launched = true; throw new Error("must not launch"); } };
   const executor = new WorkflowAgentExecutor({ ...root, agentSetupHooks: [
-    { name: "fails", priority: 1, setup() { throw new Error("hook failed"); } },
+    { name: "fails", priority: 1, setup(agent) { agent.transport = selected; throw new Error("hook failed"); } },
     { name: "later", priority: 2, setup() { later = true; } },
-  ] }, async () => { launched = true; throw new Error("must not launch"); });
-  await assert.rejects(executor.execute("work", { label: "worker", workflowName: "flow", retries: 3 }), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_FAILED" && error.message === "hook failed");
+  ] }, localAgentTransport);
+  await assert.rejects(executor.execute("work", { label: "worker", workflowName: "flow", retries: 3, onAttempt: (attempt) => { attempts.push(attempt.transport); } }), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_FAILED" && error.message === "hook failed");
   assert.equal(later, false);
   assert.equal(launched, false);
+  assert.deepEqual(attempts, ["selected"]);
 });
 
 void test("setup cancellation prevents native session creation", async () => {
   const controller = new AbortController();
   let launched = false;
-  const executor = new WorkflowAgentExecutor({ ...root, agentSetupHooks: [{ name: "cancel", priority: 10, setup() { controller.abort(); } }] }, async () => { launched = true; throw new Error("must not launch"); });
+  const executor = new WorkflowAgentExecutor({ ...root, agentSetupHooks: [{ name: "cancel", priority: 10, setup() { controller.abort(); } }] }, testTransport(async () => { launched = true; throw new Error("must not launch"); }));
   await assert.rejects(executor.execute("work", { label: "worker", workflowName: "flow" }, controller.signal), (error: unknown) => error instanceof WorkflowError && error.code === "CANCELLED");
   assert.equal(launched, false);
 });
@@ -764,35 +1110,35 @@ void test("removeRun evicts only settled scheduler state", async () => {
 void test("refreshes resource exclusions for every fresh attempt and inspects the effective policy", async () => {
   let policyCalls = 0;
   let sessions = 0;
-  const inputs: Array<NonNullable<Parameters<SessionFactory>[0]["resourcePolicy"]>> = [];
+  const inputs: Array<NonNullable<SessionInput["resourcePolicy"]>> = [];
   const executor = new WorkflowAgentExecutor({ ...root, agentResourcePolicy: () => {
     policyCalls += 1;
     const skill = `skill-${String(policyCalls)}`;
     const extension = `/extensions/extension-${String(policyCalls)}.ts`;
     return { globalSettingsPath: "/global/settings.json", projectSettingsPath: "/project/settings.json", projectTrusted: true, global: { skills: [], extensions: [] }, project: { skills: [], extensions: [] }, effective: { skills: [skill], extensions: [extension] }, unmatchedSkills: [skill], unmatchedExtensions: [extension] };
-  } }, async (input) => {
+  } }, testTransport(async (input) => {
     assert.ok(input.resourcePolicy);
     inputs.push(input.resourcePolicy);
     sessions += 1;
     return { sessionId: `policy-${String(sessions)}`, sessionFile: `/sessions/policy-${String(sessions)}.jsonl`, messages: [assistant("done")], getSessionStats: sessionStats, async prompt() { if (sessions === 1) throw new Error("retry"); }, dispose() {} };
-  });
+  }));
   const result = await executor.execute("work", { label: "worker", workflowName: "flow", retries: 1 });
   assert.equal(result.value, "done");
   assert.equal(policyCalls, 2);
   assert.deepEqual(inputs.map(({ effective }) => effective), [{ skills: ["skill-1"], extensions: ["/extensions/extension-1.ts"] }, { skills: ["skill-2"], extensions: ["/extensions/extension-2.ts"] }]);
-  assert.deepEqual(result.attempts.map(({ setup }) => setup?.disabledAgentResources?.skills), [["skill-1"], ["skill-2"]]);
+  assert.deepEqual(result.attempts.map(({ setup }) => setup.disabledAgentResources?.skills), [["skill-1"], ["skill-2"]]);
 });
 void test("isolates role resource exclusions and reapplies them on retries", async () => {
   const roleExtension = "/role/extension.ts";
   const basePolicy = { globalSettingsPath: "/global/settings.json", projectSettingsPath: "/project/settings.json", projectTrusted: true, global: { skills: ["global"], extensions: ["/global.ts"] }, project: { skills: ["project"], extensions: ["/project.ts"] }, effective: { skills: ["global", "project"], extensions: ["/global.ts", "/project.ts"] }, unmatchedSkills: [], unmatchedExtensions: [] };
-  const policies: Array<NonNullable<Parameters<SessionFactory>[0]["resourcePolicy"]>> = [];
+  const policies: Array<NonNullable<SessionInput["resourcePolicy"]>> = [];
   let sessions = 0;
-  const executor = new WorkflowAgentExecutor({ ...root, agentDefinitions: { ...root.agentDefinitions, reviewer: { ...root.agentDefinitions?.reviewer, disabledAgentResources: { skills: ["role", "global"], extensions: [roleExtension, "/global.ts"] } }, scout: { ...root.agentDefinitions?.scout } }, agentResourcePolicy: () => structuredClone(basePolicy) }, async (input) => {
+  const executor = new WorkflowAgentExecutor({ ...root, agentDefinitions: { ...root.agentDefinitions, reviewer: { ...root.agentDefinitions?.reviewer, disabledAgentResources: { skills: ["role", "global"], extensions: [roleExtension, "/global.ts"] } }, scout: { ...root.agentDefinitions?.scout } }, agentResourcePolicy: () => structuredClone(basePolicy) }, testTransport(async (input) => {
     assert.ok(input.resourcePolicy);
     policies.push(input.resourcePolicy);
     const session = ++sessions;
     return { sessionId: `role-policy-${String(session)}`, sessionFile: `/sessions/role-policy-${String(session)}.jsonl`, messages: [assistant("done")], getSessionStats: sessionStats, async prompt() { if (session === 1) throw new Error("retry"); }, dispose() {} };
-  });
+  }));
   await executor.execute("role", { label: "role", workflowName: "flow", role: "reviewer", retries: 1 });
   await executor.execute("other", { label: "other", workflowName: "flow", role: "scout" });
   await executor.execute("plain", { label: "plain", workflowName: "flow" });
@@ -839,7 +1185,7 @@ void test("filters disabled native extensions before factories and skills before
   writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ extensions: [disabledExtension, allowedExtension], skills: [skillsDir] }));
   writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ extensions: [projectDisabledExtension, projectAllowedExtension], skills: [projectSkills] }));
   const resourcePolicy: AgentResourcePolicy = { globalSettingsPath: "/workflow/settings.json", projectSettingsPath: "/project/.pi/pi-extensible-workflows/settings.json", projectTrusted: false, global: { skills: ["disabled-skill"], extensions: [resolve(disabledExtension)] }, project: { skills: [], extensions: [] }, effective: { skills: ["disabled-skill"], extensions: [resolve(disabledExtension)] }, unmatchedSkills: [], unmatchedExtensions: [] };
-  const session = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-filter", resourcePolicy });
+  const session = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-filter", resourcePolicy });
   const loaded = (session as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> }; getExtensions(): { extensions: Array<{ resolvedPath: string }> } } }).resourceLoader;
   assert.equal(existsSync(disabledMarker), false);
   assert.equal(existsSync(allowedMarker), true);
@@ -860,7 +1206,7 @@ void test("filters disabled native extensions before factories and skills before
   assert.deepEqual(resourcePolicy.unmatchedExtensions, []);
   session.dispose();
   const trustedPolicy = { globalSettingsPath: "/workflow/settings.json", projectSettingsPath: "/project/.pi/pi-extensible-workflows/settings.json", projectTrusted: true, global: { skills: ["disabled-skill"], extensions: [resolve(disabledExtension)] }, project: { skills: ["project-disabled-skill"], extensions: [resolve(projectDisabledExtension)] }, effective: { skills: ["disabled-skill", "project-disabled-skill"], extensions: [resolve(disabledExtension), resolve(projectDisabledExtension)] }, unmatchedSkills: [], unmatchedExtensions: [] };
-  const trusted = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-trusted", resourcePolicy: trustedPolicy });
+  const trusted = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-trusted", resourcePolicy: trustedPolicy });
   const trustedLoaded = (trusted as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> }; getExtensions(): { extensions: Array<{ resolvedPath: string }> } } }).resourceLoader;
   assert.equal(existsSync(projectDisabledMarker), false);
   assert.equal(existsSync(projectAllowedMarker), true);
@@ -871,7 +1217,7 @@ void test("filters disabled native extensions before factories and skills before
   assert.deepEqual(trustedPolicy.unmatchedSkills, []);
   assert.deepEqual(trustedPolicy.unmatchedExtensions, []);
   trusted.dispose();
-  const parent = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-parent" });
+  const parent = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-parent" });
   assert.match(parent.systemPrompt ?? "", /disabled-skill/);
   parent.dispose();
 });
@@ -886,7 +1232,7 @@ void test("treats role system prompt bodies as literal content", async () => {
   writeFileSync(join(agentDir, "auth.json"), "{}");
   const promptBody = join(rootDir, "prompt-body");
   writeFileSync(promptBody, "This file must not be loaded as the prompt body.");
-  const session = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "literal-system-prompt", systemPrompt: promptBody });
+  const session = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "literal-system-prompt", systemPrompt: promptBody });
   try {
     assert.ok(session.systemPrompt?.startsWith(promptBody));
     assert.doesNotMatch(session.systemPrompt ?? "", /This file must not be loaded/);
@@ -909,12 +1255,12 @@ void test("loads workflow SYSTEM.md with project trust and precedence", async ()
     writeFileSync(join(rootDir, ".pi", "pi-extensible-workflows", "SYSTEM.md"), "Global workflow system");
     writeFileSync(join(cwd, ".pi", "pi-extensible-workflows", "SYSTEM.md"), "Project workflow system");
     const policy = (projectTrusted: boolean): AgentResourcePolicy => ({ globalSettingsPath: "/workflow/settings.json", projectSettingsPath: "/project/.pi/pi-extensible-workflows/settings.json", projectTrusted, global: { skills: [], extensions: [] }, project: { skills: [], extensions: [] }, effective: { skills: [], extensions: [] }, unmatchedSkills: [], unmatchedExtensions: [] });
-    const untrusted = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "system-untrusted", systemPromptAppend: "Role append", resourcePolicy: policy(false) });
+    const untrusted = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "system-untrusted", systemPromptAppend: "Role append", resourcePolicy: policy(false) });
     assert.match(untrusted.systemPrompt ?? "", /Global workflow system/);
     assert.doesNotMatch(untrusted.systemPrompt ?? "", /Project workflow system/);
     assert.match(untrusted.systemPrompt ?? "", /Role append/);
     untrusted.dispose();
-    const trusted = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "system-trusted", resourcePolicy: policy(true) });
+    const trusted = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "system-trusted", resourcePolicy: policy(true) });
     assert.match(trusted.systemPrompt ?? "", /Project workflow system/);
     assert.doesNotMatch(trusted.systemPrompt ?? "", /Global workflow system/);
     trusted.dispose();
@@ -938,7 +1284,7 @@ void test("applies ordered minimatch resource exclusions and records concrete ma
   writeFileSync(join(agentDir, "skills", "disabled-skill", "SKILL.md"), "---\nname: disabled-skill\ndescription: Disabled\n---\nDisabled");
   writeFileSync(join(agentDir, "skills", "kept-skill", "SKILL.md"), "---\nname: kept-skill\ndescription: Kept\n---\nKept");
   const resourcePolicy: AgentResourcePolicy = { globalSettingsPath: "/workflow/settings.json", projectSettingsPath: "/project/.pi/pi-extensible-workflows/settings.json", projectTrusted: false, global: { skills: [], extensions: [] }, project: { skills: [], extensions: [] }, effective: { skills: ["disabled-*", "!kept-skill"], extensions: ["**/*", `!${allowedExtension}`] }, unmatchedSkills: [], unmatchedExtensions: [] };
-  const session = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-glob", resourcePolicy });
+  const session = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-glob", resourcePolicy });
   const loaded = (session as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> }; getExtensions(): { extensions: Array<{ resolvedPath: string }> } } }).resourceLoader;
   const skillNames = loaded.getSkills().skills.map(({ name }) => name);
   assert.ok(skillNames.includes("kept-skill"));
@@ -961,7 +1307,7 @@ void test("selected skill paths load in native Pi sessions", async () => {
   writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: {} }));
   writeFileSync(join(agentDir, "auth.json"), "{}");
   writeFileSync(join(skillDir, "SKILL.md"), "---\nname: bundle-skill\ndescription: Selected bundle skill\n---\nUse this selected bundle skill.");
-  const session = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "bundle-skill", additionalSkillPaths: [skillDir] });
+  const session = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "bundle-skill", additionalSkillPaths: [skillDir] });
   const loaded = (session as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> } } }).resourceLoader;
   assert.ok(loaded.getSkills().skills.some(({ name }) => name === "bundle-skill"));
   session.dispose();

@@ -10,9 +10,9 @@ import type { OwnershipRecord } from "./agent-execution.js";
 import { WorkflowError } from "./types.js";
 import { loadLaunchSnapshot } from "./utils.js";
 
-export interface NativeSessionReference { sessionId: string; sessionFile: string }
 export interface EffectiveSystemPrompt { sessionId: string; attempt: number; turn: number; sha256: string; prompt: string }
-export interface PersistedRun extends RunRecord { nativeSessions: readonly NativeSessionReference[] }
+export type PersistedRun = RunRecord;
+type LoadedPersistedRun = PersistedRun;
 export interface RunSummaryAgent { id: string; name: string; label?: string; state: string; role?: string; attempts: number }
 export interface RunSummaryArtifacts { runDirectory: string; statePath: string; journalPath: string; snapshotPath: string; workflowPath: string; resultPath: string; summaryPath: string }
 export interface RunSummary { schemaVersion: 1; runId: string; sessionId: string; workflowName: string; state: RunRecord["state"]; createdAt: string; updatedAt: string; terminalAt?: string; usage: WorkflowBudgetUsage; agents: readonly RunSummaryAgent[]; error?: RunRecord["error"]; failedAt?: string; replayablePaths: readonly string[]; incompletePaths: readonly string[]; artifacts: RunSummaryArtifacts }
@@ -270,10 +270,12 @@ export class RunStore {
     catch { return false; }
   }
 
-  async load(): Promise<{ run: PersistedRun; snapshot: Readonly<LaunchSnapshot> }> {
+  async load(): Promise<{ run: LoadedPersistedRun; snapshot: Readonly<LaunchSnapshot> }> {
     await this.stateWrite;
     const run = await json<PersistedRun>(join(this.directory, "state.json"));
     if (resolve(run.cwd) !== this.cwd || run.sessionId !== this.sessionId || run.id !== this.runId) throw new WorkflowError("RESUME_INCOMPATIBLE", "Persisted run belongs to another cwd or Pi session");
+    const persisted = run as unknown as Record<string, unknown>;
+    if (!Array.isArray(persisted.agentSessions) || Object.hasOwn(persisted, "nativeSessions")) throw new WorkflowError("RESUME_INCOMPATIBLE", "Persisted run uses an unsupported agent session format");
     return { run, snapshot: loadLaunchSnapshot(await json<LaunchSnapshot>(join(this.directory, "snapshot.json"))) };
   }
   async loadSummary(): Promise<RunSummary> {

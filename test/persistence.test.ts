@@ -11,7 +11,7 @@ import { listRunIds, projectStorageKey, RunStore, runsDirectory, structuralPath 
 const snapshot = createLaunchSnapshot({ script: "export const meta={name:'x',description:'x'}", args: { answer: 42 }, metadata: { name: "x", description: "x" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: ["read"], agentTypes: [], schemas: [] });
 
 function run(cwd: string, sessionId = "session-a") {
-  return { id: "run-a", workflowName: "x", cwd, sessionId, state: "running" as const, agents: [], nativeSessions: [{ sessionId: "native-a", sessionFile: "/pi/sessions/native-a.jsonl" }] };
+  return { id: "run-a", workflowName: "x", cwd, sessionId, state: "running" as const, agents: [], agentSessions: [{ transport: "local", sessionId: "native-a", locator: { sessionFile: "/pi/sessions/native-a.jsonl" } }] };
 }
 
 void test("session leases reject live owners and reclaim dead owners", async () => {
@@ -51,7 +51,7 @@ void test("partial run directories do not block sibling loading or deletion", as
   mkdirSync(partial.directory, { recursive: true });
   writeFileSync(join(partial.directory, "state.json"), "{}\n");
   const sibling = new RunStore(cwd, "session-a", "sibling", home);
-  await sibling.create({ id: "sibling", workflowName: "x", cwd, sessionId: "session-a", state: "running", agents: [], nativeSessions: [] }, snapshot);
+  await sibling.create({ id: "sibling", workflowName: "x", cwd, sessionId: "session-a", state: "running", agents: [], agentSessions: [] }, snapshot);
   assert.deepEqual((await listRunIds(cwd, "session-a", home)).sort(), ["partial", "sibling"]);
   assert.equal((await sibling.load()).run.id, "sibling");
   await partial.delete(true);
@@ -89,7 +89,7 @@ void test("stores exact cwd and Pi session snapshots atomically and rejects cros
   const loaded = await store.load();
   assert.deepEqual(loaded.snapshot.args, { answer: 42 });
   assert.equal(Object.isFrozen(loaded.snapshot.args), true);
-  assert.equal(loaded.run.nativeSessions[0]?.sessionFile, "/pi/sessions/native-a.jsonl");
+  assert.equal(((loaded.run.agentSessions[0]?.locator as { sessionFile?: string } | undefined)?.sessionFile), "/pi/sessions/native-a.jsonl");
   await assert.rejects(new RunStore(cwd, "session-b", "run-a", home).load());
   assert.notEqual(projectStorageKey(join(home, "a", "same-name")), projectStorageKey(join(home, "b", "same-name")));
   assert.deepEqual(readFileSync(join(store.directory, "state.json"), "utf8").trim().startsWith("{"), true);
@@ -205,7 +205,7 @@ void test("replays completed agent, shell, and checkpoint operations across rest
   const pending = { path: structuralPath("checkpoint", "pending"), name: "pending", prompt: "Pending?", context: null };
   await source.awaitCheckpoint(pending);
   const child = new RunStore(cwd, "session-a", "run-b", home);
-  await child.create({ id: "run-b", workflowName: "x", cwd, sessionId: "session-a", state: "failed", parentRunId: "run-a", retry: { sourceRunId: "run-a", lineageRootRunId: "run-a", completedPaths: [agentPath, shellPath, checkpoint.path], incompletePaths: ["agent/parallel/bad"], namedWorktrees: [] }, agents: [], nativeSessions: [] }, snapshot);
+  await child.create({ id: "run-b", workflowName: "x", cwd, sessionId: "session-a", state: "failed", parentRunId: "run-a", retry: { sourceRunId: "run-a", lineageRootRunId: "run-a", completedPaths: [agentPath, shellPath, checkpoint.path], incompletePaths: ["agent/parallel/bad"], namedWorktrees: [] }, agents: [], agentSessions: [] }, snapshot);
   const reloadedChild = new RunStore(cwd, "session-a", "run-b", home);
   assert.deepEqual(await reloadedChild.replay(agentPath), { path: agentPath, value: "done" });
   assert.deepEqual(await reloadedChild.replay(shellPath), { path: shellPath, value: { exitCode: 0, stdout: "ok", stderr: "" } });
@@ -217,7 +217,7 @@ void test("replays completed agent, shell, and checkpoint operations across rest
   assert.deepEqual(await reloadedChild.awaitingCheckpoints(), []);
   const grandchild = new RunStore(cwd, "session-a", "run-c", home);
   const newPath = structuralPath("agent", "retry-only");
-  await grandchild.create({ id: "run-c", workflowName: "x", cwd, sessionId: "session-a", state: "interrupted", parentRunId: "run-b", retry: { sourceRunId: "run-b", lineageRootRunId: "run-a", completedPaths: [agentPath, shellPath, checkpoint.path], incompletePaths: ["agent/parallel/bad"], namedWorktrees: [] }, agents: [], nativeSessions: [] }, snapshot);
+  await grandchild.create({ id: "run-c", workflowName: "x", cwd, sessionId: "session-a", state: "interrupted", parentRunId: "run-b", retry: { sourceRunId: "run-b", lineageRootRunId: "run-a", completedPaths: [agentPath, shellPath, checkpoint.path], incompletePaths: ["agent/parallel/bad"], namedWorktrees: [] }, agents: [], agentSessions: [] }, snapshot);
   await grandchild.complete(newPath, "new");
   const restartedGrandchild = new RunStore(cwd, "session-a", "run-c", home);
   assert.deepEqual(await restartedGrandchild.replay(agentPath), { path: agentPath, value: "done" });
@@ -233,7 +233,7 @@ void test("rejects retry provenance cycles before replay or resume", async () =>
   const source = new RunStore(cwd, "session-a", "run-a", home);
   await source.create({ ...run(cwd), state: "failed" }, snapshot);
   const child = new RunStore(cwd, "session-a", "run-b", home);
-  await child.create({ id: "run-b", workflowName: "x", cwd, sessionId: "session-a", state: "failed", parentRunId: "run-a", retry: { sourceRunId: "run-a", lineageRootRunId: "run-a", completedPaths: [], incompletePaths: [], namedWorktrees: [] }, agents: [], nativeSessions: [] }, snapshot);
+  await child.create({ id: "run-b", workflowName: "x", cwd, sessionId: "session-a", state: "failed", parentRunId: "run-a", retry: { sourceRunId: "run-a", lineageRootRunId: "run-a", completedPaths: [], incompletePaths: [], namedWorktrees: [] }, agents: [], agentSessions: [] }, snapshot);
   await source.updateState((current) => ({ ...current, retry: { sourceRunId: "run-b", lineageRootRunId: "run-a", completedPaths: [], incompletePaths: [], namedWorktrees: [] } }));
   await assert.rejects(child.validateRetrySource(), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE");
   await assert.rejects(child.replay("agent/cycle"), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE");
