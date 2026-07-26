@@ -323,6 +323,8 @@ class CliProgress {
   #frame = 0;
   #run: PersistedRun | undefined;
   #runId: string | undefined;
+  #runtimeStartedAt = 0;
+  #runtimeBaseMs = 0;
   #timer: ReturnType<typeof setInterval> | undefined;
   #interactive: boolean;
   #styles: WorkflowProgressStyles;
@@ -331,7 +333,15 @@ class CliProgress {
     this.#styles = terminalProgressStyles(this.#interactive);
   }
   update(run: PersistedRun): void {
-    if (this.#runId !== run.id) { this.#runId = run.id; this.onRunId(run.id); }
+    if (this.#runId !== run.id) {
+      this.#runId = run.id;
+      this.onRunId(run.id);
+      this.#runtimeStartedAt = Date.now();
+      this.#runtimeBaseMs = run.usage?.durationMs ?? 0;
+    } else if (this.#run && this.#run.state !== "running" && run.state === "running") {
+      this.#runtimeStartedAt = Date.now();
+      this.#runtimeBaseMs = run.usage?.durationMs ?? 0;
+    }
     this.#run = run;
     if (!this.#interactive) {
       this.#timer ??= setInterval(() => { this.render(); }, 1000);
@@ -345,14 +355,15 @@ class CliProgress {
   }
   render(): void {
     if (!this.#run) return;
+    const run = this.#run.state !== "running" ? this.#run : { ...this.#run, usage: { ...(this.#run.usage ?? { tokens: 0, costUsd: 0, durationMs: 0, agentLaunches: 0 }), durationMs: Math.max(this.#run.usage?.durationMs ?? 0, this.#runtimeBaseMs + Date.now() - this.#runtimeStartedAt) } };
     if (!this.#interactive) {
-      const stable = formatWorkflowProgress(this.#run, "◇", this.#styles);
+      const stable = formatWorkflowProgress(run, "◇", this.#styles);
       if (stable !== this.#lastStable) { this.#lastStable = stable; this.stderr(`${stable}\n`); }
       return;
     }
     const spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][this.#frame++ % 10] ?? "◇";
     const width = process.stderr.columns || 80;
-    const text = truncateWorkflowProgress(formatWorkflowProgress(this.#run, spinner, this.#styles), width).join("\n");
+    const text = truncateWorkflowProgress(formatWorkflowProgress(run, spinner, this.#styles), width).join("\n");
     this.stderr(`${this.#lines ? `\x1b[${String(this.#lines)}A` : ""}${this.#lines ? "" : "\x1b[?25l"}\x1b[0J${text}\n`);
     this.#lines = text.split("\n").length;
   }

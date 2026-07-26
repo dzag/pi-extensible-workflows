@@ -2572,6 +2572,10 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             state.workflowProgress = progress;
           }
         } else if (progress.inputRun !== incoming) {
+          if (progress.run.state !== "running" && incoming.state === "running") {
+            progress.runtimeBaseMs = incoming.usage?.durationMs ?? 0;
+            progress.runtimeStartedAt = Date.now();
+          }
           progress.inputRun = incoming;
           progress.run = incoming;
         }

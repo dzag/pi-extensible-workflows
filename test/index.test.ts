@@ -1208,6 +1208,33 @@ void test("workflow progress shows runtime after the workflow state", () => {
   assert.match(formatWorkflowProgress(run), /\[running\] runtime=12s/);
   assert.match(formatWorkflowProgress({ ...run, state: "completed", usage: { tokens: 0, costUsd: 0, durationMs: 65_432, agentLaunches: 0 } }), /\[completed\] runtime=1m 5s/);
 });
+void test("inline workflow progress rebases runtime after pause and resume", () => {
+  const previousNow = Date.now;
+  let now = 1_000;
+  Date.now = () => now;
+  try {
+    const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-inline-runtime-"));
+    const tools: Array<{ name: string; renderResult?: (result: unknown, options: unknown, theme: unknown, context: unknown) => { render: (width: number) => string[] } }> = [];
+    workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+    const tool = tools.find(({ name }) => name === "workflow");
+    assert.ok(tool?.renderResult);
+    const agent = { id: "run:1", name: "worker", path: "run:1", state: "running" as const, model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 };
+    const running = { id: "run", workflowName: "runtime", cwd: home, sessionId: "session", state: "running" as const, agents: [agent], agentSessions: [], usage: { tokens: 0, costUsd: 0, durationMs: 100, agentLaunches: 0 } } as PersistedRun;
+    const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+    const context = { state: {}, cwd: home, invalidate: () => {} };
+    tool.renderResult({ content: [], details: { run: running } }, { expanded: false, isPartial: true }, theme, context);
+    now = 2_000;
+    const paused = { ...running, state: "paused" as const, agents: [{ ...agent, state: "paused" as const }], usage: { ...running.usage, durationMs: 250 } };
+    tool.renderResult({ content: [], details: { run: paused } }, { expanded: false, isPartial: true }, theme, context);
+    now = 62_000;
+    const resumed = { ...running, usage: { ...running.usage, durationMs: 250 } };
+    const current = tool.renderResult({ content: [], details: { run: resumed } }, { expanded: false, isPartial: true }, theme, context);
+    assert.match(current.render(200).join("\n"), /runtime=0s/);
+    tool.renderResult({ content: [], details: { run: { ...resumed, state: "completed" as const } } }, { expanded: false, isPartial: false }, theme, context);
+  } finally {
+    Date.now = previousNow;
+  }
+});
 void test("workflow progress shows active shell operations without command contents", () => {
   const run = { id: "run", workflowName: "shell-progress", cwd: "/repo", sessionId: "session", state: "running" as const, agents: [], agentSessions: [], activeShells: 2 } as Parameters<typeof formatWorkflowProgress>[0];
   const progress = formatWorkflowProgress(run);
