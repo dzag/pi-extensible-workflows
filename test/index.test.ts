@@ -1383,7 +1383,7 @@ void test("session-scoped navigator shows metadata and confirms terminal deletio
   const pi = { registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["read", "workflow"] };
   workflowExtension(pi as never, home, async (value) => { copied.push(value); });
   let selectCall = 0;
-  const ctx = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "session-a" }, ui: { notify() {}, select: async (prompt: string, options: string[]) => { prompts.push(prompt); selections.push(options); selectCall += 1; if (selectCall === 1) return options.find((option) => option.includes("completed")); if (selectCall === 2) return "Agents..."; if (selectCall === 3) return options.find((option) => option.includes("#1")); if (selectCall === 4) return "Copy agent ID"; if (selectCall === 5) return "Back"; return "Close"; }, confirm: async () => deleteConfirmed } };
+  const ctx = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "session-a" }, ui: { notify() {}, select: async (prompt: string, options: string[]) => { prompts.push(prompt); selections.push(options); selectCall += 1; if (selectCall === 1) return options.find((option) => option.includes("completed")); if (selectCall === 2) return "Agents..."; if (selectCall === 3) return options.find((option) => option.includes("#1")); if (selectCall === 4) return "Copy agent ID"; if (selectCall === 5) return "Back"; return prompt === "Workflows\n" ? "Close" : "Back"; }, confirm: async () => deleteConfirmed } };
   const command = commands[0]?.handler;
   assert.ok(command);
   await command("", ctx as never);
@@ -1427,6 +1427,7 @@ void test("TUI navigator exposes agent-scoped worktree actions without transcrip
   const pi = { registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] };
   workflowExtension(pi as never, home, async (value) => { copied.push(value); });
   let customCalls = 0;
+  let pickerCalls = 0;
   let detailActions = 0;
   const ctx = {
     cwd: repo, mode: "tui", hasUI: true, sessionManager: { getSessionId: () => "session" },
@@ -1434,7 +1435,7 @@ void test("TUI navigator exposes agent-scoped worktree actions without transcrip
       notify(message: string, type?: string) { notifications.push({ message, type }); },
       confirm: async () => false,
       select: async (prompt: string, options: string[]) => {
-        if (prompt === "Workflows\n") return options.find((option) => option.includes("copy")) ?? "Close";
+        if (prompt === "Workflows\n") { pickerCalls += 1; return pickerCalls === 1 ? options.find((option) => option.includes("copy")) ?? "Close" : "Close"; }
         if (prompt === "Agents") return options.find((option) => option.includes("#1")) ?? "Back";
         if (prompt.includes("issue-65")) { const action = ["Copy branch", "Copy worktree path", "Copy agent ID", "Back"][detailActions] ?? "Back"; detailActions += 1; return options.includes(action) ? action : "Back"; }
         return "Back";
@@ -1508,6 +1509,7 @@ void test("navigator stop asks for confirmation before cancelling", async () => 
   const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
   const confirmations: string[] = [];
   let customCalls = 0;
+  let pickerCalls = 0;
   let disposed = false;
   let closeNavigator = () => {};
   workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: typeof start) { if (name === "session_start") start = handler; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
@@ -1516,11 +1518,11 @@ void test("navigator stop asks for confirmation before cancelling", async () => 
     cwd, mode: "tui", hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" },
     ui: {
       notify() {}, setStatus() {}, confirm: async (_title: string, message: string) => { confirmations.push(message); return false; },
-      select: async (prompt: string, options: string[]) => prompt === "Workflow actions" ? "Stop" : options[0] ?? "Close",
+      select: async (prompt: string, options: string[]) => { if (prompt === "Workflow actions") return "Stop"; if (prompt !== "Workflows\n") return options[0] ?? "Close"; pickerCalls += 1; return pickerCalls === 1 ? options[0] ?? "Close" : "Close"; },
       custom: async (factory: (tui: { requestRender(): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }, options?: { overlay?: boolean; overlayOptions?: { width?: string; maxHeight?: string } }) => {
         customCalls += 1;
-        assert.equal(options?.overlay, true);
-        assert.deepEqual(options.overlayOptions, { anchor: "top-left", width: "100%", maxHeight: "100%", margin: { top: 1 } });
+        assert.equal(options?.overlay, undefined);
+        assert.equal(options?.overlayOptions, undefined);
         let result: string | undefined;
         let resolveCustom!: (value: string | undefined) => void;
         const completed = new Promise<string | undefined>((resolve) => { resolveCustom = resolve; });
@@ -1567,6 +1569,7 @@ void test("navigator stop stays visible through cleanup and ignores repeated inp
   const statuses: Array<string | undefined> = [];
   const notices: string[] = [];
   let componentDisposed = false;
+  let pickerCalls = 0;
   let rendered = "";
   let closeNavigator = () => {};
   workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: typeof start) { if (name === "session_start") start = handler; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
@@ -1575,9 +1578,9 @@ void test("navigator stop stays visible through cleanup and ignores repeated inp
     cwd, mode: "tui", hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" },
     ui: {
       notify(message: string) { notices.push(message); }, setStatus(_key: string, text: string | undefined) { statuses.push(text); }, confirm: async (_title: string, message: string) => { confirmations.push(message); return true; },
-      select: async (prompt: string, options: string[]) => prompt === "Workflow actions" ? "Stop" : options[0] ?? "Close",
+      select: async (prompt: string, options: string[]) => { if (prompt === "Workflow actions") return "Stop"; if (prompt !== "Workflows\n") return options[0] ?? "Close"; pickerCalls += 1; return pickerCalls === 1 ? options[0] ?? "Close" : "Close"; },
       custom: async (factory: (tui: { requestRender(): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }, options?: { overlay?: boolean }) => {
-        assert.equal(options?.overlay, true);
+        assert.equal(options?.overlay, undefined);
         let result: string | undefined;
         let resolveCustom!: (value: string | undefined) => void;
         const completed = new Promise<string | undefined>((resolve) => { resolveCustom = resolve; });
@@ -1641,6 +1644,7 @@ void test("non-TUI navigator Stop confirms before cancelling", async () => {
         if (selectCalls === 1) return "Skip";
         if (selectCalls === 2) return options.find((option) => option.includes("select-stop")) ?? "Close";
         if (selectCalls === 3) return options.find((option) => option === "Stop") ?? "Close";
+        if (selectCalls === 4) return "Back";
         return "Close";
       },
     },
@@ -1666,7 +1670,7 @@ void test("navigator dashboard auto-refreshes the selected run", async () => {
     cwd, mode: "tui", hasUI: true, sessionManager: { getSessionId: () => "session" },
     ui: {
       notify() {}, confirm: async () => false,
-      select: async (_prompt: string, options: string[]) => { selectCall += 1; return selectCall === 1 ? options[0] : "Back"; },
+      select: async (_prompt: string, options: string[]) => { selectCall += 1; return selectCall === 1 ? options[0] : "Close"; },
       custom: async (factory: (tui: { terminal: { rows: number }; requestRender(): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }) => {
         const component = factory({ terminal: { rows: 8 }, requestRender() {} }, { fg: (_color, text) => text }, { matches: (data, binding) => data === binding }, () => {});
         component.handleInput?.("tui.select.down");
@@ -1695,13 +1699,13 @@ void test("navigator dashboard auto-refreshes the selected run", async () => {
         assert.match(compact.join("\n"), /Tree/);
         assert.doesNotMatch(compact.join("\n"), /→ Stop/);
         component.dispose?.();
-        return "Close";
+        return undefined;
       },
     },
   };
   await commands[0]?.handler("", ctx as never);
 });
-void test("navigator exposes recovered runs without making them inert", async () => {
+void test("navigator returns to the picker after cancelling a recovered run dashboard", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-actions-"));
   const cwd = join(home, "project");
   const store = new RunStore(cwd, "session", "run", home);
@@ -1718,7 +1722,7 @@ void test("navigator exposes recovered runs without making them inert", async ()
   let customCalls = 0;
   const ctx = { ...sessionContext, mode: "tui", ui: {
     notify(message: string) { notices.push(message); }, confirm: async () => false,
-    select: async (_prompt: string, options: string[]) => { pickerCalls += 1; return options[0]; },
+    select: async (_prompt: string, options: string[]) => { pickerCalls += 1; return pickerCalls === 1 ? options[0] : "Close"; },
     custom: async (factory: (tui: { requestRender(): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }) => {
       customCalls += 1;
       let result: string | undefined;
@@ -1729,12 +1733,14 @@ void test("navigator exposes recovered runs without making them inert", async ()
       component.handleInput?.("a");
       assert.match(component.render(200).join("\n"), /Resume/);
       component.handleInput?.("tui.select.cancel");
+      component.handleInput?.("tui.select.cancel");
+      assert.equal(result, "Back");
       component.dispose?.();
       return result;
     },
   } };
   await commands[0]?.handler("", ctx as never);
-  assert.equal(pickerCalls, 1);
+  assert.equal(pickerCalls, 2);
   assert.equal(customCalls, 1);
   assert.equal((await store.load()).run.state, "interrupted");
 });
@@ -1753,8 +1759,9 @@ void test("navigator keeps consecutive checkpoint decisions in the same dashboar
   assert.ok(start);
   await start({}, sessionContext);
   let customCalls = 0;
+  let pickerCalls = 0;
   const ctx = { ...sessionContext, mode: "tui", ui: {
-    notify() {}, confirm: async () => false, select: async (prompt: string, options: string[]) => prompt === "Workflow actions" ? options.find((option) => option.startsWith("Review ")) ?? options[0] : options[0],
+    notify() {}, confirm: async () => false, select: async (prompt: string, options: string[]) => { if (prompt === "Workflow actions") return options.find((option) => option.startsWith("Review ")) ?? options[0]; pickerCalls += 1; return pickerCalls === 1 ? options[0] : "Close"; },
     custom: async (factory: (tui: { requestRender(): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }) => {
       customCalls += 1;
       let result: string | undefined;
@@ -1842,6 +1849,7 @@ void test("navigator opens the workflow script in the configured external editor
   process.env.VISUAL = `${editorPath} ${editedPath} ${openedPath}`;
   process.env.EDITOR = process.env.VISUAL;
   let stops = 0;
+  let pickerCalls = 0;
   let starts = 0;
   let renders = 0;
   const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
@@ -1849,7 +1857,7 @@ void test("navigator opens the workflow script in the configured external editor
   const ctx = {
     cwd, mode: "tui", hasUI: true, sessionManager: { getSessionId: () => "session" },
     ui: {
-      notify() {}, confirm: async () => false, select: async (_prompt: string, options: string[]) => options[0] ?? "Close",
+      select: async (_prompt: string, options: string[]) => { pickerCalls += 1; return pickerCalls === 1 ? options[0] ?? "Close" : "Close"; },
       custom: async (factory: (tui: { terminal: { rows: number }; stop(): void; start(): void; requestRender(force?: boolean): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }) => {
         const component = factory({ terminal: { rows: 8 }, stop() { stops += 1; }, start() { starts += 1; }, requestRender() { renders += 1; } }, { fg: (_color, text) => text }, { matches: (data, binding) => data === binding }, () => {});
         component.handleInput?.("a");
@@ -1911,12 +1919,13 @@ void test("navigator opens a persisted top-level agent result in the external ed
   process.env.EDITOR = process.env.VISUAL;
   let stops = 0;
   let starts = 0;
+  let pickerCalls = 0;
   const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
   workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
   const ctx = {
     cwd, mode: "tui", hasUI: true, sessionManager: { getSessionId: () => "session" },
     ui: {
-      notify() {}, confirm: async () => false, select: async (_prompt: string, options: string[]) => options[0] ?? "Close",
+      select: async (_prompt: string, options: string[]) => { pickerCalls += 1; return pickerCalls === 1 ? options[0] ?? "Close" : "Close"; },
       custom: async (factory: (tui: { terminal: { rows: number }; stop(): void; start(): void; requestRender(force?: boolean): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }) => {
         const component = factory({ terminal: { rows: 10 }, stop() { stops += 1; }, start() { starts += 1; }, requestRender() {} }, { fg: (_color, text) => text }, { matches: (data, binding) => data === binding }, () => {});
         const phase = component.render(120).join("\n");
@@ -1980,6 +1989,7 @@ void test("navigator omits transcript actions outside and inside Herdr", async (
           select: async (prompt: string, options: string[]) => {
             if (prompt === "Workflows\n") {
               workflowSelection += 1;
+              if (workflowSelection > 2) return "Close";
               const target = workflowSelection === 1 ? "agent-run" : "no-agent-run";
               return options.find((option) => option.includes(target)) ?? "Close";
             }
@@ -1987,7 +1997,7 @@ void test("navigator omits transcript actions outside and inside Herdr", async (
             if (options.includes("Copy agent ID")) { agentActions.push(options); return "Back"; }
             if (agentActions.length === 0 && options.includes("Agents...")) return "Agents...";
             dashboardActions.push(options);
-            return "Close";
+            return "Back";
           },
         },
       };
@@ -2118,7 +2128,7 @@ void test("navigator remains usable when retry provenance is unavailable", async
   const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
   const selections: string[][] = [];
   workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
-  const ctx = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "session" }, ui: { notify() {}, confirm: async () => false, select: async (prompt: string, options: string[]) => { selections.push(options); return prompt === "Workflows\n" ? options[0] ?? "Close" : "Close"; } } };
+  const ctx = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "session" }, ui: { notify() {}, confirm: async () => false, select: async (prompt: string, options: string[]) => { selections.push(options); if (prompt === "Workflows\n") return selections.length === 1 ? options[0] ?? "Close" : "Close"; return "Back"; } } };
   const command = commands[0]?.handler;
   assert.ok(command);
   await assert.doesNotReject(command("", ctx as never));
@@ -2158,7 +2168,7 @@ void test("navigator reviews each pending checkpoint before answering", async ()
     cwd, mode: "tui", hasUI: true, sessionManager: { getSessionId: () => "session" },
     ui: {
       notify(message: string) { notices.push(message); },
-      select: async (prompt: string, options: string[]) => { selectCalls += 1; return prompt === "Workflow actions" ? options.find((option) => option.startsWith("Review ")) ?? options[0] : prompt.includes("interrupted") ? "Skip" : options[0]; },
+      select: async (prompt: string, options: string[]) => { selectCalls += 1; return prompt === "Workflow actions" ? options.find((option) => option.startsWith("Review ")) ?? options[0] : prompt.includes("interrupted") ? "Skip" : selectCalls === 2 ? options[0] : "Close"; },
       custom: async (factory: Factory) => {
         customCalls += 1;
         let result: string | undefined;
@@ -2232,7 +2242,7 @@ void test("navigator reviews each pending checkpoint before answering", async ()
   await start({}, ctx);
   await command("", ctx);
 
-  assert.equal(selectCalls, 2);
+  assert.equal(selectCalls, 3);
   assert.equal(customCalls, 5);
   assert.equal(pendingAfterCancel, 1);
   assert.deepEqual(await store.replay("checkpoint/first"), { path: "checkpoint/first", value: true });
@@ -2580,8 +2590,9 @@ void test("navigator Pause and Resume actions round-trip persisted state and ref
   const workflow = tools.find(({ name }) => name === "workflow");
   const command = commands[0]?.handler;
   assert.ok(workflow && command);
+  let pickerCalls = 0;
   let customCalls = 0;
-  const context = { cwd, mode: "tui", hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify(message: string) { if (message.startsWith("Paused workflow")) writeFileSync(releasePath, "release"); }, confirm: async () => true, select: async (_prompt: string, options: string[]) => options[0] ?? "Close", custom: async (factory: (tui: { requestRender(): void; terminal: { rows: number } }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }) => { customCalls += 1; let result: string | undefined; const component = factory({ requestRender() {}, terminal: { rows: 20 } }, { fg: (_color, text) => text }, { matches: (data, binding) => data === binding }, (value) => { result = value; }); const dashboard = component.render(200).join("\\n"); if (customCalls === 1) { assert.match(dashboard, /running/); component.handleInput?.("a"); component.handleInput?.("tui.select.confirm"); } else if (customCalls === 2) { assert.match(dashboard, /paused|pausing/); component.handleInput?.("tui.select.cancel"); } else if (customCalls === 3) { assert.match(dashboard, /paused/); component.handleInput?.("a"); component.handleInput?.("tui.select.confirm"); } else { component.handleInput?.("tui.select.cancel"); } component.dispose?.(); return result; } } };
+  const context = { cwd, mode: "tui", hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify(message: string) { if (message.startsWith("Paused workflow")) writeFileSync(releasePath, "release"); }, confirm: async () => true, select: async (_prompt: string, options: string[]) => { pickerCalls += 1; return pickerCalls === 2 || pickerCalls === 4 ? "Close" : options[0] ?? "Close"; }, custom: async (factory: (tui: { requestRender(): void; terminal: { rows: number } }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }) => { customCalls += 1; let result: string | undefined; const component = factory({ requestRender() {}, terminal: { rows: 20 } }, { fg: (_color, text) => text }, { matches: (data, binding) => data === binding }, (value) => { result = value; }); const dashboard = component.render(200).join("\\n"); if (customCalls === 1) { assert.match(dashboard, /running/); component.handleInput?.("a"); component.handleInput?.("tui.select.confirm"); } else if (customCalls === 2) { assert.match(dashboard, /paused|pausing/); component.handleInput?.("tui.select.cancel"); } else if (customCalls === 3) { assert.match(dashboard, /paused/); component.handleInput?.("a"); component.handleInput?.("tui.select.confirm"); } else { component.handleInput?.("tui.select.cancel"); } component.dispose?.(); return result; } } };
   const result = await workflow.execute("id", { name: "navigator-pause-resume", script: `await shell(${JSON.stringify(blocked)}); await shell(${JSON.stringify(after)}); return true;` }, new AbortController().signal, undefined, context);
   const runId = (JSON.parse((result as { content: [{ text: string }] }).content[0].text) as { runId: string }).runId;
   await waitForIssue105(() => existsSync(startPath));
@@ -3876,6 +3887,7 @@ void test("navigator stop reports cleanup failures without closing unexpectedly"
   const notices: string[] = [];
   const statuses: Array<string | undefined> = [];
   let customCalls = 0;
+  let pickerCalls = 0;
   let componentDisposed = false;
   let rendered = "";
   let closeNavigator = () => {};
@@ -3885,10 +3897,10 @@ void test("navigator stop reports cleanup failures without closing unexpectedly"
     cwd, mode: "tui", hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" },
     ui: {
       notify(message: string) { notices.push(message); }, setStatus(_key: string, text: string | undefined) { statuses.push(text); }, confirm: async () => true,
-      select: async (prompt: string, options: string[]) => prompt === "Workflow actions" ? "Stop" : options[0] ?? "Close",
+      select: async (prompt: string, options: string[]) => { if (prompt === "Workflow actions") return "Stop"; if (prompt !== "Workflows\n") return options[0] ?? "Close"; pickerCalls += 1; return pickerCalls === 1 ? options[0] ?? "Close" : "Close"; },
       custom: async (factory: (tui: { requestRender(): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }, options?: { overlay?: boolean }) => {
         customCalls += 1;
-        assert.equal(options?.overlay, true);
+        assert.equal(options?.overlay, undefined);
         let result: string | undefined;
         let resolveCustom!: (value: string | undefined) => void;
         const completed = new Promise<string | undefined>((resolve) => { resolveCustom = resolve; });

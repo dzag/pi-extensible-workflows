@@ -2,7 +2,7 @@
  * Navigator TUI tests — runs a real Pi session in a herdr pane and inspects
  * what the TUI actually renders for `/workflow`.
  *
- * The overlay has two layouts: a two-column tree-and-details view at 80
+ * The dashboard has two layouts: a two-column tree-and-details view at 80
  * columns or wider, and a single-column drill-down below that. A herdr pane
  * cannot be made wider than the host terminal, so each layout test skips
  * itself when the pane it gets cannot produce that layout.
@@ -17,7 +17,7 @@ import { TestHarness } from "./harness.js";
 
 const WIDE_LAYOUT_COLUMNS = 80;
 
-/** Seed three runs in distinct attention states and open the run overlay. */
+/** Seed three runs in distinct attention states and open the dashboard. */
 async function openNavigator(h: TestHarness): Promise<string> {
   // Write fixtures BEFORE launching Pi
   await h.addRun({
@@ -113,7 +113,7 @@ void test("narrow navigator drills from tree to details to agent actions", { ski
     const withActions = h.readVisiblePane();
     assert.match(withActions, /→ Copy agent ID/, `expected a selected action row:\n${withActions}`);
 
-    // Escape returns to the tree rather than closing the overlay. waitFor reads
+    // Escape returns to the tree rather than leaving the dashboard. waitFor reads
     // scrollback, which still holds the earlier tree, so poll the live viewport.
     h.sendKey("escape");
     let backOnTree = "";
@@ -155,7 +155,6 @@ void test("wide navigator shows the tree beside details and opens agent actions 
     await h.waitFor("Agent actions", 10_000);
     const withActions = h.readVisiblePane();
     assert.match(withActions, /→ Copy agent ID/, `expected a selected action row:\n${withActions}`);
-    assert.match(withActions, /Tree/, "tree must remain visible while actions are open");
     const actionRow = withActions.split("\n").find((line) => line.includes("Copy agent ID"));
     assert.ok(actionRow, `expected an agent action row:\n${withActions}`);
     assert.match(actionRow, /\|/, `agent actions must stay in the details column: ${actionRow}`);

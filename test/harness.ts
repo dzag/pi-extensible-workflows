@@ -195,7 +195,7 @@ export class TestHarness {
 
     // Split a new pane
     // Split downward so the new pane keeps the full terminal width (the
-    // /workflow overlay switches to narrow mode below 80 columns).
+    // /workflow dashboard switches to narrow mode below 80 columns.
     const splitResult = herdrJson(
       "pane", "split", this.currentPane(), "--direction", "down", "--no-focus",
     ) as { result: { pane: { pane_id: string } } };
