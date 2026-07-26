@@ -1257,6 +1257,33 @@ void test("streams foreground workflow progress into its tool card", async () =>
   assert.equal(updates.at(-1)?.details.run.state, "completed");
   assert.match(formatWorkflowProgress(result.details.run), /✓ Workflow: progress/);
 });
+void test("inline workflow progress refreshes persisted state for stalled agents", async () => {
+  type Rendered = { render: (width: number) => string[]; invalidate?: () => void };
+  type WorkflowTool = { name: string; renderResult?: (result: unknown, options: unknown, theme: unknown, context: unknown) => Rendered };
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-inline-stall-"));
+  const store = new RunStore(home, "session", "run", home);
+  const staleAt = Date.now() - WORKFLOW_AGENT_STALL_THRESHOLD_MS - 1;
+  const agent = { id: "run:1", name: "worker", path: "run:1", state: "running" as const, model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1, activity: { kind: "text" as const, text: "responding" }, lastEventAt: staleAt };
+  const persistedRun = { id: "run", workflowName: "inline-stall", cwd: home, sessionId: "session", state: "running" as const, agents: [agent], nativeSessions: [] } as PersistedRun;
+  await store.create(persistedRun, createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "inline-stall" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] }));
+  const visibleRun = { ...persistedRun, agents: [{ ...agent, lastEventAt: Date.now() }] };
+  const tools: WorkflowTool[] = [];
+  workflowExtension({ registerTool(tool: WorkflowTool) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  const tool = tools.find(({ name }) => name === "workflow");
+  assert.ok(tool?.renderResult);
+  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+  const result = { content: [], details: { run: visibleRun } };
+  let redraw!: () => void;
+  const redrawn = new Promise<void>((resolve) => { redraw = resolve; });
+  const context = { state: {}, cwd: home, invalidate: redraw };
+  const initial = tool.renderResult(result, { expanded: false, isPartial: true }, theme, context);
+  assert.doesNotMatch(initial.render(200).join("\n"), /stalled\?/);
+  initial.invalidate?.();
+  await Promise.race([redrawn, new Promise<void>((resolve) => setTimeout(resolve, 200))]);
+  const refreshed = tool.renderResult(result, { expanded: false, isPartial: true }, theme, context);
+  assert.match(refreshed.render(200).join("\n"), /stalled\? 10m/);
+  tool.renderResult({ content: [], details: { run: { ...visibleRun, state: "completed" as const, agents: [] } } }, { expanded: false, isPartial: false }, theme, context);
+});
 void test("foreground workflow progress reports a shell waiting after agents settle", { timeout: 10000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-shell-progress-"));
   const startedPath = join(home, "shell-started");

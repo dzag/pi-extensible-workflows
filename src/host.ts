@@ -523,6 +523,7 @@ function workflowToolUpdate(run: PersistedRun): WorkflowToolUpdate {
 }
 
 const workflowSpinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const WORKFLOW_PROGRESS_REFRESH_MS = 1_000;
 
 function textBlock(text: string) {
   return {
@@ -739,14 +740,33 @@ function themeWorkflowProgressStyles(theme: Theme): WorkflowProgressStyles {
     bold: (text) => typeof theme.bold === "function" ? theme.bold(text) : text,
   };
 }
-function workflowProgressBlock(run: PersistedRun, theme: Theme) {
+type WorkflowProgressRefreshState = { runId: string; inputRun: PersistedRun; run: PersistedRun; lastRefreshAt: number; refresh?: Promise<void> };
+function workflowProgressBlock(run: PersistedRun, theme: Theme, progress?: WorkflowProgressRefreshState, refresh?: () => Promise<PersistedRun | undefined>, invalidate?: () => void) {
   const styles = themeWorkflowProgressStyles(theme);
+  const currentRun = () => progress?.run ?? run;
   return {
     render(width: number) {
       const frame = workflowSpinner[Math.floor(Date.now() / 80) % workflowSpinner.length] ?? "◇";
-      return truncateWorkflowProgress(formatWorkflowProgress(run, frame, styles), width);
+      return truncateWorkflowProgress(formatWorkflowProgress(currentRun(), frame, styles), width);
     },
-    invalidate() {},
+    invalidate() {
+      const displayed = currentRun();
+      if (!progress || !refresh || displayed.state !== "running" || !displayed.agents.some((agent) => agent.state === "running")) return;
+      const now = Date.now();
+      if (progress.refresh || now - progress.lastRefreshAt < WORKFLOW_PROGRESS_REFRESH_MS) return;
+      progress.lastRefreshAt = now;
+      const inputRun = progress.inputRun;
+      const pending = refresh().then((next) => {
+        if (next && progress.inputRun === inputRun) {
+          progress.run = next;
+          invalidate?.();
+        }
+      }).catch(() => undefined);
+      progress.refresh = pending;
+      void pending.finally(() => {
+        if (progress.refresh === pending) delete progress.refresh;
+      });
+    },
   };
 }
 export function formatBudgetStatus(run: Pick<PersistedRun, "budget" | "budgetVersion" | "usage" | "budgetEvents">): string[] {
@@ -2512,7 +2532,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const details = result.details;
       if (isWorkflowFailureDiagnostics(details)) return textBlock(formatWorkflowFailureDiagnostics(details));
       const runDetails = details as { run?: PersistedRun; value?: JsonValue; preview?: string } | undefined;
-      const state = context.state as { workflowSpinner?: ReturnType<typeof setInterval> };
+      const state = context.state as { workflowSpinner?: ReturnType<typeof setInterval>; workflowProgress?: WorkflowProgressRefreshState };
       if (runDetails?.run && isPartial && runDetails.run.state === "running" && !state.workflowSpinner) {
         state.workflowSpinner = setInterval(context.invalidate, 80);
         state.workflowSpinner.unref();
@@ -2520,7 +2540,27 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         clearInterval(state.workflowSpinner);
         delete state.workflowSpinner;
       }
-      if (runDetails?.run) return workflowProgressBlock(runDetails.run, theme);
+      if (runDetails?.run) {
+        const incoming = runDetails.run;
+        let progress = state.workflowProgress;
+        if (!isPartial || !progress || progress.runId !== incoming.id) {
+          progress = undefined;
+          delete state.workflowProgress;
+          if (isPartial) {
+            progress = { runId: incoming.id, inputRun: incoming, run: incoming, lastRefreshAt: 0 };
+            state.workflowProgress = progress;
+          }
+        } else if (progress.inputRun !== incoming) {
+          progress.inputRun = incoming;
+          progress.run = incoming;
+        }
+        return workflowProgressBlock(progress?.run ?? incoming, theme, progress, async () => {
+          const active = runs.get(incoming.id);
+          const store = active?.store ?? new RunStore(incoming.cwd, incoming.sessionId, incoming.id, home);
+          const loaded = await store.load();
+          return withLiveActivities(loaded.run);
+        }, () => { if (state.workflowProgress === progress) context.invalidate(); });
+      }
       const content = result.content[0];
       return textBlock(isPartial ? "Workflow starting..." : runDetails?.preview ?? (content?.type === "text" ? content.text : "Workflow finished"));
     },
