@@ -43,18 +43,47 @@ void test("uses a transport-neutral session and persists its final reference sha
   assert.equal(attempt.session.sessionId, "external-1");
   assert.deepEqual(events, ["prompt", "dispose"]);
 });
-void test("disposes a session when terminal success persistence fails", async () => {
-  let disposals = 0;
-  let disposed = false;
-  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ sessionId: "success-persist", messages: [assistant("done")], getSessionStats: sessionStats, async prompt() {}, dispose() { if (!disposed) { disposed = true; disposals += 1; } } })));
-  await assert.rejects(executor.execute("work", { label: "worker", workflowName: "flow", onAttempt: (attempt) => { if (attempt.result !== undefined || attempt.error !== undefined) throw new Error("persist failed"); } }), /persist failed/);
-  assert.equal(disposals, 1);
+void test("does not retry after terminal success persistence fails and preserves attempt history", async () => {
+  let prompts = 0;
+  let terminalAttempts = 0;
+  let thrownAttempts: readonly import("../src/agent-execution.js").AgentAttempt[] | undefined;
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ sessionId: "success-persist", messages: [assistant("done")], getSessionStats: sessionStats, async prompt() { prompts += 1; }, dispose() {} })));
+  await assert.rejects(executor.execute("work", { label: "worker", workflowName: "flow", retries: 1, onAttempt: (attempt) => { if (attempt.result !== undefined) { terminalAttempts += 1; throw new Error("persist failed"); } } }), (error: unknown) => {
+    if (!(error instanceof Error)) return false;
+    thrownAttempts = (error as WorkflowError & { attempts?: typeof thrownAttempts }).attempts;
+    return error.message === "persist failed";
+  });
+  assert.equal(prompts, 1);
+  assert.equal(terminalAttempts, 1);
+  assert.deepEqual(thrownAttempts?.map(({ attempt, result, error }) => ({ attempt, result, error })), [{ attempt: 1, result: "done", error: undefined }]);
 });
-void test("disposes a session when terminal failure persistence fails", async () => {
+void test("does not retry after terminal failure persistence fails and preserves attempt history", async () => {
+  let prompts = 0;
+  let terminalAttempts = 0;
+  let thrownAttempts: readonly import("../src/agent-execution.js").AgentAttempt[] | undefined;
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ sessionId: "failure-persist", messages: [assistant("done")], getSessionStats: sessionStats, async prompt() { prompts += 1; throw new Error("agent failed"); }, dispose() {} })));
+  await assert.rejects(executor.execute("work", { label: "worker", workflowName: "flow", retries: 1, onAttempt: (attempt) => { if (attempt.error !== undefined) { terminalAttempts += 1; throw new Error("persist failed"); } } }), (error: unknown) => {
+    if (!(error instanceof Error)) return false;
+    thrownAttempts = (error as WorkflowError & { attempts?: typeof thrownAttempts }).attempts;
+    return error.message === "persist failed";
+  });
+  assert.equal(prompts, 1);
+  assert.equal(terminalAttempts, 1);
+  assert.deepEqual(thrownAttempts?.map(({ attempt, error }) => ({ attempt, error })), [{ attempt: 1, error: { code: "AGENT_FAILED", message: "agent failed" } }]);
+});
+void test("does not retry after terminal success disposal fails and preserves attempt history", async () => {
+  let prompts = 0;
   let disposals = 0;
-  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ sessionId: "failure-persist", messages: [assistant("done")], getSessionStats: sessionStats, async prompt() { throw new Error("agent failed"); }, dispose() { disposals += 1; } })));
-  await assert.rejects(executor.execute("work", { label: "worker", workflowName: "flow", onAttempt: (attempt) => { if (attempt.error !== undefined) throw new Error("persist failed"); } }), /persist failed/);
+  let thrownAttempts: readonly import("../src/agent-execution.js").AgentAttempt[] | undefined;
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ sessionId: "success-dispose", messages: [assistant("done")], getSessionStats: sessionStats, async prompt() { prompts += 1; }, dispose() { disposals += 1; throw new Error("dispose failed"); } })));
+  await assert.rejects(executor.execute("work", { label: "worker", workflowName: "flow", retries: 1 }), (error: unknown) => {
+    if (!(error instanceof Error)) return false;
+    thrownAttempts = (error as WorkflowError & { attempts?: typeof thrownAttempts }).attempts;
+    return error.message === "dispose failed";
+  });
+  assert.equal(prompts, 1);
   assert.equal(disposals, 1);
+  assert.deepEqual(thrownAttempts?.map(({ attempt, result, error }) => ({ attempt, result, error })), [{ attempt: 1, result: "done", error: undefined }]);
 });
 void test("reports terminal attempts without a live session before disposal", async () => {
   const events: string[] = [];

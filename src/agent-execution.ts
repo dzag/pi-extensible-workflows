@@ -352,6 +352,10 @@ async function prepareAgentSetup(root: AgentExecutionRoot, transport: AgentTrans
 function attemptRecord(transport: string, attempt: number, session: WorkflowAgentSession, setup: AgentSetupSummary, stats: AgentAccounting, result?: JsonValue, error?: { code: string; message: string }): AgentAttempt {
   return { attempt, transport, session: session.reference, ...(result === undefined ? {} : { result }), ...(error ? { error } : {}), accounting: stats, setup };
 }
+function errorWithAttempts(error: unknown, attempts: readonly AgentAttempt[]): Error {
+  const typed = error instanceof Error ? error : new Error(typeof error === "string" ? error : String(error));
+  return Object.assign(typed, { attempts });
+}
 export class WorkflowAgentExecutor {
   private readonly transport: AgentTransport;
   constructor(private readonly root: AgentExecutionRoot, transport: AgentTransport = localAgentTransport) { this.transport = transport; }
@@ -436,6 +440,7 @@ export class WorkflowAgentExecutor {
       let systemPromptWrite = Promise.resolve();
       let systemPromptWriteError: unknown;
       let turnStarted = false;
+      let completedAttempt: AgentAttempt | undefined;
       const flushSystemPrompts = async () => {
         await systemPromptWrite;
         if (systemPromptWriteError) throw new WorkflowError("INTERNAL_ERROR", `Failed to persist effective system prompt: ${systemPromptWriteError instanceof Error ? systemPromptWriteError.message : typeof systemPromptWriteError === "string" ? systemPromptWriteError : "unknown error"}`);
@@ -562,16 +567,17 @@ export class WorkflowAgentExecutor {
         await flushSystemPrompts();
         unsubscribe();
         const attemptAccounting = accounting(session.getSessionStats());
-        const completedAttempt = attemptRecord(setup.transport.id, attempt, session, setupSummary, attemptAccounting, value);
+        completedAttempt = attemptRecord(setup.transport.id, attempt, session, setupSummary, attemptAccounting, value);
         attempts.push(completedAttempt);
         try { await options.onAttempt?.(completedAttempt); } finally { await session.dispose(); }
         return { value, attempts, cwd: setupSummary.cwd };
       } catch (error) {
+        if (completedAttempt) throw errorWithAttempts(error, attempts);
         const typed = budgetError ?? (error instanceof WorkflowError ? error : new WorkflowError(attemptSignal.aborted && setupFailed ? "CANCELLED" : "AGENT_FAILED", error instanceof Error ? error.message : String(error)));
         if (!session) {
           const failedAttempt: AgentAttempt = { attempt, transport: setup?.transport.id ?? this.transport.id, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, error: { code: typed.code, message: typed.message }, setup: setupSummary };
           attempts.push(failedAttempt);
-          await options.onAttempt?.(failedAttempt);
+          try { await options.onAttempt?.(failedAttempt); } catch (persistenceError) { throw errorWithAttempts(persistenceError, attempts); }
         }
         if (session) {
           report(true);
@@ -582,7 +588,11 @@ export class WorkflowAgentExecutor {
           if (!budgetError && typed.code !== "BUDGET_EXHAUSTED") { try { options.budget?.afterTurn(attemptAccounting, true); } catch (budgetFailure) { budgetError ??= budgetFailure instanceof WorkflowError ? budgetFailure : new WorkflowError("BUDGET_EXHAUSTED", budgetFailure instanceof Error ? budgetFailure.message : String(budgetFailure)); } }
           const failedAttempt = attemptRecord(setup?.transport.id ?? this.transport.id, attempt, session, setupSummary, attemptAccounting, undefined, { code: typed.code, message: typed.message });
           attempts.push(failedAttempt);
-          try { await options.onAttempt?.(failedAttempt); } finally { await session.dispose(); }
+          try {
+            try { await options.onAttempt?.(failedAttempt); } finally { await session.dispose(); }
+          } catch (persistenceError) {
+            throw errorWithAttempts(persistenceError, attempts);
+          }
         }
         if (options.worktreeOwner && typed.code !== "WORKTREE_FAILED") await this.root.runStore?.snapshotWorktree(options.worktreeOwner).catch(() => undefined);
         const terminal = terminalProviderError(typed);
