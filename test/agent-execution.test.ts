@@ -133,6 +133,28 @@ void test("rejects a session whose reference transport differs from the selected
   assert.equal(disposed, 1);
   assert.equal(attempts.at(-1)?.session, undefined);
 });
+void test("rejects transport-reported tools outside the prepared capability ceiling", async () => {
+  let prompted = false;
+  let disposed = 0;
+  const transport: import("../src/types.js").AgentTransport = {
+    id: "widened",
+    async createSession(prepared) {
+      return {
+        reference: { transport: "widened", sessionId: "widened-session" },
+        getState: () => ({ model: prepared.model, tools: ["read", "write"] }),
+        getSessionStats: sessionStats,
+        subscribe() { return () => undefined; },
+        async prompt() { prompted = true; return { assistant: { role: "assistant", content: [{ type: "text", text: "unexpected" }] } }; },
+        async steer() {},
+        async abort() {},
+        async dispose() { disposed += 1; },
+      };
+    },
+  };
+  await assert.rejects(new WorkflowAgentExecutor(root, transport).execute("work", { label: "worker", workflowName: "flow" }), (error: unknown) => error instanceof WorkflowError && error.code === "INTERNAL_ERROR" && error.message === "Agent transport widened widened the prepared tool policy");
+  assert.equal(prompted, false);
+  assert.equal(disposed, 1);
+});
 
 void test("resolves explicit capabilities without widening least privilege", () => {
   const executor = new WorkflowAgentExecutor(root, testTransport(async () => { throw new Error("unused"); }));
@@ -687,6 +709,40 @@ void test("local transport resets abort state for each prompt and disposal", asy
     await secondPrompt;
     await session.dispose();
     assert.deepEqual(events, ["prompt-start:first", "prompt-end:first", "abort-1", "prompt-start:second", "abort-2", "prompt-end:second", "abort-3", "dispose"]);
+  } finally {
+    Object.defineProperty(AgentSession.prototype, "abort", originalAbort);
+    Object.defineProperty(AgentSession.prototype, "prompt", originalPrompt);
+    Object.defineProperty(AgentSession.prototype, "dispose", originalDispose);
+  }
+});
+void test("local transport swallows an in-flight prompt rejection during idempotent disposal", async () => {
+  const originalAbort = Object.getOwnPropertyDescriptor(AgentSession.prototype, "abort");
+  const originalPrompt = Object.getOwnPropertyDescriptor(AgentSession.prototype, "prompt");
+  const originalDispose = Object.getOwnPropertyDescriptor(AgentSession.prototype, "dispose");
+  assert.ok(originalAbort && originalPrompt && originalDispose);
+  let rejectPrompt!: (error: Error) => void;
+  let markPromptStarted!: () => void;
+  const promptStarted = new Promise<void>((resolve) => { markPromptStarted = resolve; });
+  let releaseAbort!: () => void;
+  let markAbortStarted!: () => void;
+  const abortGate = new Promise<void>((resolve) => { releaseAbort = resolve; });
+  const abortStarted = new Promise<void>((resolve) => { markAbortStarted = resolve; });
+  AgentSession.prototype.abort = async function () { markAbortStarted(); await abortGate; };
+  AgentSession.prototype.prompt = async function () { markPromptStarted(); await new Promise<void>((_, reject) => { rejectPrompt = reject; }); };
+  try {
+    const prepared = { cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], sessionLabel: "rejected-prompt-dispose" } satisfies import("../src/types.js").PreparedAgentSession;
+    const session = await localAgentTransport.createSession(prepared, {} as never);
+    const prompt = session.prompt("work");
+    await promptStarted;
+    const firstDispose = session.dispose();
+    const secondDispose = session.dispose();
+    await abortStarted;
+    releaseAbort();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    rejectPrompt(new Error("prompt aborted"));
+    await assert.rejects(prompt, /prompt aborted/);
+    await assert.doesNotReject(Promise.all([firstDispose, secondDispose]));
+    await assert.doesNotReject(session.dispose());
   } finally {
     Object.defineProperty(AgentSession.prototype, "abort", originalAbort);
     Object.defineProperty(AgentSession.prototype, "prompt", originalPrompt);

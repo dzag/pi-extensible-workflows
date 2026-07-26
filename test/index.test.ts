@@ -1473,6 +1473,48 @@ void test("session-scoped navigator shows metadata and confirms terminal deletio
   await command("delete run-a", ctx as never);
   assert.equal(existsSync(store.directory), false);
 });
+void test("latest-attempt actions receive the active session and lose it after completion reload", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-active-attempt-actions-"));
+  let releasePrompt!: () => void;
+  let markPromptStarted!: () => void;
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
+  const promptStarted = new Promise<void>((resolve) => { markPromptStarted = resolve; });
+  const createSession = async (): Promise<TestPiSession> => ({
+    sessionId: "active-action-session",
+    messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+    getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
+    prompt: async () => { markPromptStarted(); await promptGate; },
+    steer: async () => {},
+    dispose() {},
+  });
+  const baseTransport = testTransport(createSession);
+  let expectedSession: import("../src/types.js").WorkflowAgentSession | undefined;
+  const transport: import("../src/types.js").AgentTransport = {
+    id: "local",
+    async createSession(prepared, context) { expectedSession = await baseTransport.createSession(prepared, context); return expectedSession; },
+  };
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
+  const pi = { registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] };
+  workflowExtension(pi as never, home, undefined, transport);
+  const actionRuns: boolean[] = [];
+  registerWorkflowExtension({ version: "1.0.0", headline: "Active attempt actions", description: "Active attempt action test", agentAttemptActions: { inspectActiveAttempt147: { label: "Inspect active attempt", visible: (context) => context.run.workflowName === "active-attempt-actions", run: (context) => { actionRuns.push(context.liveSession === expectedSession); } } } });
+  const workflow = tools.find(({ name }) => name === "workflow");
+  const command = commands[0]?.handler;
+  assert.ok(workflow && command);
+  let commandInvocations = 0;
+  const context = { cwd: home, mode: "rpc", hasUI: true, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt" }] }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {}, select: async (_title: string, options: string[]) => { if (options.some((option) => option.includes("active-attempt-actions"))) return actionRuns.length < commandInvocations ? options.find((option) => option.includes("active-attempt-actions")) : "Close"; if (options.includes("Agents...")) return actionRuns.length < commandInvocations ? "Agents..." : "Back"; if (options.some((option) => option.startsWith("#1 "))) return options.find((option) => option.startsWith("#1 ")); if (options.includes("Inspect active attempt")) return "Inspect active attempt"; return "Back"; }, confirm: async () => false, input: async () => undefined } };
+  const running = workflow.execute("id", { name: "active-attempt-actions", script: "return agent('work');", foreground: true }, new AbortController().signal, undefined, context);
+  await promptStarted;
+  commandInvocations = 1;
+  await command("", context as never);
+  assert.deepEqual(actionRuns, [true]);
+  releasePrompt();
+  await running;
+  commandInvocations = 2;
+  await command("", context as never);
+  assert.deepEqual(actionRuns, [true, false]);
+});
 void test("TUI navigator exposes agent-scoped worktree actions without transcript actions", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-agent-actions-"));
   const repo = join(home, "repo");

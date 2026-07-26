@@ -245,7 +245,7 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
     async dispose() {
       disposal ??= (async () => {
         disposed = true;
-        try { await startAbort(); await prompting; } finally { native.dispose(); }
+        try { await startAbort(); try { await prompting; } catch { /* Prompt rejection is expected after abort during teardown. */ } } finally { native.dispose(); }
       })();
       await disposal;
     },
