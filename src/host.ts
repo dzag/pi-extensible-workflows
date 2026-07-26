@@ -492,6 +492,8 @@ export function formatWorkflowProgress(run: PersistedRun, spinner = "◇", style
   const lines = [`${iconStyle(workflowIcon)} ${header}`];
   const budgetWarning = run.state === "budget_exhausted" || (run.budgetEvents ?? []).some((event) => event.type === "hard_exhausted");
   lines.push(...formatCompactBudgetStatus(run).map((line) => `  ${budgetWarning ? styles.warning(line) : line}`));
+  const activeShells = run.activeShells ?? 0;
+  if (activeShells > 0) lines.push(`  ${styles.accent(spinner)} shell ${styles.accent("[running]")} ${styles.dim(`(${String(activeShells)} active)`)}`);
   const byId = new Map(run.agents.map((agent) => [agent.id, agent]));
   const renderAgents = (agents: readonly AgentRecord[], offset: number, nested: boolean) => renderGroupedAgents(agents, ({ agent, index, depth }, grouped) => {
     const icon = agentStateGlyph(agent.state, spinner);
@@ -1665,10 +1667,23 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const path = shellIdentityPath(identity);
       const replayed = await store.replay(path);
       if (replayed) return readShellResult(replayed.value);
-      const cwd = identity.worktreeOwner ? (await persistWorktree(store, metadata, identity.worktreeOwner)).cwd : store.cwd;
-      const result = await executeShellCommand(command, options, signal, cwd);
-      await store.complete(path, result as unknown as JsonValue);
-      return result;
+      const started = await persistRunState(store, metadata, (current) => ({ ...current, activeShells: (current.activeShells ?? 0) + 1 }));
+      runs.get(store.runId)?.update?.(workflowToolUpdate(withLiveActivities(started)));
+      try {
+        const cwd = identity.worktreeOwner ? (await persistWorktree(store, metadata, identity.worktreeOwner)).cwd : store.cwd;
+        const result = await executeShellCommand(command, options, signal, cwd);
+        await store.complete(path, result as unknown as JsonValue);
+        return result;
+      } finally {
+        const stopped = await persistRunState(store, metadata, (current) => {
+          const activeShells = Math.max(0, (current.activeShells ?? 0) - 1);
+          if (activeShells > 0) return { ...current, activeShells };
+          const next = { ...current };
+          delete next.activeShells;
+          return next;
+        });
+        runs.get(store.runId)?.update?.(workflowToolUpdate(withLiveActivities(stopped)));
+      }
     } finally { await lifecycle.leave(); }
   };
   const lifecycleFor = (store: RunStore, state: RunState, budget: WorkflowBudgetRuntime, metadata: WorkflowMetadata) => new RunLifecycle(state, async (next, previous, reason) => {
