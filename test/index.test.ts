@@ -189,7 +189,7 @@ void test("registers the workflow tool, command, and conditional skill", async (
   const tool = tools.find(({ name }) => name === "workflow");
   assert.ok(tool);
   assert.equal(tool.promptGuidelines, undefined);
-  assert.match(tool.promptSnippet ?? "", /Recovery map: agent\(\.\.\., \{ retries \}\).*workflow_retry\(\{ runId \}\).*workflow_resume\(\{ runId, budget\? \}\).*parentRunId/);
+  assert.match(tool.promptSnippet ?? "", /Recovery map: agent\(\.\.\., \{ retries \}\).*workflow_retry\(\{ runId, foreground\? \}\).*workflow_resume\(\{ runId, budget\?, foreground\? \}\).*parentRunId/);
   assert.ok(discover);
   assert.ok(discover()?.skillPaths?.some((path) => existsSync(path)));
   const skillPath = discover()?.skillPaths?.find((path) => existsSync(path));
@@ -561,10 +561,12 @@ void test("workflow control tools render styled calls and compact or expanded re
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never);
   const theme = { fg: (color: string, text: string) => `[${color}]${text}[/${color}]`, bold: (text: string) => `<bold>${text}</bold>` };
   const cases = [
-    { name: "workflow_respond", args: { runId: "run-checkpoint", name: "approval", approved: true }, details: { accepted: true, state: "checkpoint_answered", approved: true, reason: "checkpoint" }, identifier: "approval" },
-    { name: "workflow_stop", args: { runId: "run-stop" }, details: { runId: "run-stop", state: "stopped", stopped: true }, identifier: "run-stop" },
-    { name: "workflow_retry", args: { runId: "run-failed" }, details: { runId: "run-retry", parentRunId: "run-failed", state: "running" }, identifier: "run-retry" },
-    { name: "workflow_resume", args: { runId: "run-budget", budget: { tokens: { hard: 10 } } }, details: { state: "awaiting_approval", proposalId: "proposal-1" }, identifier: "proposal-1" },
+    { name: "workflow_respond", args: { runId: "run-checkpoint", name: "approval", approved: true }, details: { accepted: true, state: "checkpoint_answered", approved: true, reason: "checkpoint" }, identifier: "approval", expectedAction: "approved" },
+    { name: "workflow_stop", args: { runId: "run-stop" }, details: { runId: "run-stop", state: "stopped", stopped: true }, identifier: "run-stop", expectedAction: "stopped" },
+    { name: "workflow_retry", args: { runId: "run-failed" }, details: { runId: "run-retry", parentRunId: "run-failed", state: "running" }, identifier: "run-retry", expectedAction: "started" },
+    { name: "workflow_retry", args: { runId: "run-failed" }, details: { runId: "run-retry", parentRunId: "run-failed", state: "completed", value: true }, identifier: "run-retry", expectedAction: "completed" },
+    { name: "workflow_resume", args: { runId: "run-budget", budget: { tokens: { hard: 10 } } }, details: { state: "awaiting_approval", proposalId: "proposal-1" }, identifier: "proposal-1", expectedAction: "approval required" },
+    { name: "workflow_resume", args: { runId: "run-budget" }, details: { state: "completed", value: true }, identifier: "run-budget", expectedAction: "completed" },
   ] as const;
   for (const entry of cases) {
     const tool = tools.find(({ name }) => name === entry.name);
@@ -580,9 +582,10 @@ void test("workflow control tools render styled calls and compact or expanded re
     const expanded = renderResult(true);
     assert.match(compact, new RegExp(entry.identifier));
     assert.match(expanded, new RegExp(entry.identifier));
+    assert.match(compact, new RegExp(entry.expectedAction));
     assert.match(expanded, /Action|State|Run/);
     assert.doesNotMatch(compact, /"runId"|"proposalId"|"hard"/);
-    if (entry.name === "workflow_resume") {
+    if (entry.name === "workflow_resume" && "budget" in entry.args) {
       assert.match(call, /tokens hard=10/);
       assert.match(expanded, /Budget patch/);
     }
@@ -4525,7 +4528,7 @@ void test("workflow_resume persists exact proposals and approval or rejection co
   const usage = { tokens: 4, costUsd: 0, durationMs: 0, agentLaunches: 1 };
   const exhausted = { type: "hard_exhausted" as const, budgetVersion: 1, dimensions: ["tokens"] as const, usage, limits: budget, at: 0 };
   const store = new RunStore(cwd, "session", runId, home);
-  await store.create({ id: runId, workflowName: "resume-budget", cwd, sessionId: "session", state: "budget_exhausted", agents: [], nativeSessions: [], budget, budgetVersion: 1, usage, budgetEvents: [exhausted] }, createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "resume-budget" }, settings: { concurrency: 1 }, budget, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+  await store.create({ id: runId, workflowName: "resume-budget", cwd, sessionId: "session", state: "budget_exhausted", agents: [], nativeSessions: [], budget, budgetVersion: 1, usage, budgetEvents: [exhausted] }, createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "resume-budget" }, launchMode: "foreground", settings: { concurrency: 1 }, budget, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
   const agentDir = join(home, "agent");
   mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
@@ -4557,7 +4560,11 @@ void test("workflow_resume persists exact proposals and approval or rejection co
   assert.ok(secondProposal);
   assert.deepEqual(approvedResume.details, { state: "awaiting_approval", proposalId: secondProposal.proposalId });
   const approved = await respond.execute("id", { runId, proposalId: secondProposal.proposalId, approved: true }, new AbortController().signal, undefined, context);
-  assert.deepEqual((approved as { details: unknown }).details, { state: "running", approved: true, reason: "approved" });
+  const approvedDetails = (approved as { details: { state: string; approved: boolean; reason: string; value?: unknown } }).details;
+  assert.equal(approvedDetails.state, "completed");
+  assert.equal(approvedDetails.approved, true);
+  assert.equal(approvedDetails.reason, "approved");
+  assert.equal(approvedDetails.value, true);
   for (let attempt = 0; attempt < 1000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
   const loaded = await store.load();
   assert.equal(loaded.run.state, "completed");
