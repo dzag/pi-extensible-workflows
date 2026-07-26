@@ -149,11 +149,13 @@ void test("streams non-content and tool-call progress", async () => {
       listener?.({ type: "message_update", message: messages[0], assistantMessageEvent: { type: "thinking_start", contentIndex: 0, partial: messages[0] } } as AgentSessionEvent);
       listener?.({ type: "message_update", message: messages[0], assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "REASONING_ONE", partial: messages[0] } } as AgentSessionEvent);
       listener?.({ type: "message_update", message: messages[0], assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "REASONING_TWO", partial: messages[0] } } as AgentSessionEvent);
+      for (let index = 0; index < 100; index += 1) listener?.({ type: "message_update", message: messages[0], assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "reasoning", partial: messages[0] } } as AgentSessionEvent);
       listener?.({ type: "tool_execution_start", toolCallId: "call-1", toolName: "read", args: {} });
       messages[0] = assistant("done");
       listener?.({ type: "message_update", message: messages[0], assistantMessageEvent: { type: "text_start", contentIndex: 0, partial: messages[0] } } as AgentSessionEvent);
       listener?.({ type: "message_update", message: messages[0], assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "RESPONSE_ONE", partial: messages[0] } } as AgentSessionEvent);
       listener?.({ type: "message_update", message: messages[0], assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "RESPONSE_TWO", partial: messages[0] } } as AgentSessionEvent);
+      for (let index = 0; index < 100; index += 1) listener?.({ type: "message_update", message: messages[0], assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "response", partial: messages[0] } } as AgentSessionEvent);
       listener?.({ type: "tool_execution_end", toolCallId: "call-1", toolName: "read", result: {}, isError: false });
       listener?.({ type: "message_end", message: messages[0] } as AgentSessionEvent);
     },
@@ -161,12 +163,16 @@ void test("streams non-content and tool-call progress", async () => {
   }));
   const result = await executor.execute("work", { label: "worker", workflowName: "flow", onProgress: (update) => { updates.push(update); } });
   assert.equal(result.value, "done");
-  assert.equal(updates.length, 6);
+  assert.equal(updates.length, 8);
   assert.doesNotMatch(JSON.stringify(updates), /REASONING_ONE|REASONING_TWO|RESPONSE_ONE|RESPONSE_TWO/);
+  assert.ok(updates.some(({ activity }) => activity?.kind === "reasoning" && activity.text === "reasoning"));
   assert.ok(updates.some(({ activity }) => activity?.kind === "text" && activity.text === "responding"));
   assert.ok(updates.some(({ toolCalls, activity }) => activity?.kind === "tool" && toolCalls.some(({ name, state }) => name === "read" && state === "running")));
   assert.ok(updates.some(({ toolCalls, persist }) => !persist && toolCalls.some(({ name, state }) => name === "read" && state === "completed")));
-  assert.deepEqual(updates.at(-1), { accounting: { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, cost: 0.25 }, toolCalls: [], persist: true });
+  assert.deepEqual(updates.at(-1)?.accounting, { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, cost: 0.25 });
+  assert.deepEqual(updates.at(-1)?.toolCalls, []);
+  assert.equal(updates.at(-1)?.persist, true);
+  assert.equal(typeof updates.at(-1)?.lastEventAt, "number");
 });
 void test("uses cumulative session stats after compaction for progress, budget, and attempts", async () => {
   let listener: ((event: AgentSessionEvent) => void) | undefined;

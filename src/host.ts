@@ -17,7 +17,7 @@ import { launchScriptForSnapshot, loadAgentDefinitions, preflight, resolveAgentR
 import { beginWorkflowExtensionLoading, loadingRegistry, resetWorkflowRegistry, type WorkflowRegistryApi } from "./registry.js";
 import { agentIdentityPath, agentWorktree, encoded, executeShellCommand, persistActiveAgentAttempt, persistAgentAttempts, readShellResult, runWorkflow, shellIdentityPath } from "./execution.js";
 import { openWorkflowArtifact, workflowResultArtifact, workflowScriptArtifact, type WorkflowArtifact } from "./workflow-artifacts.js";
-import { ERROR_CODES, LAUNCH_SNAPSHOT_IDENTITY_VERSION, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentOptions, type AgentRecord, type AgentResourcePolicy, type BudgetApprovalRequest, type BudgetEvent, type JsonValue, type LaunchSnapshot, type ModelSpec, type RunState, type ShellIdentity, type ShellOptions, type ShellResult, type WorkflowBridge, type WorkflowCatalogFunction, type WorkflowCatalogIndex, type WorkflowCatalogVariable, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowFailureAgent, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowExecution, type WorkflowMetadata, type WorkflowModelAliasResolverContext, type WorkflowRetryProvenance, type WorkflowRunContext, type WorkflowSettings, type WorkflowSettingsResolution, type WorkflowSiblingAgent, type WorkflowWorktreeReference } from "./types.js";
+import { ERROR_CODES, LAUNCH_SNAPSHOT_IDENTITY_VERSION, WORKFLOW_AGENT_STALL_THRESHOLD_MS, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentOptions, type AgentRecord, type AgentResourcePolicy, type BudgetApprovalRequest, type BudgetEvent, type JsonValue, type LaunchSnapshot, type ModelSpec, type RunState, type ShellIdentity, type ShellOptions, type ShellResult, type WorkflowBridge, type WorkflowCatalogFunction, type WorkflowCatalogIndex, type WorkflowCatalogVariable, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowFailureAgent, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowExecution, type WorkflowMetadata, type WorkflowModelAliasResolverContext, type WorkflowRetryProvenance, type WorkflowRunContext, type WorkflowSettings, type WorkflowSettingsResolution, type WorkflowSiblingAgent, type WorkflowWorktreeReference } from "./types.js";
 const SETTLED_AGENT_STATES: ReadonlySet<import("./types.js").AgentState> = new Set(["completed", "failed", "cancelled"]);
 const INTERNAL_WORKFLOW_TOOLS: readonly string[] = ["workflow", "workflow_respond", "workflow_stop", "workflow_resume", "workflow_retry", "workflow_catalog"];
 const HARD_TERMINAL_RUN_STATES: ReadonlySet<string> = new Set(["completed", "failed", "stopped"]);
@@ -484,7 +484,7 @@ function styleForState(map: Record<string, ProgressStyleKey>, state: string, sty
 function progressStyleForState(state: string, styles: WorkflowProgressStyles): (text: string) => string { return styleForState(PROGRESS_STATE_STYLE, state, styles); }
 function workflowIconStyle(state: string, styles: WorkflowProgressStyles): (text: string) => string { return styleForState(WORKFLOW_ICON_STYLE, state, styles); }
 function phaseStyleForState(state: string, styles: WorkflowProgressStyles): (text: string) => string { return styleForState(PHASE_STATE_STYLE, state, styles); }
-export function formatWorkflowProgress(run: PersistedRun, spinner = "◇", styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES): string {
+export function formatWorkflowProgress(run: PersistedRun, spinner = "◇", styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES, now = Date.now()): string {
   const done = run.agents.filter((agent) => SETTLED_AGENT_STATES.has(agent.state)).length;
   const workflowIcon = runStateGlyph(run.state, spinner);
   const iconStyle = workflowIconStyle(run.state, styles);
@@ -496,7 +496,7 @@ export function formatWorkflowProgress(run: PersistedRun, spinner = "◇", style
   const renderAgents = (agents: readonly AgentRecord[], offset: number, nested: boolean) => renderGroupedAgents(agents, ({ agent, index, depth }, grouped) => {
     const icon = agentStateGlyph(agent.state, spinner);
     const indent = "  ".repeat((grouped ? 2 : 1) + depth);
-    const activity = SETTLED_AGENT_STATES.has(agent.state) ? "" : formatAgentActivity(agent, spinner, styles);
+    const activity = SETTLED_AGENT_STATES.has(agent.state) ? "" : formatAgentActivity(agent, spinner, styles, now);
     const name = grouped ? agent.label ?? agent.name : styledAgentBreadcrumb(agent, byId, styles);
     const state = progressStyleForState(agent.state, styles);
     return `${indent}#${String(offset + index + 1)} ${state(icon)} ${name} ${state(`[${agent.state}]`)}${activity ? ` ${activity}` : ""}`;
@@ -811,9 +811,25 @@ function styledAgentBreadcrumb(agent: AgentRecord, byId: Map<string, AgentRecord
   return `${styles.muted(parts.slice(0, -1).join(" > "))} > ${styles.bold(parts[parts.length - 1] ?? "")}`;
 }
 
-function formatAgentActivity(agent: AgentRecord, spinner: string, styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES): string {
+export function formatStalledDuration(durationMs: number): string {
+  const minutes = Math.max(0, Math.floor(durationMs / 60_000));
+  if (minutes < 60) return `${String(minutes)}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${String(hours)}h${remainingMinutes ? ` ${String(remainingMinutes)}m` : ""}`;
+}
+function stalledDuration(agent: AgentRecord, now: number): number | undefined {
+  if (agent.state !== "running" || agent.lastEventAt === undefined || !Number.isFinite(agent.lastEventAt)) return undefined;
+  const duration = now - agent.lastEventAt;
+  return duration >= WORKFLOW_AGENT_STALL_THRESHOLD_MS ? duration : undefined;
+}
+function formatAgentActivity(agent: AgentRecord, spinner: string, styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES, now = Date.now()): string {
   const label = agent.activity?.kind === "reasoning" ? "reasoning" : agent.activity?.kind === "text" ? "responding" : agent.activity?.kind === "tool" ? agent.activity.text : [...(agent.toolCalls ?? [])].reverse().find(({ state }) => state === "running")?.name ?? "";
-  return label ? `${styles.accent(spinner)} ${styles.dim(label)}` : "";
+  const activity = label ? `${styles.accent(spinner)} ${styles.dim(label)}` : "";
+  const stalled = stalledDuration(agent, now);
+  if (stalled === undefined) return activity;
+  const warning = `stalled? ${formatStalledDuration(stalled)}`;
+  return activity ? `${activity} ${styles.warning(`- ${warning}`)}` : styles.warning(warning);
 }
 
 function formatAccountingValue(value: number): string {
@@ -830,7 +846,7 @@ function formatAgentAccounting(accounting: NonNullable<AgentRecord["accounting"]
   return [`Tokens: ${formatAccountingValue(total)} (in=${formatAccountingValue(accounting.input)} out=${formatAccountingValue(accounting.output)} cache-read=${formatAccountingValue(accounting.cacheRead)} cache-write=${formatAccountingValue(accounting.cacheWrite)})`, `Cost: $${accounting.cost.toFixed(2)}`];
 }
 
-export function formatNavigatorDashboard(run: PersistedRun, checkpoints: readonly AwaitingCheckpoint[], worktrees: readonly WorktreeReference[]): string {
+export function formatNavigatorDashboard(run: PersistedRun, checkpoints: readonly AwaitingCheckpoint[], worktrees: readonly WorktreeReference[], now = Date.now()): string {
   void worktrees;
   const done = run.agents.filter((a) => SETTLED_AGENT_STATES.has(a.state)).length;
   const totalAccounting = run.agents.reduce((sum, a) => ({ input: sum.input + (a.accounting?.input ?? 0), output: sum.output + (a.accounting?.output ?? 0), cacheRead: sum.cacheRead + (a.accounting?.cacheRead ?? 0), cacheWrite: sum.cacheWrite + (a.accounting?.cacheWrite ?? 0), cost: sum.cost + (a.accounting?.cost ?? 0) }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 });
@@ -853,7 +869,7 @@ export function formatNavigatorDashboard(run: PersistedRun, checkpoints: readonl
       const last = agent.attemptDetails[agent.attemptDetails.length - 1];
       if (last?.error) result.push(`${indent}  error: ${last.error.code}: ${last.error.message}`);
     }
-    const activity = !SETTLED_AGENT_STATES.has(agent.state) ? formatAgentActivity(agent, "⠦") : "";
+    const activity = !SETTLED_AGENT_STATES.has(agent.state) ? formatAgentActivity(agent, "⠦", PLAIN_WORKFLOW_PROGRESS_STYLES, now) : "";
     if (activity) result.push(`${indent}  ${activity}`);
     return result.join("\n");
   };
@@ -862,7 +878,7 @@ export function formatNavigatorDashboard(run: PersistedRun, checkpoints: readonl
   return lines.join("\n");
 }
 
-export function formatNavigatorRun(loaded: { run: PersistedRun; snapshot: Readonly<LaunchSnapshot> }, checkpoints: readonly AwaitingCheckpoint[], worktrees: readonly WorktreeReference[]): string {
+export function formatNavigatorRun(loaded: { run: PersistedRun; snapshot: Readonly<LaunchSnapshot> }, checkpoints: readonly AwaitingCheckpoint[], worktrees: readonly WorktreeReference[], now = Date.now()): string {
   const { run, snapshot } = loaded;
   const lines = [
     `Workflow: ${run.workflowName}`,
@@ -891,6 +907,8 @@ export function formatNavigatorRun(loaded: { run: PersistedRun; snapshot: Readon
     const result = [`${indent}#${String(index + 1)} ${grouped ? agent.label ?? agent.name : agentBreadcrumb(agent, byId)} state=${agent.state} model=${model}${agent.requestedModel ? ` requested=${agent.requestedModel}` : ""}${role}${tools} attempts=${String(agent.attempts)} retries=${String(Math.max(0, agent.attempts - 1))}${accounting}`];
     for (const attempt of agent.attemptDetails ?? []) result.push(`${indent}  attempt ${String(attempt.attempt)}${attempt.error ? ` error=${attempt.error.code}: ${attempt.error.message}` : ""}`);
     for (const call of agent.toolCalls ?? []) result.push(`${indent}  tool ${call.name} state=${call.state}`);
+    const activity = !SETTLED_AGENT_STATES.has(agent.state) ? formatAgentActivity(agent, "⠦", PLAIN_WORKFLOW_PROGRESS_STYLES, now) : "";
+    if (activity) result.push(`${indent}  ${activity}`);
     return result.join("\n");
   }));
   lines.push("Checkpoints:");
@@ -900,7 +918,7 @@ export function formatNavigatorRun(loaded: { run: PersistedRun; snapshot: Readon
   lines.push(`Native Pi transcripts: ${String(run.nativeSessions.length)}`);
   return lines.join("\n");
 }
-export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readonly<LaunchSnapshot>, width: number, selection: WorkflowPhaseSelection = {}, styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES): string[] {
+export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readonly<LaunchSnapshot>, width: number, selection: WorkflowPhaseSelection = {}, styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES, now = Date.now()): string[] {
   const safeWidth = Math.max(1, width);
   const model = buildWorkflowPhaseModel(run, snapshot);
   const tree = buildWorkflowPhaseTree(model);
@@ -931,7 +949,8 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
   const treeLine = (node: WorkflowPhaseTreeNode): string => {
     const selected = node.id === selectedNode?.id;
     const state = progressStyleForState(node.state, styles);
-    return `${selected ? "→" : " "} ${"  ".repeat(node.depth)}${nodeIcon(node)} ${node.label} · ${state(node.state)}`;
+    const activity = node.agent && !SETTLED_AGENT_STATES.has(node.agent.state) ? formatAgentActivity(node.agent, "⠦", styles, now) : "";
+    return `${selected ? "→" : " "} ${"  ".repeat(node.depth)}${nodeIcon(node)} ${node.label} · ${state(node.state)}${activity ? ` ${activity}` : ""}`;
   };
   const details = (node: WorkflowPhaseTreeNode | undefined): string[] => {
     if (!node) return [styles.muted("No workflow node is selected")];
@@ -952,6 +971,8 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
     const error = agent.attemptDetails?.at(-1)?.error;
     if (error) result.push(styles.error(`Error: ${error.code}: ${error.message}`));
     if (agent.activity) result.push(`Activity: ${agent.activity.text}`);
+    const stalled = stalledDuration(agent, now);
+    if (stalled !== undefined) result.push(styles.warning(`stalled? ${formatStalledDuration(stalled)}`));
     return result;
   };
   const stateNames: readonly WorkflowPhaseState[] = ["not started", "running", "completed", "failed", "cancelled", "interrupted", "budget_exhausted"];
@@ -1556,6 +1577,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     return { content: [{ type: "text" as const, text: serializeWorkflowFailureDiagnostics(diagnostic) }], details: diagnostic, isError: true };
   });
   const liveActivities = new Map<string, Map<string, AgentActivity>>();
+  const liveEventTimes = new Map<string, Map<string, number>>();
   const setLiveActivity = (runId: string, agentId: string, activity?: AgentActivity) => {
     const activities = liveActivities.get(runId);
     if (activity) {
@@ -1566,12 +1588,22 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       if (activities?.size === 0) liveActivities.delete(runId);
     }
   };
+  const setLiveEventTime = (runId: string, agentId: string, timestamp?: number) => {
+    if (timestamp === undefined) return;
+    const timestamps = liveEventTimes.get(runId);
+    if (timestamps) timestamps.set(agentId, timestamp);
+    else liveEventTimes.set(runId, new Map([[agentId, timestamp]]));
+  };
   const withLiveActivities = (run: PersistedRun): PersistedRun => {
     const activities = liveActivities.get(run.id);
-    return activities?.size ? { ...run, agents: run.agents.map((agent) => {
-      const activity = activities.get(agent.id);
-      return activity ? { ...agent, activity } : agent;
-    }) } : run;
+    const timestamps = liveEventTimes.get(run.id);
+    if (!activities?.size && !timestamps?.size) return run;
+    return { ...run, agents: run.agents.map((agent) => {
+      const activity = activities?.get(agent.id);
+      const lastEventAt = timestamps?.get(agent.id);
+      if (activity === undefined && lastEventAt === undefined) return agent;
+      return { ...agent, ...(activity === undefined ? {} : { activity }), ...(lastEventAt === undefined ? {} : { lastEventAt }) };
+    }) };
   };
   const terminalRunStates = new Map<string, "completed" | "failed" | "stopped">();
   let sessionLease: SessionLease | undefined;
@@ -1657,25 +1689,28 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const onProgress = async (progress: AgentProgress) => {
         let runState: PersistedRun;
         if (progress.persist) {
-          runState = await persistRunState(run.store, run.metadata, (current) => current.agents.some((agent) => agent.id === id) ? { ...current, ...run.budget.snapshot(), agents: current.agents.map((agent) => agent.id === id ? { ...agent, accounting: progress.accounting, toolCalls: progress.toolCalls, activity: progress.activity } : agent) } : current);
+          runState = await persistRunState(run.store, run.metadata, (current) => current.agents.some((agent) => agent.id === id) ? { ...current, ...run.budget.snapshot(), agents: current.agents.map((agent) => agent.id === id ? { ...agent, accounting: progress.accounting, toolCalls: progress.toolCalls, activity: progress.activity, ...(progress.lastEventAt === undefined ? {} : { lastEventAt: progress.lastEventAt }) } : agent) } : current);
         } else {
           const loaded = await run.store.load();
           if (!loaded.run.agents.some((agent) => agent.id === id)) return;
-          runState = { ...loaded.run, ...run.budget.snapshot(), agents: loaded.run.agents.map((agent) => agent.id === id ? { ...agent, accounting: progress.accounting, toolCalls: progress.toolCalls, activity: progress.activity } : agent) };
+          runState = { ...loaded.run, ...run.budget.snapshot(), agents: loaded.run.agents.map((agent) => agent.id === id ? { ...agent, accounting: progress.accounting, toolCalls: progress.toolCalls, activity: progress.activity, ...(progress.lastEventAt === undefined ? {} : { lastEventAt: progress.lastEventAt }) } : agent) };
         }
         if (!runState.agents.some((agent) => agent.id === id)) return;
         setLiveActivity(runId, id, progress.activity);
+        setLiveEventTime(runId, id, progress.lastEventAt);
         run.update?.(workflowToolUpdate(withLiveActivities(runState)));
       };
       const onAttempt = async (attempt: Pick<AgentAttempt, "attempt" | "sessionId" | "sessionFile" | "setup">) => {
         await scheduler.flush();
         scheduler.attemptStarted(id);
+        const lastEventAt = Date.now();
+        setLiveEventTime(runId, id, lastEventAt);
         await scheduler.flush();
         const before = (await run.store.load()).run;
         await persistActiveAgentAttempt(run.store, id, attempt);
         const active = (await run.store.load()).run;
         await eventPublisher.agentStates(run.store, run.metadata, before.agents, active.agents);
-        const persisted = await persistRunState(run.store, run.metadata, (current) => ({ ...current, ...run.budget.snapshot() }));
+        const persisted = await persistRunState(run.store, run.metadata, (current) => ({ ...current, ...run.budget.snapshot(), agents: current.agents.map((agent) => agent.id === id ? { ...agent, lastEventAt } : agent) }));
         run.update?.(workflowToolUpdate(withLiveActivities(persisted)));
       };
       const result = await run.executor.execute(prompt, { label: options.label, workflowName: run.metadata.name, onProgress, onAttempt, budget, ...(run.providerErrorRecovery ? { providerErrorRecovery: run.providerErrorRecovery } : {}), ...(parentId ? { parent: parentId, cwd: options.cwd, ...(options.worktreeOwner ? { worktreeOwner: options.worktreeOwner } : {}) } : options.worktreeOwner ? { worktreeOwner: options.worktreeOwner } : {}), ...(options.model ? { model: options.model } : {}), ...(options.thinking ? { thinking: options.thinking } : {}), ...(options.role ? { role: options.role } : {}), ...(options.role ? {} : { tools: options.tools }), effectiveTools: options.tools, ...(options.schema ? { schema: options.schema } : {}), ...(options.retries === undefined ? {} : { retries: options.retries }), ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }), ...(options.agentOptions ? { agentOptions: options.agentOptions } : {}), ...(options.agentIdentity ? { agentIdentity: options.agentIdentity } : {}) }, signal, scheduler.toolsFor(id, (role, tools, model, inheritedTools, thinking) => run.executor.resolve({ label: "child", workflowName: run.metadata.name, ...(model ? { model } : {}), ...(thinking ? { thinking } : {}), ...(role ? { role } : {}), ...(tools !== undefined ? { tools } : {}) }, inheritedTools).tools), setSteer, () => { scheduler.cancelChildren(id); scheduler.retry(id); });
@@ -1715,7 +1750,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         try { effective = run.executor.resolve(requested); }
         catch { effective = previous ? { model: previous.model, ...(previous.requestedModel ? { requestedModel: previous.requestedModel } : {}), tools: previous.tools } : { model: node.options.model ? modelSpec(node.options.model, run.model) : { ...run.model, ...(node.options.thinking ? { thinking: node.options.thinking } : {}) }, ...(node.options.model ? { requestedModel: node.options.model } : {}), tools: node.options.tools }; }
         const resultPath = !node.parentId && node.options.agentIdentity ? agentIdentityPath(node.options.agentIdentity) : undefined;
-        return { id: node.id, name: node.label, ...(node.options.requestedLabel ? { label: node.options.requestedLabel } : {}), path: node.id, state: node.state, ...(node.parentId ? { parentId: node.parentId } : {}), structuralPath: [...(node.options.agentIdentity?.structuralPath ?? [])], ...(resultPath ? { resultPath } : {}), ...(node.options.parentBreadcrumb ? { parentBreadcrumb: node.options.parentBreadcrumb } : {}), ...(node.options.worktreeOwner ? { worktreeOwner: node.options.worktreeOwner } : {}), ...(node.options.role ? { role: node.options.role } : {}), ...(effective.requestedModel ? { requestedModel: effective.requestedModel } : {}), model: effective.model, tools: effective.tools, attempts: previous?.attempts ?? 0, ...(previous?.attemptDetails ? { attemptDetails: previous.attemptDetails } : {}), ...(previous?.accounting ? { accounting: previous.accounting } : {}), ...(previous?.toolCalls ? { toolCalls: previous.toolCalls } : {}), ...(previous?.activity ? { activity: previous.activity } : {}) };
+        const lastEventAt = node.state === "running" ? previous?.state === "running" && previous.lastEventAt !== undefined ? previous.lastEventAt : Date.now() : previous?.lastEventAt;
+        return { id: node.id, name: node.label, ...(node.options.requestedLabel ? { label: node.options.requestedLabel } : {}), path: node.id, state: node.state, ...(node.parentId ? { parentId: node.parentId } : {}), structuralPath: [...(node.options.agentIdentity?.structuralPath ?? [])], ...(resultPath ? { resultPath } : {}), ...(node.options.parentBreadcrumb ? { parentBreadcrumb: node.options.parentBreadcrumb } : {}), ...(node.options.worktreeOwner ? { worktreeOwner: node.options.worktreeOwner } : {}), ...(node.options.role ? { role: node.options.role } : {}), ...(effective.requestedModel ? { requestedModel: effective.requestedModel } : {}), model: effective.model, tools: effective.tools, attempts: previous?.attempts ?? 0, ...(previous?.attemptDetails ? { attemptDetails: previous.attemptDetails } : {}), ...(previous?.accounting ? { accounting: previous.accounting } : {}), ...(previous?.toolCalls ? { toolCalls: previous.toolCalls } : {}), ...(previous?.activity ? { activity: previous.activity } : {}), ...(lastEventAt === undefined ? {} : { lastEventAt }) };
       });
       return { ...current, agents };
     });
@@ -1732,6 +1768,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     terminalRunStates.set(runId, run.lifecycle.state as "completed" | "failed" | "stopped");
     run.checkpointResolvers.clear();
     liveActivities.delete(runId);
+    liveEventTimes.delete(runId);
     eventPublisher.removeRun(runId);
     runs.delete(runId);
   };
@@ -2374,7 +2411,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const loadStores = async () => {
         const entries = await Promise.all((await listRunIds(ctx.cwd, ctx.sessionManager.getSessionId(), home)).map(async (runId) => {
           const store = new RunStore(ctx.cwd, ctx.sessionManager.getSessionId(), runId, home);
-          try { return { store, loaded: await store.load() }; }
+          try { const loaded = await store.load(); return { store, loaded: { ...loaded, run: withLiveActivities(loaded.run) } }; }
           catch { if (!await store.isComplete()) await store.delete(true).catch(() => undefined); return undefined; }
         }));
         return entries.filter((entry): entry is { store: RunStore; loaded: { run: PersistedRun; snapshot: Readonly<LaunchSnapshot> } } => entry !== undefined);
@@ -2570,11 +2607,12 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           };
           const loadDashboard = async () => {
             const loaded = await store.load();
+            const liveRun = withLiveActivities(loaded.run);
             const checkpoints = await store.awaitingCheckpoints();
             const worktrees = await store.worktrees();
             const completedOperations = ctx.mode === "tui" ? await store.replayableOperations().catch(() => []) : [];
             const agentResults = new Map<string, JsonValue>();
-            for (const agent of loaded.run.agents) {
+            for (const agent of liveRun.agents) {
               if (agent.state !== "completed" || agent.parentId || !agent.resultPath) continue;
               const operation = completedOperations.find((candidate) => candidate.path === agent.resultPath);
               if (operation) agentResults.set(agent.id, operation.value);
@@ -2584,15 +2622,15 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             const reviews = new Map<string, AwaitingCheckpoint>();
             const add = (label: string, value: string) => { actions.set(label, `${value} ${store.runId}`); };
             const addCopy = (label: string, value: string, artifact: string) => { actions.set(label, "copy"); copies.set(label, { value, artifact }); };
-            if (loaded.run.state === "running") add("Pause", "pause");
-            if (["paused", "interrupted"].includes(loaded.run.state)) add("Resume", "resume");
-            if (loaded.run.state === "budget_exhausted") { actions.set("Resume unchanged", `resume ${store.runId}`); actions.set("Adjust budget", `adjust ${store.runId}`); }
+            if (liveRun.state === "running") add("Pause", "pause");
+            if (["paused", "interrupted"].includes(liveRun.state)) add("Resume", "resume");
+            if (liveRun.state === "budget_exhausted") { actions.set("Resume unchanged", `resume ${store.runId}`); actions.set("Adjust budget", `adjust ${store.runId}`); }
             for (const decision of await store.pendingWorkflowDecisions()) {
               const id = decision.proposalId.slice(0, 8);
               actions.set(`Approve budget ${id}`, `budget-approve ${store.runId} ${decision.proposalId}`);
               actions.set(`Reject budget ${id}`, `budget-reject ${store.runId} ${decision.proposalId}`);
             }
-            if (!terminalStates.has(loaded.run.state)) add("Stop", "stop");
+            if (!terminalStates.has(liveRun.state)) add("Stop", "stop");
             for (const cp of checkpoints) {
               if (ctx.mode === "tui") {
                 const label = `Review ${cp.name}`;
@@ -2605,13 +2643,13 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             }
             if (ctx.mode !== "tui") actions.set("Refresh", "refresh");
             else actions.set("Open script in editor", "open-script");
-            if (ctx.mode !== "tui" && loaded.run.agents.length) actions.set("Agents...", "agents");
-            if (terminalStates.has(loaded.run.state)) add("Delete", "delete");
+            if (ctx.mode !== "tui" && liveRun.agents.length) actions.set("Agents...", "agents");
+            if (terminalStates.has(liveRun.state)) add("Delete", "delete");
             if (ctx.mode === "tui") {
               addCopy("Copy run path", store.directory, "run path");
               addCopy("Copy run ID", store.runId, "run ID");
             }
-            return { dashboard: formatWorkflowPhaseDashboard(loaded.run, loaded.snapshot, process.stdout.columns || 80).join("\n"), phaseModel: buildWorkflowPhaseModel(loaded.run, loaded.snapshot), run: loaded.run, snapshot: loaded.snapshot, actions, copies, reviews, agentResults, agents: loaded.run.agents, worktrees, cwd: loaded.run.cwd };
+            return { dashboard: formatWorkflowPhaseDashboard(liveRun, loaded.snapshot, process.stdout.columns || 80).join("\n"), phaseModel: buildWorkflowPhaseModel(liveRun, loaded.snapshot), run: liveRun, snapshot: loaded.snapshot, actions, copies, reviews, agentResults, agents: liveRun.agents, worktrees, cwd: liveRun.cwd };
           };
           const agentWorktreeFor = (dashboard: Awaited<ReturnType<typeof loadDashboard>>, agent: AgentRecord): WorktreeReference | undefined => agent.worktreeOwner ? dashboard.worktrees.find((candidate) => candidate.owner === agent.worktreeOwner) : undefined;
           const agentActionLabels = (dashboard: Awaited<ReturnType<typeof loadDashboard>>, agent: AgentRecord): string[] => {
