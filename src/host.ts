@@ -1008,7 +1008,7 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
     const agent = node.agent;
     if (!agent) return [styles.muted("Agent details are unavailable")];
     const byId = new Map(run.agents.map((candidate) => [candidate.id, candidate]));
-    const result = [styles.bold(`Selected agent: ${agentBreadcrumb(agent, byId, true)}`), `State: ${phaseStyle(agent.state)(agent.state)}`, `Structural path: ${agent.structuralPath?.join(" > ") || "(root)"}`, `Model: ${agent.model.provider}/${agent.model.model}${agent.model.thinking ? `:${agent.model.thinking}` : ""}`, `Role: ${agent.role ?? "(none)"}`, `Tools: ${agent.tools.join(", ") || "(none)"}`, ...(agent.systemPrompt === undefined ? [] : [`System prompt: ${agent.systemPrompt}`]), `Attempts: ${String(agent.attempts)}`, ...(agent.accounting ? formatAgentAccounting(agent.accounting) : []), ...(selection.actions ? [] : [styles.muted("enter for agent actions")])];
+    const result = [styles.bold(`Selected agent: ${agentBreadcrumb(agent, byId, true)}`), `State: ${phaseStyle(agent.state)(agent.state)}`, `Structural path: ${agent.structuralPath?.join(" > ") || "(root)"}`, `Model: ${agent.model.provider}/${agent.model.model}${agent.model.thinking ? `:${agent.model.thinking}` : ""}`, `Role: ${agent.role ?? "(none)"}`, `Tools: ${agent.tools.join(", ") || "(none)"}`, `Attempts: ${String(agent.attempts)}`, ...(agent.accounting ? formatAgentAccounting(agent.accounting) : []), ...(selection.actions ? [] : [styles.muted("enter for agent actions")])];
     const error = agent.attemptDetails?.at(-1)?.error;
     if (error) result.push(styles.error(`Error: ${error.code}: ${error.message}`));
     if (agent.activity) result.push(`Activity: ${agent.activity.text}`);
@@ -2866,6 +2866,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
               ...visibleAgentAttemptActions(dashboard, agent).map(([, action]) => action.label),
               ...(worktree ? ["Copy branch", "Copy worktree path"] : []),
               ...(ctx.mode === "tui" && agent.prompt !== undefined ? ["Open prompt in editor"] : []),
+              ...(ctx.mode === "tui" && agent.systemPrompt !== undefined ? ["Open system prompt in editor"] : []),
               ...(ctx.mode === "tui" && dashboard.agentResults.has(agent.id) ? ["Open result in editor"] : []),
               "Copy agent ID",
               "Back",
@@ -3045,6 +3046,9 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
                             const worktree = agentWorktreeFor(view, agent);
                             if (action === "Open prompt in editor") {
                               if (agent.prompt !== undefined) void openArtifact(Promise.resolve(workflowPromptArtifact(agent.prompt)), "agent prompt");
+                            }
+                            else if (action === "Open system prompt in editor") {
+                              if (agent.systemPrompt !== undefined) void openArtifact(Promise.resolve(workflowPromptArtifact(agent.systemPrompt)), "agent system prompt");
                             }
                             else if (action === "Open result in editor") {
                               const result = view.agentResults.get(agent.id);
