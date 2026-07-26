@@ -171,7 +171,7 @@ export function formatWorkflowPreview(args: { script?: unknown; workflow?: unkno
 }
 export const WORKFLOW_TOOL_LABEL = "Workflow";
 export const WORKFLOW_TOOL_DESCRIPTION = "Run a deterministic JavaScript workflow with a named inline parallel-to-summary path by default";
-export const WORKFLOW_TOOL_PROMPT_SNIPPET = "Run a deterministic, resumable JavaScript workflow. Prefer a named inline script that fans out independent work with parallel(...), awaits the keyed results before interpolating them into one summarizing agent(...), and returns. Inline launches require an explicit non-empty name; registered function launches reject name and use workflow as the run name. Advanced controls include registered functions, outputSchema, budgets, checkpoints, worktrees, retry/resume, CLI export, and pipelines. Use workflow_retry with an explicit failed run ID; parentRunId only reuses named worktrees. Runs are in the background by default; completion arrives as a follow-up message. Set foreground: true when the caller must wait for the final value. Foreground results include the completed run ID. Recovery map: agent(..., { retries }) reruns one agent call in the same run for transient failures; workflow_retry({ runId }) replays a failed run into a child; workflow_resume({ runId, budget? }) continues a budget_exhausted run; parentRunId on a new launch only borrows named worktrees and never replays or resumes.";
+export const WORKFLOW_TOOL_PROMPT_SNIPPET = "Run a deterministic, resumable JavaScript workflow. Prefer a named inline script that fans out independent work with parallel(...), awaits the keyed results before interpolating them into one summarizing agent(...), and returns. Inline launches require an explicit non-empty name; registered function launches reject name and use workflow as the run name. Advanced controls include registered functions, outputSchema, budgets, checkpoints, worktrees, retry/resume, CLI export, and pipelines. Use workflow_retry with an explicit failed run ID; parentRunId only reuses named worktrees. Runs are in the background by default; completion arrives as a follow-up message. Set foreground: true when the caller must wait for the final value. Foreground results include the completed run ID. Recovery inherits the source launch mode; legacy snapshots without launchMode recover in the background. Set foreground: true or false on workflow_resume/workflow_retry to override it; foreground recovery waits for terminal value and run details, while background recovery returns immediately with a follow-up. Recovery map: agent(..., { retries }) reruns one agent call in the same run for transient failures; workflow_retry({ runId, foreground? }) replays a failed run into a child; workflow_resume({ runId, budget?, foreground? }) continues a budget_exhausted run; parentRunId on a new launch only borrows named worktrees and never replays or resumes."
 function workflowRecoveryGuidance(action: "resume" | "retry", state: RunState): string {
   if (action === "resume") {
     if (state === "failed") return "Failed workflow runs must use workflow_retry({ runId })";
@@ -197,7 +197,7 @@ export const WORKFLOW_TOOL_PARAMETERS = Type.Object({
   budget: Type.Optional(Type.Unknown({ description: "Advanced: optional aggregate soft and hard run budgets" })),
   parentRunId: Type.Optional(Type.String({ description: "Advanced: terminal run whose named worktrees may be reused" })),
 });
-export const WORKFLOW_RETRY_PARAMETERS = Type.Object({ runId: Type.String({ description: "Explicit failed workflow run ID" }) });
+export const WORKFLOW_RETRY_PARAMETERS = Type.Object({ runId: Type.String({ description: "Explicit failed workflow run ID" }), foreground: Type.Optional(Type.Boolean({ description: "Override the source launch mode for this recovery" })) });
 
 type WorkflowToolUpdate = { content: [{ type: "text"; text: string }]; details: { runId: string; run: PersistedRun } };
 export type WorkflowPhaseState = "not started" | "running" | "completed" | "failed" | "cancelled" | "interrupted" | "budget_exhausted";
@@ -564,7 +564,7 @@ function controlState(state: string, theme: Theme): string {
   return theme.fg(color, state);
 }
 function controlAction(action: string, theme: Theme): string {
-  const color = /approved|stopped|started|resumed/.test(action) ? "success" : /rejected|failed/.test(action) ? "error" : "warning";
+  const color = /approved|completed|stopped|started|resumed/.test(action) ? "success" : /rejected|failed/.test(action) ? "error" : "warning";
   return theme.fg(color, action);
 }
 function budgetPatchEntries(value: unknown): string[] {
@@ -615,13 +615,14 @@ function workflowControlResult(name: string, args: Record<string, unknown>, resu
   if (name === "workflow_retry") {
     const childRunId = controlString(value.runId) ?? "(unknown)";
     const state = controlString(value.state) ?? "unknown";
-    if (!expanded) return [title, `Source ${theme.fg("accent", runId)}`, `Child ${theme.fg("accent", childRunId)} · ${controlState(state, theme)} · ${controlAction("started", theme)}`].join("\n");
-    return [title, `Source run: ${theme.fg("accent", runId)}`, `Retry run: ${theme.fg("accent", childRunId)}`, `State: ${controlState(state, theme)}`, `Action: ${controlAction("started; completed work will be replayed", theme)}`].join("\n");
+    const action = state === "completed" ? "completed" : "started";
+    if (!expanded) return [title, `Source ${theme.fg("accent", runId)}`, `Child ${theme.fg("accent", childRunId)} · ${controlState(state, theme)} · ${controlAction(action, theme)}`].join("\n");
+    return [title, `Source run: ${theme.fg("accent", runId)}`, `Retry run: ${theme.fg("accent", childRunId)}`, `State: ${controlState(state, theme)}`, `Action: ${controlAction(action === "completed" ? "completed" : "started; completed work will be replayed", theme)}`].join("\n");
   }
   if (name === "workflow_resume") {
     const state = controlString(value.state) ?? "unknown";
     const proposalId = controlString(value.proposalId);
-    const action = state === "awaiting_approval" ? "approval required" : state === "running" ? "resumed" : "no change";
+    const action = state === "awaiting_approval" ? "approval required" : state === "running" ? "resumed" : state === "completed" ? "completed" : "no change";
     if (!expanded) return [title, `Run ${theme.fg("accent", runId)} · ${controlState(state, theme)} · ${controlAction(action, theme)}`, ...(proposalId ? [`Proposal ${theme.fg("accent", proposalId)}`] : [])].join("\n");
     return [title, `Run: ${theme.fg("accent", runId)}`, `State: ${controlState(state, theme)}`, `Action: ${controlAction(action, theme)}`, ...(proposalId ? [`Proposal: ${theme.fg("accent", proposalId)}`] : []), ...budgetPatchDetails(args.budget, theme)].join("\n");
   }
@@ -1184,6 +1185,7 @@ function isWorkflowFailureDiagnostics(value: unknown): value is WorkflowFailureD
   return object(value) && typeof value.runId === "string" && typeof value.workflowName === "string" && typeof value.state === "string" && "failedAt" in value && object(value.error) && object(value.artifacts);
 }
 function deliver(pi: ExtensionAPI, content: string): void {
+  if (typeof pi.sendMessage !== "function") return;
   pi.sendMessage({ customType: "workflow", content, display: true }, { deliverAs: "followUp", triggerTurn: true });
 }
 function deliverFailure(pi: ExtensionAPI, diagnostic: WorkflowFailureDiagnostics): void {
@@ -1547,7 +1549,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const skillPath = [join(extensionDir, "../skills"), join(extensionDir, "../../skills")].find((path) => existsSync(path));
     return skillPath ? { skillPaths: [skillPath] } : undefined;
   });
-  type BudgetDecisionResult = { state: "running" | "budget_exhausted"; approved: boolean };
+  type BudgetDecisionResult = { state: "running" | "completed" | "budget_exhausted"; approved: boolean; value?: JsonValue; run?: PersistedRun };
   const runs = new Map<string, { executor: WorkflowAgentExecutor; store: RunStore; metadata: WorkflowMetadata; model: ModelSpec; lifecycle: RunLifecycle; budget: WorkflowBudgetRuntime; abortController: AbortController; projectTrusted: () => boolean; providerErrorRecovery?: (failure: AgentProviderFailure) => Promise<AgentProviderRecovery>; execution?: WorkflowExecution; completion?: Promise<unknown>; checkpointResolvers: Map<string, (value: boolean) => void>; update?: (result: WorkflowToolUpdate) => void }>();
   let providerRecoveryQueue = Promise.resolve();
   const enqueueProviderRecovery = <T>(task: () => Promise<T>): Promise<T> => { const next = providerRecoveryQueue.then(task, task); providerRecoveryQueue = next.then(() => undefined, () => undefined); return next; };
@@ -1819,13 +1821,13 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     run.budget.recordEvent({ type, budgetVersion: request.budgetVersion, dimensions: [], usage: structuredClone(request.consumed), limits: structuredClone(request.proposed), at: Date.now(), proposalId: request.proposalId, previous: structuredClone(request.previous), proposed: structuredClone(request.proposed) });
     await persistRunState(run.store, run.metadata, (current) => ({ ...current, ...run.budget.snapshot() }));
   };
-  const answerBudgetDecision = async (runId: string, proposalId: string, approved: boolean, silent = false, context?: unknown, signal?: AbortSignal): Promise<BudgetDecisionResult | undefined> => {
+  const answerBudgetDecision = async (runId: string, proposalId: string, approved: boolean, silent = false, context?: unknown, signal?: AbortSignal, waitForCompletion = true): Promise<BudgetDecisionResult | undefined> => {
     const run = runs.get(runId);
     if (!run) return undefined;
     const request = await run.store.answerWorkflowDecision(proposalId, approved);
     if (!request) return undefined;
     await appendBudgetDecisionEvent(run, request, approved ? "adjustment_approved" : "adjustment_rejected");
-    const result = await applyBudgetDecision(request, approved, context, signal);
+    const result = await applyBudgetDecision(request, approved, context, signal, waitForCompletion);
     if (!silent) deliver(pi, `Workflow ${run.metadata.name} budget adjustment ${proposalId}: ${approved ? "Approved" : "Rejected"}.`);
     return result;
   };
@@ -2016,8 +2018,15 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const drift = aliasDrift(previousAliases, currentAliases);
     if (drift.length) await run.store.appendEvent({ type: "warning", message: `Model alias mappings changed on resume: ${drift.join("; ")}` });
   };
-  const coldResumeRun = async (run: NonNullable<ReturnType<typeof runs.get>>, hasUI: boolean, ui: { select?: (prompt: string, options: string[]) => Promise<string | undefined> }, trustedProject: boolean, context?: { model: { provider: string; id: string } | undefined; modelRegistry: ModelRegistryCapability | undefined; signal?: AbortSignal | undefined; resolvedAliases?: Readonly<Record<string, string>>; blockedAliases?: ReadonlySet<string>; blockedAliasTargets?: Readonly<Record<string, string>> }) => {
+  const recoveryUi = (context: unknown): { hasUI: boolean; ui: { select?: (prompt: string, options: string[]) => Promise<string | undefined> } } => {
+    const host = object(context) ? context : undefined;
+    const ui = host && object(host.ui) ? host.ui as { select?: (prompt: string, options: string[]) => Promise<string | undefined> } : {};
+    return { hasUI: host?.hasUI === true, ui };
+  };
+  type ColdResumeResult = { value: JsonValue; resultPath: string };
+  const coldResumeRun = async (run: NonNullable<ReturnType<typeof runs.get>>, hasUI: boolean, ui: { select?: (prompt: string, options: string[]) => Promise<string | undefined> }, trustedProject: boolean, context?: { model: { provider: string; id: string } | undefined; modelRegistry: ModelRegistryCapability | undefined; signal?: AbortSignal | undefined; resolvedAliases?: Readonly<Record<string, string>>; blockedAliases?: ReadonlySet<string>; blockedAliasTargets?: Readonly<Record<string, string>> }, modeOverride?: boolean, waitForCompletion = true): Promise<ColdResumeResult | undefined> => {
     const loaded = await run.store.load();
+    const foreground = modeOverride ?? loaded.snapshot.launchMode === "foreground";
     if (loaded.run.activeShells !== undefined) {
       await persistRunState(run.store, run.metadata, (current) => {
         const next = { ...current };
@@ -2038,7 +2047,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     run.abortController = controller;
     const { settingsPath, currentPolicy, previousAliases, knownModels, availableModels, currentAliases, blockedAliases, blockedAliasTargets, snapshot, script } = await resumeLaunchPrologue({ snapshot: loaded.snapshot, cwd: run.store.cwd, trustedProject, rootModel, ...(context?.modelRegistry ? { modelRegistry: context.modelRegistry } : {}), signal: controller.signal, ...(context?.resolvedAliases ? { resolvedAliases: context.resolvedAliases } : {}), ...(context?.blockedAliases ? { blockedAliases: context.blockedAliases } : {}), ...(context?.blockedAliasTargets ? { blockedAliasTargets: context.blockedAliasTargets } : {}), withPreflight: true });
     if (!script) throw new WorkflowError("INTERNAL_ERROR", "Resume preflight did not produce a launch script");
-    await run.store.saveSnapshot(snapshot);
+    const persistedSnapshot = modeOverride === undefined ? snapshot : createLaunchSnapshot({ ...snapshot, launchMode: foreground ? "foreground" : "background" });
+    await run.store.saveSnapshot(persistedSnapshot);
     scheduler.updateRunLimit(run.store.runId, snapshot.settings.concurrency);
     run.executor = createAgentExecutor({ cwd: run.store.cwd, model: rootModel, tools: activeSnapshotTools(snapshot.tools, "session"), availableModels, knownModels, modelAliases: currentAliases, blockedAliases, blockedAliasTargets, settingsPath, agentDefinitions: snapshot.roles ?? {}, runStore: run.store, providerPause: async () => { deliver(pi, `Workflow ${snapshot.metadata.name} paused: provider limit.`); await run.lifecycle.providerPause(); }, agentResourcePolicy: frozenResourcePolicy(currentPolicy) });
     const drift = aliasDrift(previousAliases, currentAliases);
@@ -2055,7 +2065,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     }
     await scheduler.cancelRun(run.store.runId);
     await run.lifecycle.resume();
-    const execution = runWorkflow(script, loaded.snapshot.args, withWorkflowFunctions({ shell: (command, options, signal, identity) => shellForRun(run.store, run.metadata, run.lifecycle, command, options, signal, identity), agent: workflowAgentHandler(run.store, run.metadata, run.lifecycle, run.executor, run.store.cwd, run.store.runId), worktree: async (owner) => resolveWorktree(run.store, run.metadata, owner), checkpoint: checkpointBridge(run.store.runId, run.store, run.metadata, false, hasUI ? ui : undefined), phase: phaseBridge(run.store, run.metadata, run.lifecycle), log: logBridge(run.lifecycle, run.metadata.name) }, run.store, runContext, variables, registry), controller.signal);
+    const execution = runWorkflow(script, loaded.snapshot.args, withWorkflowFunctions({ shell: (command, options, signal, identity) => shellForRun(run.store, run.metadata, run.lifecycle, command, options, signal, identity), agent: workflowAgentHandler(run.store, run.metadata, run.lifecycle, run.executor, run.store.cwd, run.store.runId), worktree: async (owner) => resolveWorktree(run.store, run.metadata, owner), checkpoint: checkpointBridge(run.store.runId, run.store, run.metadata, foreground, hasUI ? ui : undefined), phase: phaseBridge(run.store, run.metadata, run.lifecycle), log: logBridge(run.lifecycle, run.metadata.name) }, run.store, runContext, variables, registry), controller.signal);
     run.execution = execution;
     const completion = execution.result.then(async (value) => {
       await scheduler.flush();
@@ -2073,12 +2083,23 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       if (state === "failed") retryReservations.delete(persisted.retry?.lineageRootRunId ?? run.store.runId);
       await eventPublisher.runFailed(run.store, run.metadata, typed, state);
       run.update?.(workflowToolUpdate(persisted));
-      if (!["stopped", "interrupted", "budget_exhausted"].includes(run.lifecycle.state)) await createWorkflowFailureDiagnostics(run.store, run.metadata, typed, persisted).then((diagnostic) => { deliverFailure(pi, diagnostic); }).catch(() => undefined);
+      if (!["stopped", "interrupted", "budget_exhausted"].includes(run.lifecycle.state)) { const diagnostic = await createWorkflowFailureDiagnostics(run.store, run.metadata, typed, persisted); Object.defineProperty(typed, WORKFLOW_FAILURE_DIAGNOSTICS, { value: diagnostic }); }
+      throw typed;
     }).finally(() => cleanupTerminalRun(run.store.runId));
     run.completion = completion;
-    void completion;
+    if (!foreground || !waitForCompletion) {
+      void completion.then(async ({ value, resultPath }) => {
+        deliver(pi, completionDelivery(run.metadata.name, value, resultPath, await run.store.changedWorktrees()));
+      }, (error: unknown) => {
+        const diagnostic = failureDiagnosticsFrom(error);
+        if (diagnostic) deliverFailure(pi, diagnostic);
+        else deliver(pi, formatWorkflowFailureDeliveryFallback(run.metadata.name, run.store.runId, run.store.directory, error));
+      });
+      return undefined;
+    }
+    return completion;
   };
-  const applyBudgetDecision = async (request: BudgetApprovalRequest, approved: boolean, context?: unknown, signal?: AbortSignal): Promise<BudgetDecisionResult> => {
+  const applyBudgetDecision = async (request: BudgetApprovalRequest, approved: boolean, context?: unknown, signal?: AbortSignal, waitForCompletion = true): Promise<BudgetDecisionResult> => {
     const run = runs.get(request.runId);
     if (!run) throw new WorkflowError("RESUME_INCOMPATIBLE", `Unknown workflow run: ${request.runId}`);
     if (!approved) return { state: "budget_exhausted", approved: false };
@@ -2087,10 +2108,12 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const runtime = new WorkflowBudgetRuntime(nextBudget, nextVersion, request.consumed, run.budget.events, { active: false });
     run.budget = runtime;
     await persistRunState(run.store, run.metadata, (current) => { const next = { ...current, ...runtime.snapshot(), budgetVersion: nextVersion }; if (nextBudget) next.budget = nextBudget; else delete next.budget; return next; });
-    await coldResumeRun(run, false, {}, projectTrusted(context), { ...resumeHostContext(context), ...(signal ? { signal } : {}) });
+    const { hasUI, ui } = recoveryUi(context);
+    const completed = await coldResumeRun(run, hasUI, ui, projectTrusted(context), { ...resumeHostContext(context), ...(signal ? { signal } : {}) }, undefined, waitForCompletion);
+    if (completed) return { state: "completed", approved: true, value: completed.value, run: (await run.store.load()).run };
     return { state: "running", approved: true };
   };
-  const resumeWorkflowRun = async (runId: string, rawPatch?: unknown, context?: unknown, signal?: AbortSignal): Promise<Record<string, JsonValue>> => {
+  const resumeWorkflowRun = async (runId: string, rawPatch?: unknown, context?: unknown, signal?: AbortSignal, modeOverride?: boolean, waitForCompletion = true): Promise<Record<string, JsonValue>> => {
     const run = runs.get(runId);
     if (!run) {
       const host = object(context) ? context : {};
@@ -2129,11 +2152,13 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       run.budget = runtime;
       await persistRunState(run.store, run.metadata, (current) => { const next = { ...current, ...runtime.snapshot(), budgetVersion: nextVersion }; if (nextBudget) next.budget = nextBudget; else delete next.budget; return next; });
     }
-    await coldResumeRun(run, false, {}, projectTrusted(context), { ...resumeHostContext(context), ...(signal ? { signal } : {}) });
+    const { hasUI, ui } = recoveryUi(context);
+    const completed = await coldResumeRun(run, hasUI, ui, projectTrusted(context), { ...resumeHostContext(context), ...(signal ? { signal } : {}) }, modeOverride, waitForCompletion);
+    if (completed) return { state: "completed", runId, value: completed.value, run: (await run.store.load()).run as unknown as JsonValue };
     return { state: "running" };
   };
   const retryReservations = new Set<string>();
-  const retryWorkflowRun = async (runId: string, context: unknown, signal?: AbortSignal): Promise<{ runId: string; parentRunId: string; state: "running" }> => {
+  const retryWorkflowRun = async (runId: string, context: unknown, signal?: AbortSignal, modeOverride?: boolean): Promise<{ runId: string; parentRunId: string; state: "running" | "completed"; value?: JsonValue; run?: PersistedRun }> => {
     if (typeof runId !== "string" || !runId.trim()) throw new WorkflowError("RESUME_INCOMPATIBLE", "workflow_retry requires an explicit run ID");
     const host = object(context) ? context : {};
     const cwd = typeof host.cwd === "string" ? host.cwd : undefined;
@@ -2197,12 +2222,17 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       runs.set(childRunId, childRun);
       scheduler.addRun(childRunId, loaded.snapshot.settings.concurrency, () => { childBudget.checkAgentLaunch(); });
       await eventPublisher.runStarted(childStore, loaded.snapshot.metadata);
-      await coldResumeRun(childRun, false, {}, trustedProject, { model: hostModel, modelRegistry, resolvedAliases: currentAliases, blockedAliases, blockedAliasTargets, ...(signal ? { signal } : {}) });
+      const { hasUI, ui } = recoveryUi(context);
+      const completed = await coldResumeRun(childRun, hasUI, ui, trustedProject, { model: hostModel, modelRegistry, resolvedAliases: currentAliases, blockedAliases, blockedAliasTargets, ...(signal ? { signal } : {}) }, modeOverride);
       const completion = runs.get(childRunId)?.completion;
       if (completion) {
         childStarted = true;
         void completion.then(() => { retryReservations.delete(lineageRootRunId); }, () => { retryReservations.delete(lineageRootRunId); });
+      } else if (completed) {
+        childStarted = true;
+        retryReservations.delete(lineageRootRunId);
       }
+      if (completed) return { runId: childRunId, parentRunId: loaded.run.id, state: "completed", value: completed.value, run: (await childStore.load()).run };
       return { runId: childRunId, parentRunId: loaded.run.id, state: "running" };
     } finally {
       if (!childStarted) retryReservations.delete(lineageRootRunId);
@@ -2214,7 +2244,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     description: "Retry a failed workflow run by replaying its completed structural operations",
     parameters: WORKFLOW_RETRY_PARAMETERS,
     async execute(_id, params, signal, _onUpdate, ctx) {
-      try { const result = await retryWorkflowRun(params.runId, ctx, signal); return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result }; }
+      try { const result = await retryWorkflowRun(params.runId, ctx, signal, params.foreground); return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result }; }
       catch (error) { throw mainAgentError(error); }
     },
     renderCall(args, theme) { return styledTextBlock(workflowControlCall("workflow_retry", args, theme)); },
@@ -2224,9 +2254,9 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     name: "workflow_resume",
     label: "Workflow Resume",
     description: "Resume an exhausted workflow with unchanged or patched aggregate budgets",
-    parameters: Type.Object({ runId: Type.String(), budget: Type.Optional(Type.Unknown()) }, { additionalProperties: false }),
+    parameters: Type.Object({ runId: Type.String(), budget: Type.Optional(Type.Unknown()), foreground: Type.Optional(Type.Boolean({ description: "Override the source launch mode for this recovery" })) }, { additionalProperties: false }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      try { const result = await resumeWorkflowRun(params.runId, params.budget, ctx, signal); return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result }; }
+      try { const result = await resumeWorkflowRun(params.runId, params.budget, ctx, signal, params.foreground); return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result }; }
       catch (error) { throw mainAgentError(error); }
     },
     renderCall(args, theme) { return styledTextBlock(workflowControlCall("workflow_resume", args, theme)); },
@@ -2289,7 +2319,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         if (choice && choice !== "Skip") {
           const toResume = choice === "Resume all" ? interrupted : interrupted.filter((_, i) => labels[i] === choice);
           for (const run of toResume) {
-            try { await coldResumeRun(run, true, ctx.ui, projectTrusted(ctx), ctx); ctx.ui.notify(`Resumed workflow ${run.metadata.name}.`, "info"); }
+            try { await coldResumeRun(run, true, ctx.ui, projectTrusted(ctx), ctx, undefined, false); ctx.ui.notify(`Resumed workflow ${run.metadata.name}.`, "info"); }
             catch (err) { ctx.ui.notify(`Cannot resume ${run.metadata.name}: ${err instanceof Error ? err.message : String(err)}`, "warning"); }
           }
         }
@@ -2346,7 +2376,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const projectRoles = roleNames.filter((role) => projectAgentDefinitions[role] !== undefined);
       const roleModels = roleNames.flatMap((role) => { const model = agentDefinitions[role]?.model; return model ? [modelCapability(model, modelAliases, knownModels, settingsPath)] : []; });
       const snapshotModels = [...new Set([rootModelName, ...checked.referenced.models, ...roleModels])];
-      const snapshot = createLaunchSnapshot({ script, args, metadata: checked.metadata, settings, settingsPath, settingsSources: { ...launch.resolution.sources, concurrency: params.concurrency === undefined ? launch.resolution.sources.concurrency : "per-run options" }, ...(functionName ? { launchKind: "function" as const, functionName } : {}), ...(Object.keys(modelAliases).length ? { modelAliases } : {}), ...(budget ? { budget } : {}), ...(checked.referenced.phases.length ? { phases: checked.referenced.phases } : {}), models: snapshotModels, tools: rootTools, agentTypes: checked.referenced.agentTypes, roles, projectRoles, schemas: checked.schemas });
+      const snapshot = createLaunchSnapshot({ script, args, metadata: checked.metadata, launchMode: params.foreground ? "foreground" : "background", settings, settingsPath, settingsSources: { ...launch.resolution.sources, concurrency: params.concurrency === undefined ? launch.resolution.sources.concurrency : "per-run options" }, ...(functionName ? { launchKind: "function" as const, functionName } : {}), ...(Object.keys(modelAliases).length ? { modelAliases } : {}), ...(budget ? { budget } : {}), ...(checked.referenced.phases.length ? { phases: checked.referenced.phases } : {}), models: snapshotModels, tools: rootTools, agentTypes: checked.referenced.agentTypes, roles, projectRoles, schemas: checked.schemas });
       let persistedSnapshot = snapshot;
       const captureFunctionRole = functionName ? async (role: string, model: ModelSpec): Promise<void> => {
         const definition = agentDefinitions[role];
@@ -2469,7 +2499,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             return keepContext ? "dashboard" : "done";
           }
           if ((action === "budget-approve" || action === "budget-reject") && runId && rest[0]) {
-            const result = await answerBudgetDecision(runId, rest[0], action === "budget-approve", true, ctx);
+            const result = await answerBudgetDecision(runId, rest[0], action === "budget-approve", true, ctx, undefined, false);
             ctx.ui.notify(result ? `Budget adjustment ${rest[0]} ${result.approved ? "approved" : "rejected"}.` : "Budget proposal is not pending.", result ? "info" : "warning");
             return keepContext ? "dashboard" : "done";
           }
@@ -2482,10 +2512,10 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           if (action === "resume" && run) {
             if (run.lifecycle.state === "budget_exhausted") {
               const patch: unknown = rest.length ? JSON.parse(rest.join(" ")) as unknown : undefined;
-              const result = await resumeWorkflowRun(run.store.runId, patch, ctx);
-              ctx.ui.notify(result.state === "running" ? `Resumed workflow ${run.store.runId}.` : `Budget adjustment for ${run.store.runId} is awaiting approval.`, result.state === "running" ? "info" : "warning");
+              const result = await resumeWorkflowRun(run.store.runId, patch, ctx, undefined, undefined, false);
+              ctx.ui.notify(result.state === "completed" ? `Workflow ${run.store.runId} completed.` : result.state === "running" ? `Resumed workflow ${run.store.runId}.` : `Budget adjustment for ${run.store.runId} is awaiting approval.`, result.state === "awaiting_approval" ? "warning" : "info");
             } else {
-              if (run.lifecycle.state === "interrupted") await coldResumeRun(run, ctx.hasUI, ctx.ui, projectTrusted(ctx), ctx);
+              if (run.lifecycle.state === "interrupted") await coldResumeRun(run, ctx.hasUI, ctx.ui, projectTrusted(ctx), ctx, undefined, false);
               else {
                 if (run.lifecycle.state === "paused") await refreshPausedRunAliases(run, { ...resumeHostContext(ctx), projectTrusted: projectTrusted(ctx) });
                 await run.lifecycle.resume();
@@ -2497,8 +2527,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           if (action === "adjust" && run?.lifecycle.state === "budget_exhausted") {
             const input = await uiHostCapabilities(ctx.ui)?.input?.call(ctx.ui, "Budget patch (JSON)", "{\"tokens\":{\"hard\":null}}" );
             if (input === undefined) return keepContext ? "dashboard" : "done";
-            const result = await resumeWorkflowRun(run.store.runId, JSON.parse(input), ctx);
-            ctx.ui.notify(result.state === "running" ? `Resumed workflow ${run.store.runId}.` : `Budget adjustment for ${run.store.runId} is awaiting approval.`, result.state === "running" ? "info" : "warning");
+            const result = await resumeWorkflowRun(run.store.runId, JSON.parse(input), ctx, undefined, undefined, false);
+            ctx.ui.notify(result.state === "completed" ? `Workflow ${run.store.runId} completed.` : result.state === "running" ? `Resumed workflow ${run.store.runId}.` : `Budget adjustment for ${run.store.runId} is awaiting approval.`, result.state === "awaiting_approval" ? "warning" : "info");
             return keepContext ? "dashboard" : "done";
           }
           if (action === "stop" && run) {
