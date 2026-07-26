@@ -5,7 +5,7 @@ import { access, link, mkdir, open, readFile, readdir, rename, rm, stat, writeFi
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
-import type { BudgetApprovalRequest, JsonValue, LaunchSnapshot, RunRecord, WorkflowAgentSessionReference, WorkflowBudgetUsage, WorkflowRunEvent } from "./types.js";
+import type { BudgetApprovalRequest, JsonValue, LaunchSnapshot, RunRecord, WorkflowBudgetUsage, WorkflowRunEvent } from "./types.js";
 import type { OwnershipRecord } from "./agent-execution.js";
 import { WorkflowError } from "./types.js";
 import { loadLaunchSnapshot } from "./utils.js";

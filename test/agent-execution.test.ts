@@ -9,7 +9,7 @@ import { AgentSession, type AgentSessionEvent } from "@earendil-works/pi-coding-
 import { WorkflowError } from "../src/index.js";
 import type { AgentResourcePolicy } from "../src/types.js";
 import type { RunStore } from "../src/persistence.js";
-import { testTransport, type TestPiSession } from "./test-transport.js";
+import { testTransport } from "./test-transport.js";
 
 const root: AgentExecutionRoot = { cwd: "/repo", model: { provider: "openai", model: "gpt", thinking: "medium" }, availableModels: new Set(["openai/gpt", "anthropic/opus", "google/gemini"]), tools: new Set(["read", "grep", "find", "bash"]), agentDefinitions: { reviewer: { prompt: "Review carefully", model: "anthropic/opus", thinking: "high", tools: ["read"] }, scout: { prompt: "Inspect broadly", model: "google/gemini", thinking: "low", tools: ["read", "grep"] } } };
 const usage = { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, cost: { total: 0.25 } };
@@ -240,8 +240,8 @@ void test("runs prioritized setup hooks with fresh retry baselines and safe atte
   assert.equal(result.value, "done");
   assert.deepEqual(order, ["1:early", "1:a-first", "1:z-last", "2:early", "2:a-first", "2:z-last"]);
   assert.deepEqual(inputs.map(({ tools, cwd }) => ({ tools, cwd })), [{ tools: ["bash"], cwd: "/hooked" }, { tools: ["bash"], cwd: "/hooked" }]);
-  assert.deepEqual(result.attempts.map(({ setup }) => setup?.hookNames), [["early", "a-first", "z-last"], ["early", "a-first", "z-last"]]);
-  assert.equal(result.attempts[1]?.setup?.model.provider, "openai");
+  assert.deepEqual(result.attempts.map(({ setup }) => setup.hookNames), [["early", "a-first", "z-last"], ["early", "a-first", "z-last"]]);
+  assert.equal(result.attempts[1]?.setup.model.provider, "openai");
 });
 
 void test("provider limits pause and retry the same native session", async () => {
@@ -403,8 +403,13 @@ void test("fails native terminal provider errors before structured finalization"
     return error.code === "AGENT_FAILED" && error.message === errorMessage;
   });
   assert.equal(prompts.length, 1);
-  assert.equal(attempts?.[0]?.session?.locator && typeof attempts[0]?.session?.locator === "object" && !Array.isArray(attempts[0]?.session?.locator) ? attempts[0]?.session?.locator.sessionFile : undefined, "/sessions/terminal.jsonl");
-  const failedAttempt = attempts?.[0];
+  assert.ok(attempts);
+  const session = attempts[0]?.session;
+  assert.ok(session);
+  const locator = session.locator;
+  assert.ok(locator && typeof locator === "object" && !Array.isArray(locator));
+  assert.equal((locator as { sessionFile?: string }).sessionFile, "/sessions/terminal.jsonl");
+  const failedAttempt = attempts[0];
   assert.ok(failedAttempt);
   assert.deepEqual(failedAttempt.error, { code: "AGENT_FAILED", message: errorMessage });
 });
@@ -1041,7 +1046,7 @@ void test("refreshes resource exclusions for every fresh attempt and inspects th
   assert.equal(result.value, "done");
   assert.equal(policyCalls, 2);
   assert.deepEqual(inputs.map(({ effective }) => effective), [{ skills: ["skill-1"], extensions: ["/extensions/extension-1.ts"] }, { skills: ["skill-2"], extensions: ["/extensions/extension-2.ts"] }]);
-  assert.deepEqual(result.attempts.map(({ setup }) => setup?.disabledAgentResources?.skills), [["skill-1"], ["skill-2"]]);
+  assert.deepEqual(result.attempts.map(({ setup }) => setup.disabledAgentResources?.skills), [["skill-1"], ["skill-2"]]);
 });
 void test("isolates role resource exclusions and reapplies them on retries", async () => {
   const roleExtension = "/role/extension.ts";
