@@ -1986,7 +1986,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     pi.registerTool({
       name: "workflow_catalog",
       label: "Workflow Catalog",
-      description: "List reusable workflow functions, variables, and model aliases, or load one entry in full",
+      description: "List reusable workflow functions, variables, and model aliases; pass `name` to load one entry in full",
       parameters: Type.Object({ name: Type.Optional(Type.String({ description: "Registered function, variable, or model alias name for full detail" })) }, { additionalProperties: false }),
       async execute(_id, params = {}) {
         const context = { cwd, projectTrusted: trustedProject, globalSettingsPath: workflowSettingsPath(extensionAgentDir) };
