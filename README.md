@@ -20,7 +20,7 @@ For source installs and local development, see the [installation guide](https://
 
 ## Capabilities
 
-The default path is a named inline workflow: write a `script` that fans out independent work with `parallel(...)`, awaits the keyed results, passes them into one summarizing `agent(...)`, and returns. Inline launches require a non-empty `name`; registered function launches reject `name` and use their registered function name as the run name. Runs are backgrounded by default; set `foreground: true` when the final value must be returned in the same tool call.
+The default path is a named inline workflow: write a `script` that fans out independent work with `parallel(...)`, awaits the keyed results, passes them into one summarizing `agent(...)`, and returns. Inline launches require a non-empty `name`; registered function launches reject `name` and use their registered function name as the run name. Runs are backgrounded by default; set `foreground: true` when the final value must be returned in the same tool call. If a foreground tool call detaches before its result is accepted by the next event-loop turn, the terminal success or failure is promoted to exactly one follow-up message.
 
 ```js
 const reviews = await parallel("review", {

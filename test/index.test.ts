@@ -2399,8 +2399,9 @@ void test("background delivery is minimal and capped while foreground stays inli
   const messages: Array<{ message: { content: string }; options: { deliverAs: string; triggerTurn: boolean } }> = [];
   let markDelivered!: () => void;
   const delivered = new Promise<void>((resolve) => { markDelivered = resolve; });
+  let toolResultHandler: ((event: { toolName: string; toolCallId: string; isError: boolean }) => Promise<unknown>) | undefined;
   const pi = {
-    registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {},
+    registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as typeof toolResultHandler; },
     getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"],
     sendMessage(message: { content: string }, options: { deliverAs: string; triggerTurn: boolean }) { messages.push({ message, options }); markDelivered(); }
   };
@@ -2419,7 +2420,33 @@ void test("background delivery is minimal and capped while foreground stays inli
   assert.deepEqual(messages[0]?.options, { deliverAs: "followUp", triggerTurn: true });
   const foreground = await execute("id", { name: "inline", script: `return {ok:true};`, foreground: true }, new AbortController().signal, undefined, ctx);
   assert.equal(foreground.content[0]?.text, `{"ok":true}`);
+  await toolResultHandler?.({ toolName: "workflow", toolCallId: "id", isError: false });
   assert.equal(messages.length, 1);
+});
+
+void test("promotes detached foreground completion and failure to follow-up delivery", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-detached-foreground-"));
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }>; details?: { runId: string } }> }> = [];
+  const messages: Array<{ message: { content: string }; options: { deliverAs: string; triggerTurn: boolean } }> = [];
+  const pi = {
+    registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {},
+    getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"],
+    sendMessage(message: { content: string }, options: { deliverAs: string; triggerTurn: boolean }) { messages.push({ message, options }); },
+  };
+  workflowExtension(pi as never, home);
+  const execute = tools.find(({ name }) => name === "workflow")?.execute;
+  assert.ok(execute);
+  const ctx = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
+  const success = await execute("detached-success", { name: "detached-success", script: `return {ok:true};`, foreground: true }, new AbortController().signal, undefined, ctx);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.match(messages[0]?.message.content ?? "", /^Workflow detached-success completed:/);
+  assert.deepEqual(messages[0]?.options, { deliverAs: "followUp", triggerTurn: true });
+  const successRun = await new RunStore(home, "session", success.details?.runId ?? "", home).load();
+  assert.deepEqual(successRun.run.delivery, { mode: "background", state: "delivered", toolCallId: "detached-success" });
+  await assert.rejects(execute("detached-failure", { name: "detached-failure", script: `throw new Error("detached failure");`, foreground: true }, new AbortController().signal, undefined, ctx));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(messages.length, 2);
+  assert.match(messages[1]?.message.content ?? "", /^Workflow detached-failure failed/);
 });
 
 void test("workflow log appends capped TUI-only transcript entries", async () => {
