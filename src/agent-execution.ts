@@ -245,7 +245,9 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
     async dispose() {
       disposal ??= (async () => {
         disposed = true;
-        try { await startAbort(); try { await prompting; } catch { /* Prompt rejection is expected after abort during teardown. */ } } finally { native.dispose(); }
+        try { await startAbort(); } catch { /* Abort failure must not prevent the prompt from settling. */ }
+        try { await prompting; } catch { /* Prompt rejection is expected after abort during teardown. */ }
+        native.dispose();
       })();
       await disposal;
     },
@@ -562,8 +564,7 @@ export class WorkflowAgentExecutor {
         const attemptAccounting = accounting(session.getSessionStats());
         const completedAttempt = attemptRecord(setup.transport.id, attempt, session, setupSummary, attemptAccounting, value);
         attempts.push(completedAttempt);
-        await options.onAttempt?.(completedAttempt);
-        await session.dispose();
+        try { await options.onAttempt?.(completedAttempt); } finally { await session.dispose(); }
         return { value, attempts, cwd: setupSummary.cwd };
       } catch (error) {
         const typed = budgetError ?? (error instanceof WorkflowError ? error : new WorkflowError(attemptSignal.aborted && setupFailed ? "CANCELLED" : "AGENT_FAILED", error instanceof Error ? error.message : String(error)));
@@ -581,8 +582,7 @@ export class WorkflowAgentExecutor {
           if (!budgetError && typed.code !== "BUDGET_EXHAUSTED") { try { options.budget?.afterTurn(attemptAccounting, true); } catch (budgetFailure) { budgetError ??= budgetFailure instanceof WorkflowError ? budgetFailure : new WorkflowError("BUDGET_EXHAUSTED", budgetFailure instanceof Error ? budgetFailure.message : String(budgetFailure)); } }
           const failedAttempt = attemptRecord(setup?.transport.id ?? this.transport.id, attempt, session, setupSummary, attemptAccounting, undefined, { code: typed.code, message: typed.message });
           attempts.push(failedAttempt);
-          await options.onAttempt?.(failedAttempt);
-          await session.dispose();
+          try { await options.onAttempt?.(failedAttempt); } finally { await session.dispose(); }
         }
         if (options.worktreeOwner && typed.code !== "WORKTREE_FAILED") await this.root.runStore?.snapshotWorktree(options.worktreeOwner).catch(() => undefined);
         const terminal = terminalProviderError(typed);

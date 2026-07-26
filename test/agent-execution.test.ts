@@ -43,6 +43,19 @@ void test("uses a transport-neutral session and persists its final reference sha
   assert.equal(attempt.session.sessionId, "external-1");
   assert.deepEqual(events, ["prompt", "dispose"]);
 });
+void test("disposes a session when terminal success persistence fails", async () => {
+  let disposals = 0;
+  let disposed = false;
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ sessionId: "success-persist", messages: [assistant("done")], getSessionStats: sessionStats, async prompt() {}, dispose() { if (!disposed) { disposed = true; disposals += 1; } } })));
+  await assert.rejects(executor.execute("work", { label: "worker", workflowName: "flow", onAttempt: (attempt) => { if (attempt.result !== undefined || attempt.error !== undefined) throw new Error("persist failed"); } }), /persist failed/);
+  assert.equal(disposals, 1);
+});
+void test("disposes a session when terminal failure persistence fails", async () => {
+  let disposals = 0;
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ sessionId: "failure-persist", messages: [assistant("done")], getSessionStats: sessionStats, async prompt() { throw new Error("agent failed"); }, dispose() { disposals += 1; } })));
+  await assert.rejects(executor.execute("work", { label: "worker", workflowName: "flow", onAttempt: (attempt) => { if (attempt.error !== undefined) throw new Error("persist failed"); } }), /persist failed/);
+  assert.equal(disposals, 1);
+});
 void test("reports terminal attempts without a live session before disposal", async () => {
   const events: string[] = [];
   const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ sessionId: "terminal-attempt", messages: [assistant("done")], getSessionStats: sessionStats, async prompt() {}, dispose() { events.push("dispose"); } })));
@@ -755,6 +768,37 @@ void test("local transport swallows an in-flight prompt rejection during idempot
     await assert.rejects(prompt, /prompt aborted/);
     await assert.doesNotReject(Promise.all([firstDispose, secondDispose]));
     await assert.doesNotReject(session.dispose());
+  } finally {
+    Object.defineProperty(AgentSession.prototype, "abort", originalAbort);
+    Object.defineProperty(AgentSession.prototype, "prompt", originalPrompt);
+    Object.defineProperty(AgentSession.prototype, "dispose", originalDispose);
+  }
+});
+void test("local transport ignores abort failure while finishing disposal", async () => {
+  const originalAbort = Object.getOwnPropertyDescriptor(AgentSession.prototype, "abort");
+  const originalPrompt = Object.getOwnPropertyDescriptor(AgentSession.prototype, "prompt");
+  const originalDispose = Object.getOwnPropertyDescriptor(AgentSession.prototype, "dispose");
+  assert.ok(originalAbort && originalPrompt && originalDispose);
+  const events: string[] = [];
+  let releasePrompt!: () => void;
+  let markPromptStarted!: () => void;
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
+  const promptStarted = new Promise<void>((resolve) => { markPromptStarted = resolve; });
+  AgentSession.prototype.abort = async function () { events.push("abort"); throw new Error("abort failed"); };
+  AgentSession.prototype.prompt = async function () { events.push("prompt-start"); markPromptStarted(); await promptGate; events.push("prompt-end"); };
+  AgentSession.prototype.dispose = function (this: AgentSession) { events.push("dispose"); Reflect.apply(originalDispose.value as (this: AgentSession) => void, this, []); };
+  try {
+    const prepared = { cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], sessionLabel: "abort-failure-dispose" } satisfies import("../src/types.js").PreparedAgentSession;
+    const session = await localAgentTransport.createSession(prepared, {} as never);
+    const prompt = session.prompt("work");
+    await promptStarted;
+    const disposal = session.dispose();
+    void disposal.catch(() => undefined);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    releasePrompt();
+    await prompt;
+    await assert.doesNotReject(Promise.all([disposal, session.dispose()]));
+    assert.deepEqual(events, ["prompt-start", "abort", "prompt-end", "dispose"]);
   } finally {
     Object.defineProperty(AgentSession.prototype, "abort", originalAbort);
     Object.defineProperty(AgentSession.prototype, "prompt", originalPrompt);
