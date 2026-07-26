@@ -1203,6 +1203,11 @@ void test("workflow progress warns after ten minutes of agent silence and resets
   const snapshot = createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "stalling" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
   assert.match(formatWorkflowPhaseDashboard(stalled, snapshot, 120, {}, undefined, now).join("\n"), /stalled\? 12m/);
 });
+void test("workflow progress shows runtime after the workflow state", () => {
+  const run = { id: "run", workflowName: "runtime", cwd: "/repo", sessionId: "session", state: "running" as const, agents: [], agentSessions: [], usage: { tokens: 0, costUsd: 0, durationMs: 12_345, agentLaunches: 0 } } as Parameters<typeof formatWorkflowProgress>[0];
+  assert.match(formatWorkflowProgress(run), /\[running\] runtime=12s/);
+  assert.match(formatWorkflowProgress({ ...run, state: "completed", usage: { tokens: 0, costUsd: 0, durationMs: 65_432, agentLaunches: 0 } }), /\[completed\] runtime=1m 5s/);
+});
 void test("workflow progress shows active shell operations without command contents", () => {
   const run = { id: "run", workflowName: "shell-progress", cwd: "/repo", sessionId: "session", state: "running" as const, agents: [], agentSessions: [], activeShells: 2 } as Parameters<typeof formatWorkflowProgress>[0];
   const progress = formatWorkflowProgress(run);
@@ -1287,6 +1292,9 @@ void test("inline workflow progress refreshes persisted state for stalled agents
   const context = { state: {}, cwd: home, invalidate: () => { current.invalidate?.(); } };
   const current = tool.renderResult(result, { expanded: false, isPartial: true }, theme, context);
   assert.doesNotMatch(current.render(200).join("\n"), /stalled\?/);
+  assert.match(current.render(200).join("\n"), /runtime=0s/);
+  await new Promise<void>((resolve) => setTimeout(resolve, 1_100));
+  assert.match(current.render(200).join("\n"), /runtime=1s/);
   await new Promise<void>((resolve) => setTimeout(resolve, 200));
   const refreshed = tool.renderResult(result, { expanded: false, isPartial: true }, theme, context);
   assert.match(refreshed.render(200).join("\n"), /stalled\? 10m/);

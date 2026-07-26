@@ -485,12 +485,24 @@ function styleForState(map: Record<string, ProgressStyleKey>, state: string, sty
 function progressStyleForState(state: string, styles: WorkflowProgressStyles): (text: string) => string { return styleForState(PROGRESS_STATE_STYLE, state, styles); }
 function workflowIconStyle(state: string, styles: WorkflowProgressStyles): (text: string) => string { return styleForState(WORKFLOW_ICON_STYLE, state, styles); }
 function phaseStyleForState(state: string, styles: WorkflowProgressStyles): (text: string) => string { return styleForState(PHASE_STATE_STYLE, state, styles); }
+function formatWorkflowRuntime(durationMs: number): string {
+  const seconds = Math.max(0, Math.floor(durationMs / 1000));
+  if (seconds < 60) return `${String(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) return `${String(minutes)}m${remainingSeconds ? ` ${String(remainingSeconds)}s` : ""}`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${String(hours)}h${remainingMinutes ? ` ${String(remainingMinutes)}m` : ""}`;
+}
 export function formatWorkflowProgress(run: PersistedRun, spinner = "◇", styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES, now = Date.now()): string {
   const done = run.agents.filter((agent) => SETTLED_AGENT_STATES.has(agent.state)).length;
   const workflowIcon = runStateGlyph(run.state, spinner);
   const iconStyle = workflowIconStyle(run.state, styles);
   const header = styles.bold(styles.accent(`Workflow: ${run.workflowName} (${String(done)}/${String(run.agents.length)} done)`));
-  const lines = [`${iconStyle(workflowIcon)} ${header}`];
+  const state = progressStyleForState(run.state, styles)(`[${run.state}]`);
+  const runtime = run.usage ? ` runtime=${formatWorkflowRuntime(run.usage.durationMs)}` : "";
+  const lines = [`${iconStyle(workflowIcon)} ${header} ${state}${runtime}`];
   const budgetWarning = run.state === "budget_exhausted" || (run.budgetEvents ?? []).some((event) => event.type === "hard_exhausted");
   lines.push(...formatCompactBudgetStatus(run).map((line) => `  ${budgetWarning ? styles.warning(line) : line}`));
   const activeShells = run.activeShells ?? 0;
@@ -740,10 +752,15 @@ function themeWorkflowProgressStyles(theme: Theme): WorkflowProgressStyles {
     bold: (text) => typeof theme.bold === "function" ? theme.bold(text) : text,
   };
 }
-type WorkflowProgressRefreshState = { runId: string; inputRun: PersistedRun; run: PersistedRun; lastRefreshAt: number; refresh?: Promise<void> };
+type WorkflowProgressRefreshState = { runId: string; inputRun: PersistedRun; run: PersistedRun; lastRefreshAt: number; runtimeStartedAt: number; runtimeBaseMs: number; refresh?: Promise<void> };
 function workflowProgressBlock(run: PersistedRun, theme: Theme, progress?: WorkflowProgressRefreshState, refresh?: () => Promise<PersistedRun | undefined>, invalidate?: () => void) {
   const styles = themeWorkflowProgressStyles(theme);
-  const currentRun = () => progress?.run ?? run;
+  const currentRun = () => {
+    const displayed = progress?.run ?? run;
+    if (!progress || displayed.state !== "running") return displayed;
+    const durationMs = Math.max(displayed.usage?.durationMs ?? 0, progress.runtimeBaseMs + Date.now() - progress.runtimeStartedAt);
+    return { ...displayed, usage: { ...budgetUsage(displayed.usage), durationMs } };
+  };
   return {
     render(width: number) {
       const frame = workflowSpinner[Math.floor(Date.now() / 80) % workflowSpinner.length] ?? "◇";
@@ -2551,7 +2568,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           progress = undefined;
           delete state.workflowProgress;
           if (isPartial) {
-            progress = { runId: incoming.id, inputRun: incoming, run: incoming, lastRefreshAt: 0 };
+            progress = { runId: incoming.id, inputRun: incoming, run: incoming, lastRefreshAt: 0, runtimeStartedAt: Date.now(), runtimeBaseMs: incoming.usage?.durationMs ?? 0 };
             state.workflowProgress = progress;
           }
         } else if (progress.inputRun !== incoming) {
