@@ -9,7 +9,7 @@ import type { AgentSessionEvent, InlineExtension, ToolDefinition } from "@earend
 import { WORKFLOW_TOOL_DESCRIPTION, WORKFLOW_TOOL_PROMPT_SNIPPET } from "../src/host.js";
 import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, disabledResources, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDelivery, formatWorkflowFailureDiagnostics, formatWorkflowPhaseDashboard, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeAgentResourceExclusions, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resourcePatternMatches, resolveAgentResourcePolicy, resolveModelReference, resolveWorkflowSettings, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STALL_THRESHOLD_MS, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, openWorkflowArtifact, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
 import { loadingRegistry } from "../src/registry.js";
-import type { NativeSession, SessionInput } from "../src/agent-execution.js";
+import type { PiSession, SessionInput } from "../src/agent-execution.js";
 import { listRunIds } from "../src/persistence.js";
 
 const typeCheckAgentContext = (context: WorkflowOrchestrationContext): void => {
@@ -42,10 +42,10 @@ const typeCheckAgentSetupHook: WorkflowExtension = {
         agent.sessionInput.customTools ??= [];
         agent.sessionInput.customTools.push(customTool);
         agent.sessionInput.systemPromptAppend = "append";
-        const session: Promise<NativeSession> = agent.createSession(agent.sessionInput);
+        const transport = agent.transport;
+        void transport;
         void model;
         void tools;
-        void session;
         // @ts-expect-error extension factories must use Pi's inline extension type
         agent.sessionInput.extensionFactories.push(123);
       },
@@ -67,6 +67,13 @@ void test("resolves dynamic model aliases against a launch inventory", async () 
   const resolved = await registry.resolveModelAliases({ cwd: "/project", projectTrusted: true, rootModel: { provider: "openai", model: "gpt", thinking: "medium" }, knownModels: new Set(["openai/gpt", "anthropic/opus"]), availableModels: new Set(["openai/gpt", "anthropic/opus"]), signal: new AbortController().signal });
   assert.deepEqual(resolved, { reviewer: "anthropic/opus:high" });
   assert.equal(calls, 1);
+});
+void test("registers and collision-checks latest-attempt actions", () => {
+  const registry = new WorkflowRegistry();
+  const action = { label: "Inspect", visible: () => true, run: () => undefined };
+  registry.register({ version: "1.0.0", headline: "Actions", description: "Action test", agentAttemptActions: { inspect: action } });
+  assert.equal(registry.agentAttemptActions().inspect, action);
+  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Duplicate actions", description: "Action test", agentAttemptActions: { inspect: action } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "DUPLICATE_NAME");
 });
 void test("accepts dynamic aliases with the static hyphenated alias contract", async () => {
   const registry = new WorkflowRegistry();
@@ -227,7 +234,7 @@ void test("workflow_retry links children, replays parallel branches, inherits bu
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-retry-tool-"));
   let sessions = 0;
   let remainingFailures = 2;
-  const createSession = async (): Promise<NativeSession> => {
+  const createSession = async (): Promise<PiSession> => {
     const attempt = ++sessions;
     return { sessionId: `retry-session-${String(attempt)}`, sessionFile: `/sessions/retry-${String(attempt)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 }), prompt: async () => { if (attempt > 1 && remainingFailures > 0) { remainingFailures -= 1; throw new Error("retry source failure"); } }, steer: async () => {}, dispose() {} };
   };
@@ -299,7 +306,7 @@ void test("failed retry children retain inherited and newly created named worktr
   await source.worktree(inheritedOwner);
   await source.worktree(structuralPath("worktree", "named", "fresh"));
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  const createSession = async (input: SessionInput): Promise<NativeSession> => ({
+  const createSession = async (input: SessionInput): Promise<PiSession> => ({
     sessionId: input.sessionLabel, sessionFile: `/sessions/${input.sessionLabel}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
     getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {},
   });
@@ -325,7 +332,7 @@ void test("workflow_retry rejects concurrent children for one mutable retry line
   let release!: () => void;
   const childEntered = new Promise<void>((resolve) => { entered = resolve; });
   const childRelease = new Promise<void>((resolve) => { release = resolve; });
-  const createSession = async (): Promise<NativeSession> => {
+  const createSession = async (): Promise<PiSession> => {
     const attempt = ++sessions;
     return { sessionId: `retry-concurrent-${String(attempt)}`, sessionFile: `/sessions/retry-concurrent-${String(attempt)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { if (attempt === 1) throw new Error("source failure"); if (attempt === 2) { entered(); await childRelease; } }, steer: async () => {}, dispose() {} };
   };
@@ -354,7 +361,7 @@ void test("workflow_retry cleans up child startup when dynamic alias resolution 
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-retry-alias-failure-"));
   let resolverCalls = 0;
   let sessions = 0;
-  const createSession = async (): Promise<NativeSession> => ({
+  const createSession = async (): Promise<PiSession> => ({
     sessionId: `retry-alias-${String(++sessions)}`, sessionFile: `/sessions/retry-alias-${String(sessions)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { if (sessions === 1) throw new Error("source failure"); }, steer: async () => {}, dispose() {},
   });
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
@@ -384,7 +391,7 @@ void test("workflow_retry blocks removed dynamic aliases from native bare-model 
   const source = new RunStore(home, "session", "source", home);
   await source.create({ id: "source", workflowName: "removed-alias", cwd: home, sessionId: "session", state: "failed", agents: [], nativeSessions: [], error: { code: "AGENT_FAILED", message: "source failure" } }, snapshot);
   let sessions = 0;
-  const createSession = async (): Promise<NativeSession> => {
+  const createSession = async (): Promise<PiSession> => {
     sessions += 1;
     return { sessionId: `retry-removed-${String(sessions)}`, sessionFile: `/sessions/retry-removed-${String(sessions)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
   };
@@ -677,7 +684,7 @@ void test("orchestration lifecycle events cover phase, worktree, retry, checkpoi
   execFileSync("git", ["-C", cwd, "commit", "-qm", "initial"]);
   const events: Array<{ channel: string; data: unknown }> = [];
   let sessions = 0;
-  const createSession = async (): Promise<NativeSession> => {
+  const createSession = async (): Promise<PiSession> => {
     const attempt = ++sessions;
     return { sessionId: `event-session-${String(attempt)}`, sessionFile: `/sessions/event-${String(attempt)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { if (attempt === 1) throw new Error("PROMPT_SECRET"); }, steer: async () => {}, dispose() {} };
   };
@@ -710,7 +717,7 @@ void test("TUI terminal provider recovery shows factual failure and retries with
   let disposals = 0;
   const prompts: Array<{ title: string; options: string[] }> = [];
   let shutdown: (() => Promise<void>) | undefined;
-  const createSession = async (input: SessionInput): Promise<NativeSession> => {
+  const createSession = async (input: SessionInput): Promise<PiSession> => {
     const attempt = ++sessions;
     const terminal = { role: "assistant", content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: "AUTH_FAILED" };
     const messages: Array<{ role: string; content: unknown; stopReason?: string; errorMessage?: string }> = [terminal];
@@ -739,7 +746,7 @@ void test("TUI terminal provider recovery changes model before a fresh attempt",
   const prompts: Array<{ title: string; options: string[] }> = [];
   const inputs: SessionInput[] = [];
   let shutdown: (() => Promise<void>) | undefined;
-  const createSession = async (input: SessionInput): Promise<NativeSession> => {
+  const createSession = async (input: SessionInput): Promise<PiSession> => {
     inputs.push(input);
     const attempt = ++sessions;
     return { sessionId: `recovery-model-${String(attempt)}`, sessionFile: `/sessions/recovery-model-${String(attempt)}.jsonl`, model: { provider: input.model.provider, model: input.model.model }, messages: [attempt === 1 ? { role: "assistant", content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: "MODEL_UNAVAILABLE" } : { role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
@@ -764,7 +771,7 @@ void test("TUI terminal provider recovery changes model before a fresh attempt",
 void test("TUI provider recovery aborts the workflow even when workflow code catches the agent failure", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-provider-recovery-abort-"));
   let shutdown: (() => Promise<void>) | undefined;
-  const createSession = async (input: SessionInput): Promise<NativeSession> => ({ sessionId: "recovery-abort", sessionFile: "/sessions/recovery-abort.jsonl", model: { provider: input.model.provider, model: input.model.model }, messages: [{ role: "assistant", content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: "PROVIDER_FAILED" }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} });
+  const createSession = async (input: SessionInput): Promise<PiSession> => ({ sessionId: "recovery-abort", sessionFile: "/sessions/recovery-abort.jsonl", model: { provider: input.model.provider, model: input.model.model }, messages: [{ role: "assistant", content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: "PROVIDER_FAILED" }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} });
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
   const workflow = tools.find(({ name }) => name === "workflow");
@@ -806,7 +813,7 @@ void test("run control lifecycle events cover pause, resume, and stop", async ()
   const stopReady = new Promise<string>((resolve) => { resolveStop = resolve; });
   let releaseAgent!: () => void;
   const agentReady = new Promise<void>((resolve) => { releaseAgent = resolve; });
-  const createSession = async (): Promise<NativeSession> => ({ sessionId: "control-session", sessionFile: "/sessions/control.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { await agentReady; }, steer: async () => {}, dispose() {} });
+  const createSession = async (): Promise<PiSession> => ({ sessionId: "control-session", sessionFile: "/sessions/control.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { await agentReady; }, steer: async () => {}, dispose() {} });
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], events: { emit(channel: string, data: unknown) { events.push({ channel, data }); if (channel === WORKFLOW_PHASE_CHANGED_EVENT) { const event = data as { phase: string; runId: string }; if (event.phase === "pause") { const action = commands[0]?.handler(`pause ${event.runId}`, context); if (action) void action.then(() => { setImmediate(() => { resolvePause(event.runId); }); }); } if (event.phase === "stop") { const action = commands[0]?.handler(`stop ${event.runId}`, context); if (action) void action.then(() => { setImmediate(() => { resolveStop(event.runId); }); }); } } } } } as never, home, async () => {}, createSession);
   const workflow = tools.find(({ name }) => name === "workflow");
   const command = commands[0]?.handler;
@@ -841,7 +848,7 @@ void test("workflow_stop reports unknown and terminal runs and persists cancella
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   let agentStarted!: () => void;
   const started = new Promise<void>((resolve) => { agentStarted = resolve; });
-  const createSession = async (): Promise<NativeSession> => ({ sessionId: "stop-tool-session", sessionFile: "/sessions/stop-tool.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { agentStarted(); await new Promise<void>(() => {}); }, steer: async () => {}, abort: async () => {}, dispose() {} });
+  const createSession = async (): Promise<PiSession> => ({ sessionId: "stop-tool-session", sessionFile: "/sessions/stop-tool.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { agentStarted(); await new Promise<void>(() => {}); }, steer: async () => {}, abort: async () => {}, dispose() {} });
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
   const workflow = tools.find(({ name }) => name === "workflow");
@@ -923,7 +930,7 @@ void test("resuming a launched trusted-project run keeps per-run concurrency and
   let resolvePause!: (runId: string) => void;
   const pauseReady = new Promise<string>((resolve) => { resolvePause = resolve; });
   const context = { cwd, hasUI: false, isProjectTrusted: () => true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
-  const createSession = async (input: SessionInput): Promise<NativeSession> => {
+  const createSession = async (input: SessionInput): Promise<PiSession> => {
     inputs.push(input);
     return { sessionId: `project-resume-${String(inputs.length)}`, sessionFile: `/sessions/project-resume-${String(inputs.length)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { await agentReady; }, steer: async () => {}, dispose() {} };
   };
@@ -990,7 +997,7 @@ void test("registered workflow retries preserve role definitions for agent calls
   mkdirSync(join(agentDir, "pi-extensible-workflows", "roles"), { recursive: true });
   writeFileSync(join(agentDir, "pi-extensible-workflows", "roles", "developer.md"), "Developer role");
   let sessions = 0;
-  const createSession = async (): Promise<NativeSession> => {
+  const createSession = async (): Promise<PiSession> => {
     const attempt = ++sessions;
     return { sessionId: `registered-role-${String(attempt)}`, sessionFile: `/sessions/registered-role-${String(attempt)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { if (attempt === 1) throw new Error("source failure"); }, steer: async () => {}, dispose() {} };
   };
@@ -1078,7 +1085,7 @@ void test("production launches dynamic aliases through role files with precedenc
   let shutdown: (() => Promise<void>) | undefined;
   try {
     const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-    const createSession = async (input: SessionInput): Promise<NativeSession> => {
+    const createSession = async (input: SessionInput): Promise<PiSession> => {
       inputs.push(input);
       return { sessionId: `dynamic-${String(inputs.length)}`, sessionFile: `/sessions/dynamic-${String(inputs.length)}`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
     };
@@ -1110,7 +1117,7 @@ void test("production resume reruns dynamic aliases, replays completed work, and
   let resolverCalls = 0;
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
-    const createSession = async (input: SessionInput): Promise<NativeSession> => {
+    const createSession = async (input: SessionInput): Promise<PiSession> => {
       inputs.push(input);
       return { sessionId: `resume-${String(inputs.length)}`, sessionFile: `/sessions/resume-${String(inputs.length)}`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
     };
@@ -1263,7 +1270,7 @@ void test("foreground workflow progress reports a shell waiting after agents set
   const releasePath = join(home, "shell-release");
   const command = `${process.execPath} -e ${JSON.stringify(`const fs=require("node:fs");fs.writeFileSync(${JSON.stringify(startedPath)},"started");const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(releasePath)})){clearInterval(timer);process.exit(0);}},1);`)}`;
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  const createSession = async (): Promise<NativeSession> => ({ sessionId: "shell-progress-agent", sessionFile: "/sessions/shell-progress-agent.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} });
+  const createSession = async (): Promise<PiSession> => ({ sessionId: "shell-progress-agent", sessionFile: "/sessions/shell-progress-agent.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} });
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
@@ -1294,7 +1301,7 @@ void test("foreground workflow reports parallel agent activities together", { ti
   let session = 0;
   let release!: () => void;
   const hold = new Promise<void>((resolve) => { release = resolve; });
-  const createSession = async (): Promise<NativeSession> => {
+  const createSession = async (): Promise<PiSession> => {
     const id = ++session;
     const toolName = id === 1 ? "read" : "grep";
     let listener: ((event: AgentSessionEvent) => void) | undefined;
@@ -2092,7 +2099,7 @@ void test("navigator omits transcript actions outside and inside Herdr", async (
       const selectedAgentActions = agentActions[0];
       assert.ok(selectedAgentActions);
       assert.equal(selectedAgentActions.includes("Open result in editor"), false);
-      assert.equal(selectedAgentActions.includes("Fork as Pi session in pane"), inHerdr);
+      assert.equal(selectedAgentActions.includes("Fork as Pi session in pane"), false);
       assert.ok(selectedAgentActions.includes("Copy agent ID"));
       await noAgent.delete(true);
       await withAgent.delete(true);
@@ -2600,7 +2607,7 @@ void test("pause waits for parallel agents and blocks later operations until res
   let resolveBothStarted!: () => void;
   const bothStarted = new Promise<void>((resolve) => { resolveBothStarted = resolve; });
   let sessionCount = 0;
-  const createSession = async (input: SessionInput): Promise<NativeSession> => {
+  const createSession = async (input: SessionInput): Promise<PiSession> => {
     const label = input.sessionLabel.split(":")[1] ?? "unknown";
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -2651,7 +2658,7 @@ void test("pause blocks shell work at both shared and worktree operation boundar
     const sessionId = name;
     const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
     const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
-    const createSession = async (): Promise<NativeSession> => { throw new Error("agent must not launch"); };
+    const createSession = async (): Promise<PiSession> => { throw new Error("agent must not launch"); };
     workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
     const workflow = tools.find(({ name }) => name === "workflow");
     const command = commands[0]?.handler;
@@ -2693,7 +2700,7 @@ void test("navigator Pause and Resume actions round-trip persisted state and ref
   const after = `${process.execPath} -e ${JSON.stringify(`require("node:fs").writeFileSync(${JSON.stringify(afterPath)},"after")`)}`;
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
-  const createSession = async (): Promise<NativeSession> => { throw new Error("agent must not launch"); };
+  const createSession = async (): Promise<PiSession> => { throw new Error("agent must not launch"); };
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession);
   const workflow = tools.find(({ name }) => name === "workflow");
   const command = commands[0]?.handler;
@@ -2744,7 +2751,7 @@ void test("registered workflow command controls reject races and cancel queued w
   const starts: string[] = [];
   const releases = new Map<string, () => void>();
   let sessionCount = 0;
-  const createSession = async (input: SessionInput): Promise<NativeSession> => {
+  const createSession = async (input: SessionInput): Promise<PiSession> => {
     const label = input.sessionLabel.split(":")[1] ?? "unknown";
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -2900,7 +2907,7 @@ void test("production role policy rejects overrides before persistence and prese
     if (role !== "reviewer") writeFileSync(join(cwd, ".pi", "pi-extensible-workflows", "roles", `${role}.md`), "---\nmodel: openai/gpt\ntools: [read]\n---\nTest role");
   }
   const inputs: SessionInput[] = [];
-  const createSession = async (input: SessionInput): Promise<NativeSession> => {
+  const createSession = async (input: SessionInput): Promise<PiSession> => {
     inputs.push(input);
     return { sessionId: `session-${String(inputs.length)}`, sessionFile: `/sessions/${String(inputs.length)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
   };
@@ -3172,7 +3179,7 @@ void test("resume reloads aliases for pending and retried calls while replaying 
   writeFileSync(settingsPath, JSON.stringify({ concurrency: 6, modelAliases: newAliases, disabledAgentResources: { skills: ["new-skill"], extensions: [join(agentDir, "new.ts")] } }));
   const inputs: SessionInput[] = [];
   let failedPending = false;
-  const createSession = async (input: SessionInput): Promise<NativeSession> => {
+  const createSession = async (input: SessionInput): Promise<PiSession> => {
     inputs.push(input);
     return {
       sessionId: `alias-${String(inputs.length)}`, sessionFile: `/sessions/alias-${String(inputs.length)}.jsonl`,
@@ -3900,7 +3907,7 @@ void test("extension roles flow through host guidance, preflight, launch snapsho
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }>; details?: unknown }> }> = [];
   let guidanceHandler: ((event: { systemPrompt: string }, ctx: { cwd: string; isProjectTrusted?: () => boolean }) => { systemPrompt?: string } | undefined) | undefined;
   let shutdown: (() => Promise<void>) | undefined;
-  const createSession = async (input: SessionInput): Promise<NativeSession> => {
+  const createSession = async (input: SessionInput): Promise<PiSession> => {
     inputs.push(input);
     return { sessionId: input.sessionLabel, sessionFile: `/sessions/${input.sessionLabel}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async (text) => { prompts.push(text); }, steer: async () => {}, dispose() {} };
   };
@@ -4135,7 +4142,7 @@ void test("foreground failure diagnostics advertise valid named worktrees", asyn
   let failBad = true;
   let goodAttempts = 0;
   let badAttempts = 0;
-  const createSession = async (input: SessionInput): Promise<NativeSession> => ({
+  const createSession = async (input: SessionInput): Promise<PiSession> => ({
     sessionId: input.sessionLabel, sessionFile: `/sessions/${input.sessionLabel}.jsonl`,
     messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
     getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
@@ -4184,7 +4191,7 @@ void test("foreground failures patch finalized tool results with bounded diagnos
   const tools: Tool[] = [];
   let toolResultHandler: ToolResultHandler | undefined;
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-failure-diagnostics-"));
-  const createSession = async (input: SessionInput): Promise<NativeSession> => ({
+  const createSession = async (input: SessionInput): Promise<PiSession> => ({
     sessionId: `diagnostic-${input.sessionLabel}`, sessionFile: `/sessions/${input.sessionLabel}.jsonl`,
     messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
     getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
@@ -4277,7 +4284,7 @@ void test("background failure diagnostics drive workflow_retry with the advertis
   let failBad = true;
   let goodAttempts = 0;
   let badAttempts = 0;
-  const createSession = async (input: SessionInput): Promise<NativeSession> => ({
+  const createSession = async (input: SessionInput): Promise<PiSession> => ({
     sessionId: input.sessionLabel, sessionFile: `/sessions/${input.sessionLabel}.jsonl`,
     messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
     getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
@@ -4327,7 +4334,7 @@ void test("failed retry diagnostics preserve retry provenance", async () => {
   mkdirSync(cwd);
   let firstAttempts = 0;
   let secondAttempts = 0;
-  const createSession = async (input: SessionInput): Promise<NativeSession> => ({
+  const createSession = async (input: SessionInput): Promise<PiSession> => ({
     sessionId: input.sessionLabel, sessionFile: `/sessions/${input.sessionLabel}.jsonl`,
     messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
     getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
@@ -4422,7 +4429,7 @@ type BudgetResponse = { content: unknown; usage?: BudgetMessage["usage"] };
 
 function budgetUsage(input: number, output: number, cost = 0): NonNullable<BudgetMessage["usage"]> { return { input, output, cacheRead: 100, cacheWrite: 200, cost: { total: cost } }; }
 
-function budgetSession(responses: readonly BudgetResponse[], steered: string[] = [], aborted = { value: false }): NativeSession {
+function budgetSession(responses: readonly BudgetResponse[], steered: string[] = [], aborted = { value: false }): PiSession {
   let listener: ((event: never) => void) | undefined;
   let responseIndex = 0;
   const messages: BudgetMessage[] = [];
@@ -4458,7 +4465,7 @@ function budgetSession(responses: readonly BudgetResponse[], steered: string[] =
   };
 }
 
-function budgetExecutor(session: NativeSession): WorkflowAgentExecutor {
+function budgetExecutor(session: PiSession): WorkflowAgentExecutor {
   return new WorkflowAgentExecutor({ cwd: "/repo", model: { provider: "openai", model: "gpt" }, tools: new Set() }, async () => session);
 }
 
@@ -4489,7 +4496,7 @@ void test("navigator budget resume and approval use the live trust context", asy
   let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let resolverCalls = 0;
-  const createSession = async (): Promise<NativeSession> => ({ sessionId: "navigator-budget-session", sessionFile: "/sessions/navigator-budget.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} });
+  const createSession = async (): Promise<PiSession> => ({ sessionId: "navigator-budget-session", sessionFile: "/sessions/navigator-budget.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} });
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) { command = options.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], ui: {} } as never, home, undefined, createSession, agentDir);
   registerWorkflowExtension({ version: "1.0.0", headline: "Navigator policy", description: "Navigator alias policy", modelAliases: { "reviewer-model": { resolve(context) { resolverCalls += 1; assert.equal(context.projectTrusted, false); assert.ok(context.availableModels.has("new/model")); return "new/model"; } } } });
   const context = { cwd, hasUI: false, isProjectTrusted: () => false, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }, { provider: "new", id: "model" }], getAvailable: () => [{ provider: "openai", id: "gpt" }, { provider: "new", id: "model" }] }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };

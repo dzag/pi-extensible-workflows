@@ -1,4 +1,4 @@
-import type { AgentSessionEvent, CreateAgentSessionOptions, InlineExtension, SessionStats, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { CreateAgentSessionOptions, InlineExtension, ToolDefinition } from "@earendil-works/pi-coding-agent";
 export const RUN_STATES = ["queued", "running", "pausing", "paused", "awaiting_input", "completed", "failed", "stopped", "interrupted", "budget_exhausted"] as const;
 export const AGENT_STATES = ["queued", "running", "waiting_for_child", "paused", "retrying", "completed", "failed", "cancelled"] as const;
 export const WORKFLOW_CALL_KINDS = ["agent", "parallel", "pipeline", "checkpoint", "phase", "withWorktree", "shell"] as const;
@@ -66,22 +66,23 @@ export interface WorkflowSettingsOverrides { concurrency?: number; modelAliases?
 export interface WorkflowSettingsSources { concurrency: string; modelAliases: string; disabledAgentResources: string }
 export interface WorkflowSettingsResolution { globalSettingsPath: string; projectSettingsPath: string; projectTrusted: boolean; global: Readonly<WorkflowSettings>; project: Readonly<WorkflowSettingsOverrides>; effective: Readonly<WorkflowSettings>; sources: Readonly<WorkflowSettingsSources> }
 export interface AgentResourceExclusions { skills: readonly string[]; extensions: readonly string[] }
-export interface AgentResourcePolicy { globalSettingsPath: string; projectSettingsPath: string; projectTrusted: boolean; global: AgentResourceExclusions; project: AgentResourceExclusions; effective: AgentResourceExclusions; unmatchedSkills: string[]; unmatchedExtensions: string[]; excludedSkills?: string[]; excludedExtensions?: string[] }
+export interface AgentResourcePolicy { globalSettingsPath: string; projectSettingsPath: string; projectTrusted: boolean; global: AgentResourceExclusions; project: AgentResourceExclusions; effective: AgentResourceExclusions; unmatchedSkills: readonly string[]; unmatchedExtensions: readonly string[]; excludedSkills?: readonly string[]; excludedExtensions?: readonly string[] }
 export interface AgentActivity { kind: "reasoning" | "tool" | "text"; text: string }
 export const WORKFLOW_AGENT_STALL_THRESHOLD_MS = 10 * 60 * 1000;
 export interface AgentAccounting { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }
 export interface AgentSetupSummary { hookNames: readonly string[]; model: ModelSpec; tools: readonly string[]; cwd: string; disabledAgentResources?: { skills: readonly string[]; extensions: readonly string[]; excludedSkills?: readonly string[]; excludedExtensions?: readonly string[]; unmatchedSkills: readonly string[]; unmatchedExtensions: readonly string[] } }
-export interface AgentAttemptSummary { attempt: number; sessionId: string; sessionFile: string; error?: { code: string; message: string }; accounting: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }; setup?: AgentSetupSummary }
+export interface AgentAttemptError { code: string; message: string }
+export interface AgentAttemptSummary { attempt: number; transport?: string; session?: WorkflowAgentSessionReference; setup?: AgentSetupSummary; error?: AgentAttemptError; accounting: AgentAccounting; sessionId?: string; sessionFile?: string }
 export interface WorkflowWorktreeCreatedEvent extends WorkflowEventBase { owner: string; branch: string; path: string; base: string }
 export interface WorkflowWorktreeReference { readonly path: string; readonly branch: string }
-export interface AgentRecord { id: string; name: string; label?: string; path: string; state: AgentState; parentId?: string; structuralPath?: readonly string[]; resultPath?: string; parentBreadcrumb?: string; worktreeOwner?: string; role?: string; requestedModel?: string; model: ModelSpec; tools: readonly string[]; attempts: number; attemptDetails?: readonly AgentAttemptSummary[]; accounting?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }; toolCalls?: readonly { id: string; name: string; state: "running" | "completed" | "failed" }[]; activity?: AgentActivity | undefined; lastEventAt?: number }
+export interface AgentRecord { systemPrompt?: string; id: string; name: string; label?: string; path: string; state: AgentState; parentId?: string; structuralPath?: readonly string[]; resultPath?: string; parentBreadcrumb?: string; worktreeOwner?: string; role?: string; requestedModel?: string; model: ModelSpec; tools: readonly string[]; attempts: number; attemptDetails?: readonly AgentAttemptSummary[]; accounting?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }; toolCalls?: readonly { id: string; name: string; state: "running" | "completed" | "failed" }[]; activity?: AgentActivity | undefined; lastEventAt?: number }
 export type WorkflowDeliveryMode = "foreground" | "background";
 export type WorkflowDeliveryStatus = "attached" | "pending" | "delivered";
 export interface WorkflowRunDelivery { mode: WorkflowDeliveryMode; state: WorkflowDeliveryStatus; toolCallId?: string }
 export interface WorkflowRunEvent { type: string; message: string }
 export interface WorkflowRetryProvenance { sourceRunId: string; lineageRootRunId: string; completedPaths: readonly string[]; incompletePaths: readonly string[]; namedWorktrees: readonly string[] }
 export interface WorkflowPhaseRecord { phase: string; afterAgent: number }
-export interface RunRecord { id: string; workflowName: string; cwd: string; sessionId: string; state: RunState; parentRunId?: string; retry?: WorkflowRetryProvenance; phase?: string; phaseHistory?: readonly WorkflowPhaseRecord[]; agents: readonly AgentRecord[]; activeShells?: number; error?: WorkflowErrorShape; failedAt?: string; budget?: WorkflowBudget; budgetVersion?: number; usage?: WorkflowBudgetUsage; budgetEvents?: readonly BudgetEvent[]; events?: readonly WorkflowRunEvent[]; delivery?: WorkflowRunDelivery }
+export interface RunRecord { id: string; workflowName: string; cwd: string; sessionId: string; state: RunState; agentSessions?: readonly WorkflowAgentSessionReference[]; parentRunId?: string; retry?: WorkflowRetryProvenance; phase?: string; phaseHistory?: readonly WorkflowPhaseRecord[]; agents: readonly AgentRecord[]; activeShells?: number; error?: WorkflowErrorShape; failedAt?: string; budget?: WorkflowBudget; budgetVersion?: number; usage?: WorkflowBudgetUsage; budgetEvents?: readonly BudgetEvent[]; events?: readonly WorkflowRunEvent[]; delivery?: WorkflowRunDelivery }
 export const LAUNCH_SNAPSHOT_IDENTITY_VERSION = 5;
 export type WorkflowLaunchMode = "foreground" | "background";
 export interface AgentDefinition { prompt?: string; description?: string; model?: string; thinking?: NonNullable<ModelSpec["thinking"]>; tools?: readonly string[]; overrideSystemPrompt?: boolean; disabledAgentResources?: AgentResourceExclusions }
@@ -94,23 +95,21 @@ export interface WorkflowFunctionContext extends WorkflowOrchestrationContext { 
 export type WorkflowWorktreeCallback = (reference: Readonly<WorkflowWorktreeReference>) => JsonValue | Promise<JsonValue>;
 export interface WorkflowFunction { description: string; input: JsonSchema; output: JsonSchema; run: (input: Readonly<Record<string, JsonValue>>, context: Readonly<WorkflowFunctionContext>) => Promise<JsonValue> | JsonValue }
 export interface WorkflowVariable { description: string; schema: JsonSchema; resolve: (run: Readonly<WorkflowRunContext>) => Promise<JsonValue> | JsonValue }
-type NativeAgentMessage = { role: string; content?: unknown; stopReason?: string; errorMessage?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: { total: number } } };
-type NativeSessionStats = Pick<SessionStats, "tokens" | "cost">;
-export interface NativeSession {
-  readonly sessionId: string;
-  readonly sessionFile: string | undefined;
-  readonly messages: readonly NativeAgentMessage[];
-  getSessionStats(): NativeSessionStats;
-  readonly systemPrompt?: string;
-  readonly model?: { provider: string; model?: string; id?: string };
-  readonly agent?: { state: { tools: readonly { name: string }[] } };
-  getLeafId?: () => string | null;
-  getToolDefinitions?: () => unknown;
-  subscribe?(listener: (event: AgentSessionEvent) => void): () => void;
-  prompt(text: string): Promise<void>;
-  steer?(text: string): Promise<void>;
-  abort?(): Promise<void>;
-  dispose(): void;
+export interface WorkflowAgentSessionReference { readonly transport: string; readonly sessionId: string; readonly locator?: JsonValue }
+export interface WorkflowAgentSessionStats { readonly tokens: { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number; readonly total: number }; readonly cost: number }
+export interface WorkflowAgentMessage { readonly role: string; readonly content?: unknown; readonly stopReason?: string; readonly errorMessage?: string; readonly usage?: { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number; readonly cost: { readonly total: number } } }
+export interface WorkflowAgentSessionState { readonly model: ModelSpec; readonly thinking?: ModelSpec["thinking"]; readonly tools: readonly string[]; readonly systemPrompt?: string }
+export interface WorkflowAgentSessionEvent { readonly type: string; readonly state?: Readonly<WorkflowAgentSessionState>; readonly message?: WorkflowAgentMessage; readonly assistantMessageEvent?: { readonly type: string }; readonly toolCallId?: string; readonly toolName?: string; readonly isError?: boolean }
+export interface WorkflowAgentTurnResult { readonly assistant?: WorkflowAgentMessage }
+export interface WorkflowAgentSession {
+  readonly reference: WorkflowAgentSessionReference;
+  getState(): Readonly<WorkflowAgentSessionState>;
+  getSessionStats(): WorkflowAgentSessionStats;
+  subscribe(listener: (event: WorkflowAgentSessionEvent) => void): () => void;
+  prompt(text: string): Promise<WorkflowAgentTurnResult>;
+  steer(text: string): Promise<void>;
+  abort(): Promise<void>;
+  dispose(): Promise<void>;
 }
 type SessionTools = NonNullable<CreateAgentSessionOptions["tools"]>;
 type SessionCustomTools = NonNullable<CreateAgentSessionOptions["customTools"]>;
@@ -129,17 +128,36 @@ export interface SessionInput {
   resourcePolicy?: AgentResourcePolicy;
   options?: AgentOptions;
 }
-export type SessionFactory = (input: SessionInput) => Promise<NativeSession>;
-export interface AgentSetup { prompt: string; options: AgentOptions; sessionInput: SessionInput; createSession: SessionFactory }
+export interface PreparedAgentSession {
+  readonly cwd: string;
+  readonly model: ModelSpec;
+  readonly tools: readonly string[];
+  readonly sessionLabel: string;
+  readonly agentDir?: string;
+  readonly customTools?: readonly ToolDefinition[];
+  readonly resultTool?: ToolDefinition;
+  readonly options?: Readonly<Record<string, JsonValue>>;
+  readonly systemPrompt?: string;
+  readonly systemPromptAppend?: string;
+  readonly extensionFactories?: readonly InlineExtension[];
+  readonly additionalSkillPaths?: readonly string[];
+  readonly resourcePolicy?: Readonly<AgentResourcePolicy>;
+}
+export interface AgentTransportContext { readonly run: Readonly<WorkflowRunContext>; readonly identity: Readonly<AgentIdentity>; readonly attempt: number; readonly signal: AbortSignal }
+export interface AgentTransport { readonly id: string; createSession(prepared: Readonly<PreparedAgentSession>, context: Readonly<AgentTransportContext>): Promise<WorkflowAgentSession> }
+export interface AgentSetup { prompt: string; options: AgentOptions; sessionInput: SessionInput; prepared: Readonly<PreparedAgentSession>; transport: AgentTransport }
 export interface AgentSetupContext { readonly run: Readonly<WorkflowRunContext>; readonly identity: Readonly<AgentIdentity>; readonly attempt: number; readonly signal: AbortSignal }
 export interface AgentSetupHook { priority?: number; setup: (agent: AgentSetup, context: Readonly<AgentSetupContext>) => void | Promise<void> }
 export interface RegisteredAgentSetupHook { name: string; priority: number; setup: AgentSetupHook["setup"] }
 export interface WorkflowExtensionMetadata { version: string; headline: string; description: string }
 export interface WorkflowRoleDirectoryRegistration { path: string; extension: WorkflowExtensionMetadata }
-export interface WorkflowExtension extends WorkflowExtensionMetadata { functions?: Readonly<Record<string, WorkflowFunction>>; variables?: Readonly<Record<string, WorkflowVariable>>; modelAliases?: Readonly<Record<string, WorkflowModelAlias>>; agentSetupHooks?: Readonly<Record<string, AgentSetupHook>>; roleDirectories?: readonly (string | URL)[] }
+export interface AgentAttemptActionUi { notify(message: string, level?: "info" | "warning" | "error"): void; confirm(title: string, message: string): Promise<boolean>; select(title: string, options: readonly string[]): Promise<string | undefined>; input(title: string, placeholder?: string): Promise<string | undefined> }
+export interface AgentAttemptActionContext { readonly run: Readonly<RunRecord>; readonly agent: Readonly<AgentRecord>; readonly attempt: Readonly<AgentAttemptSummary>; readonly session?: WorkflowAgentSessionReference; readonly liveSession?: WorkflowAgentSession; readonly signal: AbortSignal; readonly ui: Readonly<AgentAttemptActionUi> }
+export interface AgentAttemptAction { readonly label: string; visible(context: Readonly<AgentAttemptActionContext>): boolean; run(context: Readonly<AgentAttemptActionContext>): void | Promise<void> }
+export interface WorkflowExtension extends WorkflowExtensionMetadata { functions?: Readonly<Record<string, WorkflowFunction>>; variables?: Readonly<Record<string, WorkflowVariable>>; modelAliases?: Readonly<Record<string, WorkflowModelAlias>>; agentSetupHooks?: Readonly<Record<string, AgentSetupHook>>; agentAttemptActions?: Readonly<Record<string, AgentAttemptAction>>; roleDirectories?: readonly (string | URL)[] }
 export interface WorkflowJournal { get(path: string): JsonValue | undefined; put(path: string, value: JsonValue): void }
 export class WorkflowError extends Error { constructor(public readonly code: WorkflowErrorCode, message: string) { super(message); this.name = "WorkflowError"; } }
-export interface WorkflowFailureAgent { id: string; label?: string; role?: string; structuralPath: readonly string[]; attempt: number; sessionId?: string; sessionFile?: string }
+export interface WorkflowFailureAgent { id: string; label?: string; role?: string; structuralPath: readonly string[]; attempt: number; transport?: string; session?: WorkflowAgentSessionReference; sessionId?: string; sessionFile?: string }
 export interface WorkflowSiblingAgent { id: string; label?: string; role?: string; structuralPath: readonly string[] }
 export interface WorkflowFailureDiagnostics { runId: string; workflowName: string; state: RunState; failedAt: string | null; error: WorkflowErrorShape; failedAgent?: WorkflowFailureAgent; completedSiblingAgents?: readonly WorkflowSiblingAgent[]; completedSiblingPaths: readonly (readonly string[])[]; retry?: { sourceRunId: string; action: string; completedPaths: readonly string[]; incompletePaths: readonly string[]; namedWorktrees: readonly string[]; warning: string }; artifacts: { runDirectory: string; statePath: string; journalPath: string } }
 export interface CheckpointInput { name: string; prompt: string; context: JsonValue }

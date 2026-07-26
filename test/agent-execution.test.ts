@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { Type } from "@earendil-works/pi-ai";
-import { createNativeAgentSession, FairAgentScheduler, WorkflowAgentExecutor, type AgentExecutionRoot, type AgentProgress, type SessionFactory } from "../src/agent-execution.js";
+import { createLocalPiSession, FairAgentScheduler, localAgentTransport, WorkflowAgentExecutor, type AgentExecutionRoot, type AgentProgress, type PiSessionFactory } from "../src/agent-execution.js";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { WorkflowError } from "../src/index.js";
 import type { AgentResourcePolicy } from "../src/types.js";
@@ -15,6 +15,52 @@ const usage = { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, cost: { total:
 function assistant(text: string) { return { role: "assistant", content: [{ type: "text", text }], usage }; }
 function terminalAssistant(errorMessage: string) { return { ...assistant(""), stopReason: "error", errorMessage }; }
 function sessionStats(cost = usage.cost.total) { return { tokens: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, total: usage.input + usage.output + usage.cacheRead + usage.cacheWrite }, cost }; }
+void test("uses a transport-neutral session and persists its final reference shape", async () => {
+  const events: string[] = [];
+  const transport = {
+    id: "test",
+    async createSession(prepared: Readonly<import("../src/types.js").PreparedAgentSession>, context: Readonly<import("../src/types.js").AgentTransportContext>) {
+      assert.equal(Object.isFrozen(prepared), true);
+      assert.equal(context.attempt, 1);
+      return {
+        reference: { transport: "test", sessionId: "external-1" },
+        getState: () => ({ model: prepared.model, tools: prepared.tools }),
+        getSessionStats: sessionStats,
+        subscribe(listener: (event: import("../src/types.js").WorkflowAgentSessionEvent) => void) { listener({ type: "state_changed", state: { model: prepared.model, tools: prepared.tools } }); return () => undefined; },
+        async prompt() { events.push("prompt"); return { assistant: { role: "assistant", content: [{ type: "text", text: "transport result" }] } }; },
+        async steer() {},
+        async abort() {},
+        async dispose() { events.push("dispose"); },
+      };
+    },
+  } satisfies import("../src/types.js").AgentTransport;
+  const result = await new WorkflowAgentExecutor({ ...root, agentSetupHooks: [{ name: "replace", priority: 1, setup(agent) { agent.transport = transport; } }] }, localAgentTransport).execute("work", { label: "worker", workflowName: "flow" });
+  assert.equal(result.value, "transport result");
+  const attempt = result.attempts[0];
+  assert.ok(attempt);
+  assert.equal(attempt.session?.transport, "test");
+  assert.equal(attempt.session.sessionId, "external-1");
+  assert.deepEqual(events, ["prompt", "dispose"]);
+});
+
+void test("persists a selected transport when session creation fails", async () => {
+  const attempts: unknown[] = [];
+  const transport = {
+    id: "connect-failure",
+    async createSession() { throw new Error("connection failed"); },
+  } satisfies import("../src/types.js").AgentTransport;
+  await assert.rejects(new WorkflowAgentExecutor(root, transport).execute("work", { label: "worker", workflowName: "flow", onAttempt: (attempt) => { attempts.push(attempt); } }), (error: unknown) => {
+    const typed = error as WorkflowError & { attempts?: readonly { session?: unknown; transport?: string; error?: { message: string } }[] };
+    assert.equal(typed.code, "AGENT_FAILED");
+    const latest = typed.attempts?.at(-1);
+    assert.ok(latest);
+    assert.equal(latest.transport, "connect-failure");
+    assert.equal(latest.session, undefined);
+    assert.equal(latest.error?.message, "connection failed");
+    return true;
+  });
+  assert.equal(attempts.length, 2);
+});
 
 void test("resolves explicit capabilities without widening least privilege", () => {
   const executor = new WorkflowAgentExecutor(root, async () => { throw new Error("unused"); });
@@ -127,8 +173,8 @@ void test("exposes native attempt metadata before the prompt completes", async (
   let finish!: () => void;
   let promptStarted!: () => void;
   const started = new Promise<void>((resolve) => { promptStarted = resolve; });
-  let exposed!: (value: { attempt: number; sessionId: string; sessionFile: string }) => void;
-  const exposure = new Promise<{ attempt: number; sessionId: string; sessionFile: string }>((resolve) => { exposed = resolve; });
+  let exposed!: (value: import("../src/agent-execution.js").AgentAttempt) => void;
+  const exposure = new Promise<import("../src/agent-execution.js").AgentAttempt>((resolve) => { exposed = resolve; });
   const executor = new WorkflowAgentExecutor(root, async () => ({ sessionId: "active", sessionFile: "/sessions/active.jsonl", messages: [assistant("done")], getSessionStats: sessionStats, prompt: () => new Promise<void>((resolve) => { finish = resolve; promptStarted(); }), dispose() {} }));
   const running = executor.execute("work", { label: "worker", workflowName: "flow", onAttempt: (attempt) => { exposed(attempt); } });
   assert.deepEqual(await exposure, { attempt: 1, sessionId: "active", sessionFile: "/sessions/active.jsonl" });
@@ -486,7 +532,7 @@ void test("per-attempt timeout is typed and terminal", async () => {
 
 void test("production native Pi session installs nested scheduler tools", async () => {
   const nestedTool = { name: "agent", label: "Child Agent", description: "Start child", parameters: Type.Object({}), async execute() { return { content: [{ type: "text" as const, text: "ok" }], details: {} }; } };
-  const session = await createNativeAgentSession({ cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], customTools: [nestedTool], sessionLabel: "scheduler-production-seam" });
+  const session = await createLocalPiSession({ cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], customTools: [nestedTool], sessionLabel: "scheduler-production-seam" });
   assert.ok(session.agent?.state.tools.some(({ name }) => name === "agent"));
   session.dispose();
 });
@@ -764,7 +810,7 @@ void test("removeRun evicts only settled scheduler state", async () => {
 void test("refreshes resource exclusions for every fresh attempt and inspects the effective policy", async () => {
   let policyCalls = 0;
   let sessions = 0;
-  const inputs: Array<NonNullable<Parameters<SessionFactory>[0]["resourcePolicy"]>> = [];
+  const inputs: Array<NonNullable<Parameters<PiSessionFactory>[0]["resourcePolicy"]>> = [];
   const executor = new WorkflowAgentExecutor({ ...root, agentResourcePolicy: () => {
     policyCalls += 1;
     const skill = `skill-${String(policyCalls)}`;
@@ -785,7 +831,7 @@ void test("refreshes resource exclusions for every fresh attempt and inspects th
 void test("isolates role resource exclusions and reapplies them on retries", async () => {
   const roleExtension = "/role/extension.ts";
   const basePolicy = { globalSettingsPath: "/global/settings.json", projectSettingsPath: "/project/settings.json", projectTrusted: true, global: { skills: ["global"], extensions: ["/global.ts"] }, project: { skills: ["project"], extensions: ["/project.ts"] }, effective: { skills: ["global", "project"], extensions: ["/global.ts", "/project.ts"] }, unmatchedSkills: [], unmatchedExtensions: [] };
-  const policies: Array<NonNullable<Parameters<SessionFactory>[0]["resourcePolicy"]>> = [];
+  const policies: Array<NonNullable<Parameters<PiSessionFactory>[0]["resourcePolicy"]>> = [];
   let sessions = 0;
   const executor = new WorkflowAgentExecutor({ ...root, agentDefinitions: { ...root.agentDefinitions, reviewer: { ...root.agentDefinitions?.reviewer, disabledAgentResources: { skills: ["role", "global"], extensions: [roleExtension, "/global.ts"] } }, scout: { ...root.agentDefinitions?.scout } }, agentResourcePolicy: () => structuredClone(basePolicy) }, async (input) => {
     assert.ok(input.resourcePolicy);
@@ -839,7 +885,7 @@ void test("filters disabled native extensions before factories and skills before
   writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ extensions: [disabledExtension, allowedExtension], skills: [skillsDir] }));
   writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ extensions: [projectDisabledExtension, projectAllowedExtension], skills: [projectSkills] }));
   const resourcePolicy: AgentResourcePolicy = { globalSettingsPath: "/workflow/settings.json", projectSettingsPath: "/project/.pi/pi-extensible-workflows/settings.json", projectTrusted: false, global: { skills: ["disabled-skill"], extensions: [resolve(disabledExtension)] }, project: { skills: [], extensions: [] }, effective: { skills: ["disabled-skill"], extensions: [resolve(disabledExtension)] }, unmatchedSkills: [], unmatchedExtensions: [] };
-  const session = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-filter", resourcePolicy });
+  const session = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-filter", resourcePolicy });
   const loaded = (session as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> }; getExtensions(): { extensions: Array<{ resolvedPath: string }> } } }).resourceLoader;
   assert.equal(existsSync(disabledMarker), false);
   assert.equal(existsSync(allowedMarker), true);
@@ -860,7 +906,7 @@ void test("filters disabled native extensions before factories and skills before
   assert.deepEqual(resourcePolicy.unmatchedExtensions, []);
   session.dispose();
   const trustedPolicy = { globalSettingsPath: "/workflow/settings.json", projectSettingsPath: "/project/.pi/pi-extensible-workflows/settings.json", projectTrusted: true, global: { skills: ["disabled-skill"], extensions: [resolve(disabledExtension)] }, project: { skills: ["project-disabled-skill"], extensions: [resolve(projectDisabledExtension)] }, effective: { skills: ["disabled-skill", "project-disabled-skill"], extensions: [resolve(disabledExtension), resolve(projectDisabledExtension)] }, unmatchedSkills: [], unmatchedExtensions: [] };
-  const trusted = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-trusted", resourcePolicy: trustedPolicy });
+  const trusted = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-trusted", resourcePolicy: trustedPolicy });
   const trustedLoaded = (trusted as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> }; getExtensions(): { extensions: Array<{ resolvedPath: string }> } } }).resourceLoader;
   assert.equal(existsSync(projectDisabledMarker), false);
   assert.equal(existsSync(projectAllowedMarker), true);
@@ -871,7 +917,7 @@ void test("filters disabled native extensions before factories and skills before
   assert.deepEqual(trustedPolicy.unmatchedSkills, []);
   assert.deepEqual(trustedPolicy.unmatchedExtensions, []);
   trusted.dispose();
-  const parent = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-parent" });
+  const parent = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-parent" });
   assert.match(parent.systemPrompt ?? "", /disabled-skill/);
   parent.dispose();
 });
@@ -886,7 +932,7 @@ void test("treats role system prompt bodies as literal content", async () => {
   writeFileSync(join(agentDir, "auth.json"), "{}");
   const promptBody = join(rootDir, "prompt-body");
   writeFileSync(promptBody, "This file must not be loaded as the prompt body.");
-  const session = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "literal-system-prompt", systemPrompt: promptBody });
+  const session = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "literal-system-prompt", systemPrompt: promptBody });
   try {
     assert.ok(session.systemPrompt?.startsWith(promptBody));
     assert.doesNotMatch(session.systemPrompt ?? "", /This file must not be loaded/);
@@ -909,12 +955,12 @@ void test("loads workflow SYSTEM.md with project trust and precedence", async ()
     writeFileSync(join(rootDir, ".pi", "pi-extensible-workflows", "SYSTEM.md"), "Global workflow system");
     writeFileSync(join(cwd, ".pi", "pi-extensible-workflows", "SYSTEM.md"), "Project workflow system");
     const policy = (projectTrusted: boolean): AgentResourcePolicy => ({ globalSettingsPath: "/workflow/settings.json", projectSettingsPath: "/project/.pi/pi-extensible-workflows/settings.json", projectTrusted, global: { skills: [], extensions: [] }, project: { skills: [], extensions: [] }, effective: { skills: [], extensions: [] }, unmatchedSkills: [], unmatchedExtensions: [] });
-    const untrusted = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "system-untrusted", systemPromptAppend: "Role append", resourcePolicy: policy(false) });
+    const untrusted = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "system-untrusted", systemPromptAppend: "Role append", resourcePolicy: policy(false) });
     assert.match(untrusted.systemPrompt ?? "", /Global workflow system/);
     assert.doesNotMatch(untrusted.systemPrompt ?? "", /Project workflow system/);
     assert.match(untrusted.systemPrompt ?? "", /Role append/);
     untrusted.dispose();
-    const trusted = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "system-trusted", resourcePolicy: policy(true) });
+    const trusted = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "system-trusted", resourcePolicy: policy(true) });
     assert.match(trusted.systemPrompt ?? "", /Project workflow system/);
     assert.doesNotMatch(trusted.systemPrompt ?? "", /Global workflow system/);
     trusted.dispose();
@@ -938,7 +984,7 @@ void test("applies ordered minimatch resource exclusions and records concrete ma
   writeFileSync(join(agentDir, "skills", "disabled-skill", "SKILL.md"), "---\nname: disabled-skill\ndescription: Disabled\n---\nDisabled");
   writeFileSync(join(agentDir, "skills", "kept-skill", "SKILL.md"), "---\nname: kept-skill\ndescription: Kept\n---\nKept");
   const resourcePolicy: AgentResourcePolicy = { globalSettingsPath: "/workflow/settings.json", projectSettingsPath: "/project/.pi/pi-extensible-workflows/settings.json", projectTrusted: false, global: { skills: [], extensions: [] }, project: { skills: [], extensions: [] }, effective: { skills: ["disabled-*", "!kept-skill"], extensions: ["**/*", `!${allowedExtension}`] }, unmatchedSkills: [], unmatchedExtensions: [] };
-  const session = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-glob", resourcePolicy });
+  const session = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-glob", resourcePolicy });
   const loaded = (session as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> }; getExtensions(): { extensions: Array<{ resolvedPath: string }> } } }).resourceLoader;
   const skillNames = loaded.getSkills().skills.map(({ name }) => name);
   assert.ok(skillNames.includes("kept-skill"));
@@ -961,7 +1007,7 @@ void test("selected skill paths load in native Pi sessions", async () => {
   writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: {} }));
   writeFileSync(join(agentDir, "auth.json"), "{}");
   writeFileSync(join(skillDir, "SKILL.md"), "---\nname: bundle-skill\ndescription: Selected bundle skill\n---\nUse this selected bundle skill.");
-  const session = await createNativeAgentSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "bundle-skill", additionalSkillPaths: [skillDir] });
+  const session = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "bundle-skill", additionalSkillPaths: [skillDir] });
   const loaded = (session as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> } } }).resourceLoader;
   assert.ok(loaded.getSkills().skills.some(({ name }) => name === "bundle-skill"));
   session.dispose();

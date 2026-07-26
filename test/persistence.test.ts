@@ -89,7 +89,7 @@ void test("stores exact cwd and Pi session snapshots atomically and rejects cros
   const loaded = await store.load();
   assert.deepEqual(loaded.snapshot.args, { answer: 42 });
   assert.equal(Object.isFrozen(loaded.snapshot.args), true);
-  assert.equal(loaded.run.nativeSessions[0]?.sessionFile, "/pi/sessions/native-a.jsonl");
+  assert.equal((loaded.run.nativeSessions ?? [])[0]?.sessionFile, "/pi/sessions/native-a.jsonl");
   await assert.rejects(new RunStore(cwd, "session-b", "run-a", home).load());
   assert.notEqual(projectStorageKey(join(home, "a", "same-name")), projectStorageKey(join(home, "b", "same-name")));
   assert.deepEqual(readFileSync(join(store.directory, "state.json"), "utf8").trim().startsWith("{"), true);

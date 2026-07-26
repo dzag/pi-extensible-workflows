@@ -6,9 +6,9 @@ import { join } from "node:path";
 import test from "node:test";
 import { Type } from "@earendil-works/pi-ai";
 import workflowExtension, { createLaunchSnapshot, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, persistActiveAgentAttempt, persistAgentAttempts, registerWorkflowExtension, runWorkflow, shellIdentityPath, structuralPath, WorkflowAgentExecutor, WorkflowError, type JsonValue, type WorkflowExtension } from "../src/index.js";
-import { createNativeAgentSession } from "../src/agent-execution.js";
+import { createLocalPiSession } from "../src/agent-execution.js";
 import { listRunIds, RunStore } from "../src/persistence.js";
-import type { NativeSession, SessionInput } from "../src/agent-execution.js";
+import type { PiSession, SessionInput } from "../src/agent-execution.js";
 function sessionStats(cost = 0.25) { return { tokens: { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, total: 14 }, cost }; }
 let acceptanceFunctionCalls = 0;
 let acceptanceVariableCalls = 0;
@@ -89,7 +89,7 @@ void test("cold resume persists effective role, fallback, nested, retry, and exp
   await store.saveOwnership([]);
   const inputs = new Map<string, SessionInput>();
   let nextSession = 0;
-  const createSession = async (input: SessionInput): Promise<NativeSession> => {
+  const createSession = async (input: SessionInput): Promise<PiSession> => {
     const sessionId = `native-${String(++nextSession)}`;
     inputs.set(sessionId, input);
     const executeTool = async (name: string, params: Record<string, unknown>): Promise<unknown> => {
@@ -138,7 +138,7 @@ void test("cold resume persists effective role, fallback, nested, retry, and exp
   assert.equal(inputs.size, 9);
   assert.equal(attempts.length, inputs.size);
   for (const { agent, attempt } of attempts) {
-    const input = inputs.get(attempt.sessionId);
+    const input = inputs.get(attempt.session?.sessionId ?? attempt.sessionId ?? "");
     assert.ok(input);
     assert.deepEqual({ provider: input.model.provider, model: input.model.model, thinking: input.model.thinking, tools: input.tools }, { provider: agent.model.provider, model: agent.model.model, thinking: agent.model.thinking, tools: agent.tools });
   }
@@ -362,7 +362,7 @@ void test("production replayed shells do not report active progress", { timeout:
   const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
   let markAgentStarted!: () => void;
   const agentStarted = new Promise<void>((resolve) => { markAgentStarted = resolve; });
-  const createSession = async (): Promise<NativeSession> => ({ sessionId: "shell-replay-agent", sessionFile: "/sessions/shell-replay-agent.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: sessionStats, prompt: async () => { markAgentStarted(); await promptGate; }, steer: async () => {}, dispose() {} });
+  const createSession = async (): Promise<PiSession> => ({ sessionId: "shell-replay-agent", sessionFile: "/sessions/shell-replay-agent.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: sessionStats, prompt: async () => { markAgentStarted(); await promptGate; }, steer: async () => {}, dispose() {} });
   const updates: number[] = [];
   let resolveRun!: (run: { id: string }) => void;
   const initialRun = new Promise<{ id: string }>((resolve) => { resolveRun = resolve; });
@@ -392,7 +392,7 @@ void test("a real paused run survives shutdown, replays completed shell work, an
   const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
   let releasePrompt!: () => void;
   const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
-  const createFirstSession = async (): Promise<NativeSession> => ({ sessionId: "first", sessionFile: "/sessions/first.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: sessionStats, prompt: async () => { resolveStarted(); await promptGate; }, abort: async () => { releasePrompt(); }, steer: async () => {}, dispose() {} });
+  const createFirstSession = async (): Promise<PiSession> => ({ sessionId: "first", sessionFile: "/sessions/first.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: sessionStats, prompt: async () => { resolveStarted(); await promptGate; }, abort: async () => { releasePrompt(); }, steer: async () => {}, dispose() {} });
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createFirstSession);
   const workflow = tools.find(({ name }) => name === "workflow");
   const command = commands[0]?.handler;
@@ -419,7 +419,7 @@ void test("a real paused run survives shutdown, replays completed shell work, an
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let resumeCommand: ((args: string, ctx: unknown) => Promise<void>) | undefined;
   let secondSessions = 0;
-  const createSecondSession = async (): Promise<NativeSession> => ({ sessionId: `second-${String(++secondSessions)}`, sessionFile: `/sessions/second-${String(secondSessions)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: sessionStats, prompt: async () => {}, steer: async () => {}, dispose() {} });
+  const createSecondSession = async (): Promise<PiSession> => ({ sessionId: `second-${String(++secondSessions)}`, sessionFile: `/sessions/second-${String(secondSessions)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: sessionStats, prompt: async () => {}, steer: async () => {}, dispose() {} });
   workflowExtension({ registerTool(tool: (typeof resumedTools)[number]) { resumedTools.push(tool); }, registerCommand(_name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) { resumeCommand = options.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSecondSession);
   assert.ok(start && resumeCommand);
   await start({}, context);
@@ -432,7 +432,7 @@ void test("a real paused run survives shutdown, replays completed shell work, an
 
 void test("production Pi seam installs child tools and registers native steering", async () => {
   const childTool = { name: "agent", label: "Child", description: "child", parameters: Type.Object({}), async execute() { return { content: [{ type: "text" as const, text: "ok" }], details: {} }; } };
-  const session = await createNativeAgentSession({ cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], customTools: [childTool], sessionLabel: "issue-9-acceptance" });
+  const session = await createLocalPiSession({ cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], customTools: [childTool], sessionLabel: "issue-9-acceptance" });
   assert.ok(session.agent?.state.tools.some(({ name }) => name === "agent"));
   session.dispose();
   let steer: ((message: string) => void | Promise<void>) | undefined;
@@ -544,7 +544,7 @@ void test("registered extension agents persist structural scope for late sibling
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-issue69-identity-"));
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ details: { runId?: string; value?: unknown } }> }> = [];
   let nextSession = 0;
-  const createSession = async (): Promise<NativeSession> => ({
+  const createSession = async (): Promise<PiSession> => ({
     sessionId: `issue69-${String(++nextSession)}`,
     sessionFile: `/sessions/${String(nextSession)}.jsonl`,
     messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: sessionStats,
@@ -595,7 +595,7 @@ void test("setup hooks conditionally install an inline Pi extension for one agen
   const inputs: SessionInput[] = [];
   const installed: string[] = [];
   const scopedAdvisorFactory = (pi: { registerTool(tool: { name: string }): void }) => { pi.registerTool({ name: "scoped-advisor" }); };
-  const createSession = async (input: SessionInput): Promise<NativeSession> => {
+  const createSession = async (input: SessionInput): Promise<PiSession> => {
     inputs.push(input);
     for (const factory of input.extensionFactories ?? []) await (typeof factory === "function" ? factory({ registerTool(tool: { name: string }) { installed.push(tool.name); } } as never) : factory.factory({ registerTool(tool: { name: string }) { installed.push(tool.name); } } as never));
     return { sessionId: `setup-${String(inputs.length)}`, sessionFile: `/sessions/setup-${String(inputs.length)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: sessionStats, prompt: async () => {}, steer: async () => {}, dispose() {} };
@@ -616,7 +616,7 @@ void test("parent registry survives nested agent session lifecycle", async () =>
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }>; details: { value?: unknown } }> }> = [];
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let nestedLifecycleRan = false;
-  const createSession = async (): Promise<NativeSession> => ({
+  const createSession = async (): Promise<PiSession> => ({
     sessionId: "nested", sessionFile: "/sessions/nested.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: sessionStats,
     prompt: async () => {
       const nestedHome = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-nested-registry-"));
@@ -706,7 +706,7 @@ void test("shared worktree scopes persist one owner across production agents and
   let nextSession = 0;
   let failRetry = true;
   let spawnedChild = false;
-  const createSession = async (input: SessionInput): Promise<NativeSession> => {
+  const createSession = async (input: SessionInput): Promise<PiSession> => {
     const sessionId = `shared-worktree-${String(++nextSession)}`;
     inputs.push(input);
     return {
@@ -797,7 +797,7 @@ void test("workflow_catalog is excluded from child tools", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-catalog-child-"));
   const inputs: SessionInput[] = [];
   let nextSession = 0;
-  const createSession = async (input: SessionInput): Promise<NativeSession> => {
+  const createSession = async (input: SessionInput): Promise<PiSession> => {
     inputs.push(input);
     return { sessionId: `catalog-child-${String(++nextSession)}`, sessionFile: "/tmp/catalog-child.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: sessionStats, prompt: async () => {}, steer: async () => {}, dispose() {} };
   };
@@ -912,7 +912,7 @@ void test("workflow_retry replays a journaled shell mutation while completing in
   const marker = join(home, "mutation.log");
   const messages: string[] = [];
   let sessions = 0;
-  const createSession = async (): Promise<NativeSession> => {
+  const createSession = async (): Promise<PiSession> => {
     const session = ++sessions;
     return {
       sessionId: `partial-shell-${String(session)}`,

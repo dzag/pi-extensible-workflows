@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import workflowExtension, { RPC_LIMIT_BYTES, RunStore, WorkflowAgentExecutor, createLaunchSnapshot, loadAgentDefinitions, resolveAgentResourcePolicy, resolveWorkflowSettings, runWorkflow, validateWorkflowLaunch, WorkflowError } from "../src/index.js";
 import { listRunIds } from "../src/persistence.js";
-import type { NativeSession, SessionInput } from "../src/agent-execution.js";
+import type { PiSession, SessionInput } from "../src/agent-execution.js";
 
 void test("untrusted project policy cannot influence launch validation", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-trust-launch-"));
@@ -105,7 +105,7 @@ void test("retry attempts refresh global and role exclusions without reviving pr
   writeFileSync(join(cwd, ".pi", "pi-extensible-workflows", "settings.json"), JSON.stringify({ disabledAgentResources: { skills: ["project-must-stay-ignored"], extensions: [] } }));
   const inputs: SessionInput[] = [];
   let sessions = 0;
-  const executor = new WorkflowAgentExecutor({ cwd, model: { provider: "openai", model: "gpt" }, tools: new Set(), availableModels: new Set(["openai/gpt"]), agentDefinitions: { reviewer: { disabledAgentResources: { skills: ["role-only"], extensions: [] } } }, agentResourcePolicy: () => resolveAgentResourcePolicy(cwd, false, settingsPath) }, async (input): Promise<NativeSession> => {
+  const executor = new WorkflowAgentExecutor({ cwd, model: { provider: "openai", model: "gpt" }, tools: new Set(), availableModels: new Set(["openai/gpt"]), agentDefinitions: { reviewer: { disabledAgentResources: { skills: ["role-only"], extensions: [] } } }, agentResourcePolicy: () => resolveAgentResourcePolicy(cwd, false, settingsPath) }, async (input): Promise<PiSession> => {
     inputs.push(input);
     const session = ++sessions;
     return { sessionId: `retry-${String(session)}`, sessionFile: `/sessions/retry-${String(session)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { if (session === 1) { writeFileSync(settingsPath, JSON.stringify({ disabledAgentResources: { skills: ["global-second"], extensions: [] } })); throw new Error("retry"); } }, dispose() {} };
@@ -127,7 +127,7 @@ void test("cold resume rejects persisted project roles before launching them", a
   let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
   let shutdown: (() => Promise<void>) | undefined;
   let launched = 0;
-  const createSession = async (): Promise<NativeSession> => { launched += 1; throw new Error("must not launch"); };
+  const createSession = async (): Promise<PiSession> => { launched += 1; throw new Error("must not launch"); };
   const context = { cwd, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, isProjectTrusted: () => false, ui: { notify() {} } };
   workflowExtension({ on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, registerTool() {}, registerCommand(_name: string, value: { handler: typeof command }) { command = value.handler; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, createSession, home);
   assert.ok(start && command);
@@ -153,7 +153,7 @@ void test("cold resume rebuilds child sessions with current global and role excl
   await store.create({ id: "run", workflowName: "cold-policy", cwd, sessionId: "session", state: "interrupted", agents: [], nativeSessions: [] }, createLaunchSnapshot({ script: `return agent("review", { role: "reviewer" });`, args: null, metadata: { name: "cold-policy" }, settings: { concurrency: 1, disabledAgentResources: { skills: ["stale-snapshot"], extensions: [] } }, models: ["openai/gpt"], tools: [], agentTypes: ["reviewer"], roles: { reviewer: { disabledAgentResources: { skills: ["role-cold"], extensions: [] } } }, projectRoles: [], schemas: [] }));
 
   const inputs: SessionInput[] = [];
-  const createSession = async (input: SessionInput): Promise<NativeSession> => {
+  const createSession = async (input: SessionInput): Promise<PiSession> => {
     inputs.push(input);
     return { sessionId: "cold-session", sessionFile: "/sessions/cold-session.jsonl", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
   };

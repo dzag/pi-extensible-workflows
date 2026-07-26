@@ -5,14 +5,16 @@ import { access, link, mkdir, open, readFile, readdir, rename, rm, stat, writeFi
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
-import type { BudgetApprovalRequest, JsonValue, LaunchSnapshot, RunRecord, WorkflowBudgetUsage, WorkflowRunEvent } from "./types.js";
+import type { BudgetApprovalRequest, JsonValue, LaunchSnapshot, RunRecord, WorkflowAgentSessionReference, WorkflowBudgetUsage, WorkflowRunEvent } from "./types.js";
 import type { OwnershipRecord } from "./agent-execution.js";
 import { WorkflowError } from "./types.js";
 import { loadLaunchSnapshot } from "./utils.js";
 
 export interface NativeSessionReference { sessionId: string; sessionFile: string }
 export interface EffectiveSystemPrompt { sessionId: string; attempt: number; turn: number; sha256: string; prompt: string }
-export interface PersistedRun extends RunRecord { nativeSessions: readonly NativeSessionReference[] }
+export interface PersistedRun extends RunRecord { agentSessions?: readonly WorkflowAgentSessionReference[]; nativeSessions?: readonly NativeSessionReference[] }
+export interface LegacyPersistedRun extends RunRecord { nativeSessions: readonly NativeSessionReference[]; agentSessions?: readonly WorkflowAgentSessionReference[] }
+type LoadedPersistedRun = PersistedRun;
 export interface RunSummaryAgent { id: string; name: string; label?: string; state: string; role?: string; attempts: number }
 export interface RunSummaryArtifacts { runDirectory: string; statePath: string; journalPath: string; snapshotPath: string; workflowPath: string; resultPath: string; summaryPath: string }
 export interface RunSummary { schemaVersion: 1; runId: string; sessionId: string; workflowName: string; state: RunRecord["state"]; createdAt: string; updatedAt: string; terminalAt?: string; usage: WorkflowBudgetUsage; agents: readonly RunSummaryAgent[]; error?: RunRecord["error"]; failedAt?: string; replayablePaths: readonly string[]; incompletePaths: readonly string[]; artifacts: RunSummaryArtifacts }
@@ -24,7 +26,7 @@ type Journal = { completed: Record<string, CompletedOperation>; awaiting?: Recor
 const TERMINAL_SUMMARY_STATES = new Set(["completed", "failed", "stopped"]);
 const EMPTY_USAGE: WorkflowBudgetUsage = { tokens: 0, costUsd: 0, durationMs: 0, agentLaunches: 0 };
 function summaryArtifacts(directory: string): RunSummaryArtifacts { return { runDirectory: directory, statePath: join(directory, "state.json"), journalPath: join(directory, "journal.json"), snapshotPath: join(directory, "snapshot.json"), workflowPath: join(directory, "workflow.js"), resultPath: join(directory, "result.json"), summaryPath: join(directory, "summary.json") }; }
-function summaryFromRun(run: PersistedRun, directory: string, journal: Journal, previous: Partial<RunSummary> | undefined, fallbackCreatedAt: string, now = new Date().toISOString()): RunSummary {
+function summaryFromRun(run: PersistedRun | LegacyPersistedRun, directory: string, journal: Journal, previous: Partial<RunSummary> | undefined, fallbackCreatedAt: string, now = new Date().toISOString()): RunSummary {
   const createdAt = typeof previous?.createdAt === "string" ? previous.createdAt : fallbackCreatedAt;
   const failedAt = run.failedAt ?? run.error?.failedAt;
   const replayablePaths = [...new Set([...(run.retry?.completedPaths ?? []), ...Object.keys(journal.completed)])];
@@ -231,7 +233,7 @@ export class RunStore {
     this.directory = join(runsDirectory(this.cwd, sessionId, home), safePart(runId));
   }
 
-  async create(run: PersistedRun, snapshot: Readonly<LaunchSnapshot>): Promise<void> {
+  async create(run: PersistedRun | LegacyPersistedRun, snapshot: Readonly<LaunchSnapshot>): Promise<void> {
     if (resolve(run.cwd) !== this.cwd || run.sessionId !== this.sessionId || run.id !== this.runId) throw new WorkflowError("INTERNAL_ERROR", "Run identity does not match its session-scoped store");
     const temporary = join(dirname(this.directory), `.${safePart(this.runId)}.${String(process.pid)}.${randomUUID()}.tmp`);
     await mkdir(dirname(this.directory), { recursive: true, mode: 0o700 });
@@ -270,7 +272,7 @@ export class RunStore {
     catch { return false; }
   }
 
-  async load(): Promise<{ run: PersistedRun; snapshot: Readonly<LaunchSnapshot> }> {
+  async load(): Promise<{ run: LoadedPersistedRun; snapshot: Readonly<LaunchSnapshot> }> {
     await this.stateWrite;
     const run = await json<PersistedRun>(join(this.directory, "state.json"));
     if (resolve(run.cwd) !== this.cwd || run.sessionId !== this.sessionId || run.id !== this.runId) throw new WorkflowError("RESUME_INCOMPATIBLE", "Persisted run belongs to another cwd or Pi session");

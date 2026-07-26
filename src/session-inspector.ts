@@ -157,6 +157,7 @@ async function agentReport(agent: PersistedRun["agents"][number]): Promise<Agent
   const fallbackThinking = agent.model.thinking;
   const attempts: AttemptReport[] = [];
   for (const attempt of agent.attemptDetails ?? []) {
+    if (!attempt.sessionFile) continue;
     const log = readTranscript(attempt.sessionFile);
     if (log) {
       const model = log.model ?? fallbackModel;
