@@ -2018,6 +2018,13 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
   };
   const coldResumeRun = async (run: NonNullable<ReturnType<typeof runs.get>>, hasUI: boolean, ui: { select?: (prompt: string, options: string[]) => Promise<string | undefined> }, trustedProject: boolean, context?: { model: { provider: string; id: string } | undefined; modelRegistry: ModelRegistryCapability | undefined; signal?: AbortSignal | undefined; resolvedAliases?: Readonly<Record<string, string>>; blockedAliases?: ReadonlySet<string>; blockedAliasTargets?: Readonly<Record<string, string>> }) => {
     const loaded = await run.store.load();
+    if (loaded.run.activeShells !== undefined) {
+      await persistRunState(run.store, run.metadata, (current) => {
+        const next = { ...current };
+        delete next.activeShells;
+        return next;
+      });
+    }
     await run.store.validateRetrySource();
     await run.store.validateBorrowedWorktrees();
     if (loaded.snapshot.identityVersion !== LAUNCH_SNAPSHOT_IDENTITY_VERSION) throw new WorkflowError("RESUME_INCOMPATIBLE", "Workflow launch snapshot identity version is incompatible");
@@ -2240,9 +2247,22 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       if (loaded.run.state === "completed" || loaded.run.state === "failed" || loaded.run.state === "stopped") { terminalRunStates.set(runId, loaded.run.state); continue; }
       if (loaded.run.state !== "interrupted" && loaded.run.state !== "budget_exhausted") {
         const previousState = loaded.run.state;
-        await store.updateState((current) => ["completed", "failed", "stopped", "interrupted", "budget_exhausted"].includes(current.state) ? current : { ...current, state: "interrupted" });
+        await store.updateState((current) => {
+          if (["completed", "failed", "stopped", "interrupted", "budget_exhausted"].includes(current.state)) return current;
+          const next = { ...current, state: "interrupted" as const };
+          delete next.activeShells;
+          return next;
+        });
         loaded = { ...loaded, run: (await store.load()).run };
         await eventPublisher.runState(store, loaded.snapshot.metadata, previousState, "interrupted", "session_shutdown");
+        loaded = { ...loaded, run: (await store.load()).run };
+      } else if (loaded.run.activeShells !== undefined) {
+        await store.updateState((current) => {
+          if (["completed", "failed", "stopped"].includes(current.state)) return current;
+          const next = { ...current };
+          delete next.activeShells;
+          return next;
+        });
         loaded = { ...loaded, run: (await store.load()).run };
       }
       const model = modelSpec(loaded.snapshot.models[0] ?? "", { provider: ctx.model?.provider ?? "", model: ctx.model?.id ?? "", thinking: pi.getThinkingLevel() });
