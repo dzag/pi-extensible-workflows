@@ -127,6 +127,19 @@ void test("captures exact recovery selections without executing recovery", async
   assert.deepEqual(recoverySelectionErrors({ id: "recovery-failed-run" }, extractParentOracle([{ type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "workflow_retry", arguments: { runId: "failed-run-42" } }] } }])), []);
   assert.deepEqual(recoverySelectionErrors({ id: "recovery-completed-worktree" }, extractParentOracle([{ type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "workflow", arguments: { name: "borrow-worktree", script: "return true;", parentRunId: "completed-run-42" } }] } }])), []);
 });
+void test("fixture scoring rejects completed-worktree recovery with wrong arguments", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-workflow-recovery-worktree-args-"));
+  const piPath = join(root, "fake-pi.mjs");
+  writeFileSync(piPath, `#!/usr/bin/env node\nimport { mkdirSync, writeFileSync } from "node:fs"; import { join } from "node:path"; const args = process.argv.slice(2); const value = name => args[args.indexOf(name) + 1]; const sessionDir = value("--session-dir"); const id = value("--session-id"); mkdirSync(sessionDir, { recursive: true }); const assistant = { role: "assistant", content: [{ type: "toolCall", name: "workflow", arguments: { name: "borrow-worktree", script: "return true;", parentRunId: "wrong-run" } }] }; writeFileSync(join(sessionDir, "parent.jsonl"), [{ type: "session", version: 3, id, cwd: process.cwd() }, { type: "message", message: assistant }].map(JSON.stringify).join("\\n") + "\\n");`);
+  chmodSync(piPath, 0o755);
+  try {
+    const result = await captureEvalCase({ case: { id: "recovery-completed-worktree", prompt: "borrow completed-run-42", maxCost: 1, expectedWorkflowCalls: 1, expectations: { firstTool: "workflow", firstBatchToolSequence: ["workflow"], parentToolSequence: ["workflow"], workflowCallCount: 1 } }, model: "fake/model", piCommand: piPath, maxCost: 1 });
+    assert.equal(result.status, "failed");
+    assert.ok(result.errors.some((error) => error.includes("completed-run-42")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 void test("fixture scoring rejects a recovery tool call with the wrong run ID", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-workflow-recovery-args-"));
   const piPath = join(root, "fake-pi.mjs");
