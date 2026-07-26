@@ -6,6 +6,7 @@ export * from "./registry.js";
 export * from "./execution.js";
 export * from "./host.js";
 export * from "./workflow-artifacts.js";
+export * from "./bundles.js";
 export { default } from "./host.js";
 export { acquireSessionLease, hasLiveSessionLease, listPersistedSessionIds, projectSessionsDirectory, projectStorageKey, RunStore, runsDirectory, SessionLease, structuralPath } from "./persistence.js";
 export type { AwaitingCheckpoint, CompletedOperation, NativeSessionReference, PendingWorkflowDecision, PersistedOwnershipNode, PersistedRun, RunSummary, RunSummaryAgent, RunSummaryArtifacts, WorktreeReference } from "./persistence.js";
