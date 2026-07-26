@@ -891,7 +891,7 @@ void test("workflow_retry replays a journaled shell mutation while completing in
   let diagnosticMessage: string | undefined;
   for (let attempt = 0; attempt < 1000; attempt += 1) {
     const loaded = await parent.load();
-    diagnosticMessage = messages.find((message) => message.includes("failure diagnostics:"));
+    diagnosticMessage = messages.find((message) => message.includes(" failed (runId="));
     if (loaded.run.state === "failed" && diagnosticMessage) break;
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
@@ -899,13 +899,12 @@ void test("workflow_retry replays a journaled shell mutation while completing in
   assert.equal((await parent.load()).run.error?.message, "later failure");
   assert.equal(readFileSync(marker, "utf8"), "x");
   assert.ok(diagnosticMessage);
-  const diagnostic = JSON.parse(diagnosticMessage.slice(diagnosticMessage.indexOf("{"))) as { runId: string; retry: { action: string; completedPaths: string[] } };
-  assert.equal(diagnostic.runId, parentRunId);
-  assert.equal(diagnostic.retry.action, `workflow_retry({ runId: ${JSON.stringify(parentRunId)} })`);
-  assert.ok(diagnostic.retry.completedPaths.some((path) => path.startsWith("shell/")));
+  const advertisedRunId = / failed \(runId=([^)]*)\):/.exec(diagnosticMessage)?.[1];
+  assert.equal(advertisedRunId, parentRunId);
+  assert.match(diagnosticMessage, /next action: workflow_retry\(\{ runId: "/);
   const journaled = await parent.replayableOperations();
   assert.ok(journaled.some(({ path }) => path.startsWith("shell/")));
-  const retried = await retry.execute("retry", { runId: diagnostic.runId }, undefined, undefined, context);
+  const retried = await retry.execute("retry", { runId: parentRunId }, undefined, undefined, context);
   const childRunId = retried.details.runId;
   assert.ok(childRunId && retried.details.parentRunId === parentRunId);
   const child = new RunStore(home, "session", childRunId, home);
