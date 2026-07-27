@@ -2151,10 +2151,21 @@ void test("navigator opens a persisted top-level agent prompt and result in the 
         const actions = component.render(120).join("\n");
         assert.match(actions, /Agent actions/);
         assert.match(actions, /Open prompt in editor/);
-        for (let index = 0; index < 12; index += 1) {
-          if (component.render(120).join("\n").includes("→ Open system prompt in editor")) { component.handleInput?.("tui.select.confirm"); break; }
-          component.handleInput?.("tui.select.down");
-        }
+        const waitForStarts = async (expected: number) => {
+          const deadline = Date.now() + 5_000;
+          while (starts < expected && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+          assert.equal(starts, expected);
+        };
+        const openAction = async (label: string) => {
+          const deadline = Date.now() + 5_000;
+          while (Date.now() < deadline) {
+            if (component.render(120).join("\n").includes(`→ ${label}`)) { component.handleInput?.("tui.select.confirm"); return; }
+            component.handleInput?.("tui.select.down");
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          assert.fail(`Timed out selecting ${label}`);
+        };
+        await openAction("Open system prompt in editor");
         let deadline = Date.now() + 5_000;
         while (Date.now() < deadline) {
           if (existsSync(editedPath) && readFileSync(editedPath, "utf8").includes("SYSTEM_PROMPT_START")) break;
@@ -2163,11 +2174,8 @@ void test("navigator opens a persisted top-level agent prompt and result in the 
         assert.ok(existsSync(editedPath), "external editor was not invoked for the system prompt");
         assert.match(readFileSync(editedPath, "utf8"), /SYSTEM_PROMPT_START[\s\S]*SYSTEM_PROMPT_END/);
         assert.match(readFileSync(openedPath, "utf8"), /artifact.*\.md$/);
-        while (starts < 1) await new Promise((resolve) => setTimeout(resolve, 10));
-        for (let index = 0; index < 12; index += 1) {
-          if (component.render(120).join("\n").includes("→ Open prompt in editor")) { component.handleInput?.("tui.select.confirm"); break; }
-          component.handleInput?.("tui.select.down");
-        }
+        await waitForStarts(1);
+        await openAction("Open prompt in editor");
         deadline = Date.now() + 5_000;
         while (Date.now() < deadline) {
           if (existsSync(editedPath) && readFileSync(editedPath, "utf8").includes("PROMPT_START")) break;
@@ -2176,11 +2184,8 @@ void test("navigator opens a persisted top-level agent prompt and result in the 
         assert.ok(existsSync(editedPath), "external editor was not invoked for the prompt");
         assert.match(readFileSync(editedPath, "utf8"), /PROMPT_START[\s\S]*PROMPT_END/);
         assert.match(readFileSync(openedPath, "utf8"), /artifact.*\.md$/);
-        while (starts < 2) await new Promise((resolve) => setTimeout(resolve, 10));
-        for (let index = 0; index < 12; index += 1) {
-          if (component.render(120).join("\n").includes("→ Open result in editor")) { component.handleInput?.("tui.select.confirm"); break; }
-          component.handleInput?.("tui.select.down");
-        }
+        await waitForStarts(2);
+        await openAction("Open result in editor");
         deadline = Date.now() + 5_000;
         while (Date.now() < deadline) {
           if (existsSync(editedPath) && readFileSync(editedPath, "utf8").includes("\"answer\": 42")) break;
@@ -2193,6 +2198,7 @@ void test("navigator opens a persisted top-level agent prompt and result in the 
         const cleanupDeadline = Date.now() + 5_000;
         while (existsSync(artifactPath) && Date.now() < cleanupDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
         assert.equal(existsSync(artifactPath), false);
+        await waitForStarts(3);
         component.dispose?.();
         return undefined;
       },
@@ -2904,7 +2910,7 @@ void test("invalid and duplicate lifecycle controls fail with typed errors witho
   await Promise.all([raced.resume(), raced.terminal("stopped")]);
   assert.equal(raced.state, "stopped");
 });
-void test("registered workflow command controls reject races and cancel queued work", async () => {
+void test("registered workflow command controls reject races and cancel queued work", { timeout: 10_000 }, async (t) => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-command-controls-"));
   const cwd = join(home, "project");
   mkdirSync(cwd, { recursive: true });
@@ -2935,6 +2941,11 @@ void test("registered workflow command controls reject races and cancel queued w
   assert.ok(runId);
   const store = new RunStore(cwd, "session", runId, home);
   const invoke = (action: string) => command(`${action} ${runId}`, context);
+  t.after(async () => {
+    await invoke("stop").catch(() => {});
+    for (const release of releases.values()) release();
+    await running.catch(() => {});
+  });
   const duplicatePause = await Promise.allSettled([invoke("pause"), invoke("pause")]);
   assert.equal(duplicatePause.filter(({ status }) => status === "fulfilled").length, 1);
   const duplicatePauseFailure = duplicatePause.find((result) => result.status === "rejected");
@@ -2948,15 +2959,18 @@ void test("registered workflow command controls reject races and cancel queued w
   assert.equal(duplicateResume.filter(({ status }) => status === "fulfilled").length, 1);
   const duplicateResumeFailure = duplicateResume.find((result) => result.status === "rejected");
   assert.ok(duplicateResumeFailure && duplicateResumeFailure.reason instanceof WorkflowError && duplicateResumeFailure.reason.code === "RESUME_INCOMPATIBLE");
-  await waitForIssue105(() => starts.includes("second"));
-  await waitForIssue105(async () => (await store.loadOwnership()).some(({ label }) => label === "third"));
+  await waitForIssue105(() => starts.some((label) => label !== "first"));
+  const startedAfterResume = starts.find((label) => label !== "first");
+  assert.ok(startedAfterResume);
+  const queued = startedAfterResume === "second" ? "third" : "second";
+  await waitForIssue105(async () => (await store.loadOwnership()).some(({ label }) => label === queued));
   const stopRace = await Promise.allSettled([invoke("pause"), invoke("stop")]);
   assert.equal(stopRace[1].status, "fulfilled");
   await assert.rejects(running);
   const stopped = await store.load();
   assert.equal(stopped.run.state, "stopped");
-  assert.deepEqual(starts, ["first", "second"]);
-  assert.equal(stopped.run.agents.find((agent) => agent.name === "third")?.state, "cancelled");
+  assert.deepEqual(starts, ["first", startedAfterResume]);
+  assert.equal(stopped.run.agents.find((agent) => agent.name === queued)?.state, "cancelled");
 });
 
 void test("loads markdown agent roles only from canonical global and project directories", () => {

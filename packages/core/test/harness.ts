@@ -74,6 +74,15 @@ function herdr(...args: string[]): string {
 function herdrJson(...args: string[]): unknown {
   return JSON.parse(herdr(...args));
 }
+const TEST_WORKSPACE_LABEL = "pi-workflows-tests";
+
+function testWorkspace(): string {
+  const listed = herdrJson("workspace", "list") as { result: { workspaces: Array<{ workspace_id: string; label: string }> } };
+  const existing = listed.result.workspaces.find(({ label }) => label === TEST_WORKSPACE_LABEL);
+  if (existing) return existing.workspace_id;
+  const created = herdrJson("workspace", "create", "--cwd", resolve("."), "--label", TEST_WORKSPACE_LABEL, "--no-focus") as { result: { workspace: { workspace_id: string } } };
+  return created.result.workspace.workspace_id;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -193,17 +202,11 @@ export class TestHarness {
 
     const extensionPath = resolve("dist/src/index.js");
 
-    // Split a new pane
-    // Split downward so the new pane keeps the full terminal width (the
-    // /workflow dashboard switches to narrow mode below 80 columns.
-    const splitResult = herdrJson(
-      "pane", "split", this.currentPane(), "--direction", "down", "--no-focus",
-    ) as { result: { pane: { pane_id: string } } };
-    this.paneId = splitResult.result.pane.pane_id;
-
-    // cd to the temp cwd, then launch pi with --session-id
-    herdr("pane", "run", this.paneId, `cd ${this.cwd}`);
-    await sleep(300);
+    const tabResult = herdrJson(
+      "tab", "create", "--workspace", testWorkspace(), "--cwd", this.cwd,
+      "--label", `pi-wf-${this.sessionId.slice(0, 8)}`, "--no-focus",
+    ) as { result: { root_pane: { pane_id: string } } };
+    this.paneId = tabResult.result.root_pane.pane_id;
 
     const modelFlag = this.model ? ` --model ${this.model}` : "";
     const cmd = `pi --no-extensions -e ${extensionPath} --no-builtin-tools${modelFlag} --session-id ${this.sessionId}`;
@@ -273,14 +276,5 @@ export class TestHarness {
     } catch { /* pane may already be gone */ }
     try { herdr("pane", "close", this.paneId); } catch { /* ok */ }
     this.paneId = undefined;
-  }
-
-  // ── Internals ──────────────────────────────────────────────────────────
-
-  private currentPane(): string {
-    const result = herdrJson("pane", "list") as { result: { panes: Array<{ pane_id: string; focused: boolean }> } };
-    const focused = result.result.panes.find((p) => p.focused);
-    if (!focused) throw new Error("No focused pane");
-    return focused.pane_id;
   }
 }

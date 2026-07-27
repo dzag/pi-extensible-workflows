@@ -22,7 +22,7 @@
     "build": "npm --prefix ../.. run build --workspace=../core && rm -rf dist && tsc -p tsconfig.json && chmod +x dist/src/cli.js",
     "inspect": "node dist/src/cli.js inspect",
     "test": "npm run build && TEST_FILES='dist/test/*.test.js' npm run test:run",
-    "test:run": "tmp=$(mktemp -d); trap 'rm -rf \"$tmp\"' EXIT; TMPDIR=\"$tmp\" node --test --test-concurrency=1 --test-reporter=dot $TEST_FILES",
+    "test:run": "files=${TEST_FILES:-dist/test/*.test.js}; printf '%s\\n' $files | xargs -n1 -P20 sh -c 'tmp=$(mktemp -d); TMPDIR=\"$tmp\" node --test --test-concurrency=1 --test-timeout=60000 --test-force-exit --test-reporter=dot \"$1\"; status=$?; rm -rf \"$tmp\"; exit $status' sh",
     "lint": "eslint .",
     "prepack": "npm run build"
   },
