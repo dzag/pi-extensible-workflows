@@ -1,6 +1,16 @@
 # Changelog
 ## Unreleased
 
+## [3.4.2] - 2026-07-27
+
+### Recovery and navigation
+
+- Local workflow session disposal now waits for all in-flight prompts before releasing native resources ([#147](https://github.com/vekexasia/pi-extensible-workflows/issues/147)).
+- Agent system prompts are now opened through Agent actions instead of being rendered directly in the workflow TUI details ([#153](https://github.com/vekexasia/pi-extensible-workflows/issues/153)).
+
+### Verification
+
+- `npm run check` passes.
 ## [3.4.1] - 2026-07-26
 
 ### Recovery and reliability
@@ -126,7 +136,7 @@
 - Runtime acceptance suite: 24 tests passing.
 - Build, lint, documentation checks, and package dry-run passing.
 
-[3.4.1]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.4.0...v3.4.1
+[3.4.2]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.4.1...v3.4.2
 [3.4.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.3.0...v3.4.0
 [3.2.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.0.0...v3.1.0
