@@ -962,16 +962,6 @@ void test("resuming a launched trusted-project run keeps per-run concurrency and
   await shutdown?.();
 });
 
-void test("/workflow doctor formats the shared doctor report with active session tools", async () => {
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
-  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, getThinkingLevel: () => "medium", getActiveTools: () => ["read", "workflow"], on() {} } as never);
-  let output = "";
-  await commands[0]?.handler("doctor", { cwd: mkdtempSync(join(tmpdir(), "pi-extensible-workflows-slash-doctor-")), ui: { notify(text: string) { output = text; } } } as never);
-  assert.match(output, /^# pi-extensible-workflows doctor/m);
-  assert.match(output, /## Active tools\n- `read`/);
-  assert.doesNotMatch(output, /- `workflow`/);
-});
-
 void test("registered extension functions can run by name", async () => {
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> }> = [];
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never);

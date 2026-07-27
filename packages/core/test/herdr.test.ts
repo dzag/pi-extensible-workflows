@@ -1,3 +1,4 @@
+// NOTE: Excluded pending the herdr extraction.
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

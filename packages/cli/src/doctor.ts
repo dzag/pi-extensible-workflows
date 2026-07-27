@@ -31,10 +31,10 @@ import {
   type WorkflowRoleDirectoryRegistration,
   type WorkflowSettings,
   type WorkflowSettingsSources,
-} from "./index.js";
-import type { AgentDefinition } from "./agent-execution.js";
-import { loadingRegistry, type WorkflowRegistryApi } from "./registry.js";
-import { disabledResources, unmatchedResourcePatterns } from "./utils.js";
+} from "pi-extensible-workflows";
+import type { AgentDefinition } from "pi-extensible-workflows";
+import { loadingRegistry, type WorkflowRegistryApi } from "pi-extensible-workflows";
+import { disabledResources, unmatchedResourcePatterns } from "pi-extensible-workflows";
 
 export type DoctorSeverity = "error" | "warning";
 export interface DoctorDiagnostic { severity: DoctorSeverity; code: string; message: string; source?: string; hint?: string }
