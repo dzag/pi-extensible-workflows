@@ -967,6 +967,33 @@ void test("scheduler flush waits for terminal ownership persistence", async () =
   await scheduler.flush();
   assert.equal((writes.at(-1)?.[0] as { state: string }).state, "completed");
 });
+void test("releases consumed scheduler result payloads while retaining node metadata", async () => {
+  const scheduler = new FairAgentScheduler(async ({ prompt }) => ({ prompt, payload: "x".repeat(1024 * 1024) }), 1);
+  scheduler.addRun("run", 1);
+  for (let index = 0; index < 200; index += 1) {
+    const agent = scheduler.spawn("run", `work-${String(index)}`, { label: "worker", cwd: "/repo", tools: ["read"], model: "openai/gpt" });
+    const outcome = await agent.result;
+    assert.equal(outcome.ok, true);
+    scheduler.releaseResult(agent.id);
+  }
+  assert.equal(scheduler.snapshot().length, 200);
+  const last = scheduler.snapshot().at(-1);
+  assert.deepEqual(last && { id: last.id, state: last.state, label: last.options.label, model: last.options.model, tools: last.options.tools }, { id: "run:200", state: "completed", label: "worker", model: "openai/gpt", tools: ["read"] });
+});
+void test("collected nested results are one-shot after payload release", async () => {
+  const scheduler = new FairAgentScheduler(async ({ prompt, signal }) => {
+    if (prompt === "parent") { await new Promise<void>((resolve) => { signal.addEventListener("abort", () => { resolve(); }, { once: true }); }); throw new WorkflowError("CANCELLED", "cancelled"); }
+    return { prompt, payload: "x".repeat(1024 * 1024) };
+  }, 2);
+  scheduler.addRun("run", 2);
+  const parent = scheduler.spawn("run", "parent", { label: "parent", cwd: "/repo", tools: [] });
+  const child = scheduler.spawn("run", "child", { label: "child", cwd: "/repo", tools: [] }, parent.id);
+  const outcome = await scheduler.result(parent.id, child.id);
+  assert.equal(outcome.ok, true);
+  await assert.rejects(scheduler.result(parent.id, child.id), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_FAILED" && /one-shot/.test(error.message));
+  scheduler.cancel(parent.id);
+  assert.equal((await parent.result).ok, false);
+});
 
 
 void test("nested ownership releases permits, contains child failure, and blocks escalation", async () => {

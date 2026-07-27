@@ -2112,6 +2112,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const outcome = await spawned.result.finally(() => { agentSignal.removeEventListener("abort", cancel); });
       if (!outcome.ok) throw new WorkflowError(outcome.error.code as WorkflowErrorCode, outcome.error.message);
       await store.complete(path, outcome.value);
+      scheduler.releaseResult(spawned.id);
       return outcome.value;
     } finally { await lifecycle.leave(); }
   };
