@@ -2,11 +2,11 @@ import { createHash } from "node:crypto";
 import { lstat, readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { validateBudget } from "./budget.js";
-import { RUN_STATES, type RunState } from "./types.js";
-import { jsonValue, validateModelAliases } from "./utils.js";
-import { validateSchema } from "./validation.js";
-import { acquireSessionLease, hasLiveSessionLease, projectSessionsDirectory, RunStore, type PersistedRun, type SessionLease } from "./persistence.js";
+import { validateBudget } from "pi-extensible-workflows";
+import { RUN_STATES, type RunState } from "pi-extensible-workflows";
+import { jsonValue, validateModelAliases } from "pi-extensible-workflows";
+import { validateSchema } from "pi-extensible-workflows";
+import { acquireSessionLease, hasLiveSessionLease, projectSessionsDirectory, RunStore, type PersistedRun, type SessionLease } from "pi-extensible-workflows/persistence";
 
 const TERMINAL_STATES = new Set<RunState>(["completed", "failed", "stopped"]);
 const DAY_MS = 24 * 60 * 60 * 1000;

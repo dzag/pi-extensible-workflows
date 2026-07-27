@@ -2624,12 +2624,6 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     description: "Inspect and control workflows for this Pi session",
     handler: async (args, ctx) => {
       const command = args.trim();
-      if (command === "doctor") {
-        const { doctor, doctorExitCode, formatDoctorReport } = await import("./doctor.js");
-        const report = await doctor({ cwd: ctx.cwd, activeTools: pi.getActiveTools().filter((tool) => tool !== "workflow" && tool !== "workflow_respond") });
-        ctx.ui.notify(formatDoctorReport(report), doctorExitCode(report) ? "warning" : "info");
-        return;
-      }
       await ensureSessionLease(ctx.cwd, ctx.sessionManager.getSessionId());
       const loadStores = async () => {
         const entries = await Promise.all((await listRunIds(ctx.cwd, ctx.sessionManager.getSessionId(), home)).map(async (runId) => {
@@ -2640,7 +2634,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         return entries.filter((entry): entry is { store: RunStore; loaded: { run: PersistedRun; snapshot: Readonly<LaunchSnapshot> } } => entry !== undefined);
       };
       let stores = await loadStores();
-      const usage = "Usage: /workflow [doctor|model-aliases], or /workflow pause|resume|stop|approve|reject|delete <run-id> [checkpoint-name]. Approve/reject are for checkpoints only; use workflow_respond with a proposalId or the navigator's budget controls for budget decisions. Use workflow_resume for budget patches."
+      const usage = "Usage: /workflow [model-aliases], or /workflow pause|resume|stop|approve|reject|delete <run-id> [checkpoint-name]. Approve/reject are for checkpoints only; use workflow_respond with a proposalId or the navigator's budget controls for budget decisions. Use workflow_resume for budget patches."
       const setWorkflowStatus = (text: string | undefined) => {
         const setStatus = uiHostCapabilities(ctx.ui)?.setStatus;
         setStatus?.call(ctx.ui, "workflow-stop", text);
