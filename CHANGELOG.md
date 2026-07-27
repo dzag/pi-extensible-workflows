@@ -1,6 +1,10 @@
 # Changelog
 ## Unreleased
 
+### Breaking changes
+
+- Removed the exported Herdr pane `inspect`, `transcript`, and `fork` actions. Pane inspection was already non-functional after the CLI extraction, while attempt forking did work; `piewf inspect` and `piewf transcript` remain available as ordinary CLI commands.
+
 ### Packaging
 
 - Reorganized the repository as an npm-workspaces monorepo while keeping `pi-extensible-workflows` as the published core package.

@@ -12,6 +12,5 @@
     "noEmitOnError": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"],
-  "exclude": ["test/herdr.test.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts"]
 }

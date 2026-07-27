@@ -1,9 +1,8 @@
 import { execFile } from "node:child_process";
-import { fileURLToPath } from "node:url";
 
-export type HerdrPaneAction = "inspect" | "transcript" | "fork" | "live";
+export type HerdrPaneAction = "live";
 export type HerdrAgentState = "idle" | "working" | "blocked" | "unknown";
-export interface HerdrPaneRequest { action: HerdrPaneAction; cwd: string; sessionId?: string; original?: string; command?: string; paneId?: string; readOnly?: boolean }
+export interface HerdrPaneRequest { action: HerdrPaneAction; cwd: string; command: string; paneId?: string }
 export interface HerdrWorkspacePaneRequest { cwd: string; workspaceLabel: string; tabLabel: string; command: string }
 export interface HerdrWorkspacePane { workspaceId: string; tabId: string; paneId: string }
 export type HerdrCommandRunner = (args: readonly string[]) => Promise<string>;
@@ -47,16 +46,8 @@ function splitPaneId(value: unknown): string {
 }
 
 function commandFor(request: HerdrPaneRequest): string {
-  const cliPath = fileURLToPath(new URL("./cli.js", import.meta.resolve("pi-extensible-workflows")));
   const environment = ["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"].flatMap((name) => process.env[name] === undefined ? [] : [`${name}=${shellQuote(process.env[name] ?? "")}`]);
-  const command = request.action === "inspect"
-    ? [shellQuote(process.execPath), shellQuote(cliPath), "inspect", shellQuote(request.sessionId ?? "")]
-    : request.action === "transcript"
-      ? [shellQuote(process.execPath), shellQuote(cliPath), "transcript", shellQuote(request.original ?? "")]
-      : request.action === "fork"
-        ? ["pi", "--fork", shellQuote(request.original ?? ""), ...(request.readOnly ? ["--tools", shellQuote("read,grep,find,ls")] : [])]
-        : [request.command ?? ""];
-  return `cd ${shellQuote(request.cwd)} && ${environment.length ? `${environment.join(" ")} ` : ""}${command.join(" ")}`;
+  return `cd ${shellQuote(request.cwd)} && ${environment.length ? `${environment.join(" ")} ` : ""}${request.command}`;
 }
 
 export function herdrPaneCommand(request: HerdrPaneRequest): string { return commandFor(request); }
@@ -65,7 +56,7 @@ export async function openHerdrPane(request: HerdrPaneRequest, runner: HerdrComm
   const targetPane = request.paneId ?? herdrPaneId();
   if (!targetPane) throw new Error("Pane actions require a Herdr-managed session with HERDR_PANE_ID.");
   if (!request.cwd) throw new Error("Pane actions require a working directory.");
-  if ((request.action === "inspect" && !request.sessionId) || (request.action === "transcript" && !request.original) || (request.action === "fork" && !request.original) || (request.action === "live" && !request.command)) throw new Error("Pane action is missing its session source.");
+  if (!request.command) throw new Error("Pane action is missing its command.");
   const layout = paneLayout(json(await runner(["pane", "layout", "--pane", targetPane])), targetPane);
   const direction = layout.width > layout.height ? "right" : "down";
   const paneId = splitPaneId(json(await runner(["pane", "split", targetPane, "--direction", direction, "--no-focus"])));
