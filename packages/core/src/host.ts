@@ -2448,7 +2448,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         if (choice && choice !== "Skip") {
           const toResume = choice === "Resume all" ? interrupted : interrupted.filter((_, i) => labels[i] === choice);
           for (const run of toResume) {
-            try { await coldResumeRun(run, true, ctx.ui, projectTrusted(ctx), ctx, undefined, false); ctx.ui.notify(`Resumed workflow ${run.metadata.name}.`, "info"); }
+            try { await coldResumeRun(run, true, ctx.ui, projectTrusted(ctx), ctx); ctx.ui.notify(`Resumed workflow ${run.metadata.name}.`, "info"); }
             catch (err) { ctx.ui.notify(`Cannot resume ${run.metadata.name}: ${err instanceof Error ? err.message : String(err)}`, "warning"); }
           }
         }

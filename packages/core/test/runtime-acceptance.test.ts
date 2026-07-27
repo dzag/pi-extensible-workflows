@@ -1022,6 +1022,21 @@ void test("recovery inherits persisted launch mode for resume and retry", { time
   assert.equal(foregroundChild.snapshot.launchMode, "foreground");
 });
 
+void test("session_start foreground recovery waits for completion", { timeout: 5000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-session-start-foreground-"));
+  const cwd = join(home, "project");
+  const sessionId = "session";
+  const runId = "session-start-foreground";
+  const store = new RunStore(cwd, sessionId, runId, home);
+  await store.create({ id: runId, workflowName: runId, cwd, sessionId, state: "interrupted", agents: [], agentSessions: [] }, createLaunchSnapshot({ script: "return await checkpoint({ name: 'approval', prompt: 'Approve?', context: {} });", args: null, metadata: { name: runId }, launchMode: "foreground", settings: { concurrency: 1 }, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+  let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  const context = { cwd, hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => sessionId }, ui: { select: async (prompt: string, options: string[]) => { if (prompt.startsWith("1 interrupted")) return options[0]; await new Promise<void>((resolve) => setTimeout(resolve, 100)); return "Approve"; }, notify() {} } };
+  workflowExtension({ registerTool() {}, registerCommand() {}, on(name: string, handler: never) { if (name === "session_start") start = handler; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  assert.ok(start);
+  await start({}, context);
+  assert.equal((await store.load()).run.state, "completed");
+});
+
 void test("interactive interrupted recovery stays detached from foreground completion", { timeout: 10000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-interrupted-recovery-"));
   const cwd = join(home, "project");
