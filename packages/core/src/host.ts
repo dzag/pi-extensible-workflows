@@ -70,7 +70,7 @@ const WORKFLOW_ERROR_PROSE: Record<WorkflowErrorCode, (detail: string) => string
   UNKNOWN_TOOL: (detail) => `The workflow requested the unavailable tool ${detail.replace(/^Unknown tool:\s*/, "")}.`,
   UNKNOWN_AGENT_TYPE: (detail) => `The workflow requested the unavailable agent role ${detail.replace(/^Unknown agent role:\s*/, "")}.`,
   RUN_OWNED: (detail) => /already owned|active ownership/.test(detail) ? "The workflow session is already in use." : `The workflow session is already in use: ${detail}.`,
-  RUN_NOT_FOUND: (detail) => `The workflow run was not found: ${detail}.`,
+  RUN_NOT_FOUND: (detail) => /^Unknown workflow run\b/.test(detail) ? "The workflow run was not found." : `The workflow run was not found: ${detail}.`,
   RPC_LIMIT_EXCEEDED: (detail) => `The workflow communication data exceeded its size limit: ${detail}.`,
   SHELL_FAILED: (detail) => `The workflow shell command failed: ${detail}.`,
   AGENT_TIMEOUT: (detail) => `The workflow agent timed out: ${detail}.`,
@@ -172,7 +172,7 @@ export function formatWorkflowPreview(args: { script?: unknown; workflow?: unkno
 }
 export const WORKFLOW_TOOL_LABEL = "Workflow";
 export const WORKFLOW_TOOL_DESCRIPTION = "Run a deterministic JavaScript workflow with a named inline or file-backed parallel-to-summary path by default"
-export const WORKFLOW_TOOL_PROMPT_SNIPPET = "Run a deterministic, resumable JavaScript workflow. Prefer a named inline script that fans out independent work with parallel(...), awaits the keyed results before interpolating them into one summarizing agent(...), and returns. Inline and file-backed launches require a non-empty name; registered function launches may use name as an optional run label and otherwise use workflow as the run name. Advanced controls include registered functions, outputSchema, budgets, checkpoints, worktrees, retry/resume, CLI export, and pipelines. Use workflow_retry with an explicit failed run ID; parentRunId only reuses named worktrees. Runs are in the background by default; completion arrives as a follow-up message. Set foreground: true when the caller must wait for the final value. If a foreground call detaches before its result is accepted, its terminal success or failure is promoted to one follow-up message. Foreground results include the completed run ID. Recovery inherits the source launch mode; legacy snapshots without launchMode recover in the background. Set foreground: true or false on workflow_resume/workflow_retry to override it; foreground recovery waits for terminal value and run details, while background recovery returns immediately with a follow-up. After failure follow-ups, especially CANCELLED or interrupted runs, call workflow_status({ runId }) before recovery or replacement work to recheck authoritative state. Recovery map: agent(..., { retries }) reruns one agent call in the same run for transient failures; workflow_retry({ runId, foreground? }) replays a failed run into a child; workflow_resume({ runId, budget?, foreground? }) continues a budget_exhausted run; parentRunId on a new launch only borrows named worktrees and never replays or resumes.";
+export const WORKFLOW_TOOL_PROMPT_SNIPPET = "Run a deterministic, resumable JavaScript workflow. Prefer a named inline script that fans out independent work with parallel(...), awaits the keyed results before interpolating them into one summarizing agent(...), and returns. Inline and file-backed launches require a non-empty name; registered function launches may use name as an optional run label and otherwise use workflow as the run name. Advanced controls include registered functions, outputSchema, budgets, checkpoints, worktrees, retry/resume, CLI export, and pipelines. Use workflow_retry with an explicit failed run ID; parentRunId only reuses named worktrees. Runs are in the background by default; completion arrives as a follow-up message. Set foreground: true when the caller must wait for the final value. If a foreground call detaches before its result is accepted, its terminal success or failure is promoted to one follow-up message. Foreground results include the completed run ID. Recovery inherits the source launch mode; legacy snapshots without launchMode recover in the background. Set foreground: true or false on workflow_resume/workflow_retry to override it; foreground recovery waits for terminal value and run details, while background recovery returns immediately and delivers completion or failure as a follow-up. After failure follow-ups, especially CANCELLED or interrupted runs, call workflow_status({ runId }) before recovery or replacement work, then pass its state as expectedState to workflow_retry/workflow_resume so recovery cannot act on a state that changed. Recovery map: agent(..., { retries }) reruns one agent call in the same run for transient failures; workflow_retry({ runId, expectedState?, foreground? }) replays a failed run into a child; workflow_resume({ runId, expectedState?, budget?, foreground? }) continues a budget_exhausted run; parentRunId on a new launch only borrows named worktrees and never replays or resumes."
 function workflowRecoveryGuidance(action: "resume" | "retry", state: RunState): string {
   if (action === "resume") {
     if (state === "failed") return "Failed workflow runs must use workflow_retry({ runId })";
@@ -187,6 +187,9 @@ function workflowRecoveryGuidance(action: "resume" | "retry", state: RunState): 
   if (state === "interrupted") return "Interrupted workflow runs use /workflow resume, not workflow_retry";
   return `Only failed workflow runs can be retried; source is ${state}`;
 }
+function assertExpectedWorkflowState(expectedState: string | undefined, actualState: RunState): void {
+  if (expectedState !== undefined && expectedState !== actualState) throw new WorkflowError("RESUME_INCOMPATIBLE", `Workflow run state changed: expected state ${expectedState}, actual state ${actualState}`);
+}
 export const WORKFLOW_TOOL_PARAMETERS = Type.Object({
   name: Type.Optional(Type.String({ description: "Optional run label; required and non-empty for inline or file-backed launches, defaults to the registered function name when omitted" })),
   description: Type.Optional(Type.String({ description: "Optional human-readable workflow description" })),
@@ -200,7 +203,7 @@ export const WORKFLOW_TOOL_PARAMETERS = Type.Object({
   parentRunId: Type.Optional(Type.String({ description: "Advanced: terminal run whose named worktrees may be reused" })),
 });
 export const WORKFLOW_STATUS_PARAMETERS = Type.Object({ runId: Type.String({ description: "Workflow run ID visible in the current project" }) }, { additionalProperties: false });
-export const WORKFLOW_RETRY_PARAMETERS = Type.Object({ runId: Type.String({ description: "Explicit failed workflow run ID" }), foreground: Type.Optional(Type.Boolean({ description: "Override the source launch mode for this recovery" })) });
+export const WORKFLOW_RETRY_PARAMETERS = Type.Object({ runId: Type.String({ description: "Explicit failed workflow run ID" }), expectedState: Type.Optional(Type.String({ description: "Persisted source state observed before recovery" })), foreground: Type.Optional(Type.Boolean({ description: "Override the source launch mode for this recovery" })) });
 
 type WorkflowToolUpdate = { content: [{ type: "text"; text: string }]; details: { runId: string; run: PersistedRun } };
 export type WorkflowPhaseState = "not started" | "running" | "completed" | "failed" | "cancelled" | "interrupted" | "budget_exhausted";
@@ -1949,10 +1952,10 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const cwd = typeof host.cwd === "string" ? host.cwd : undefined;
     if (!cwd || !runId.trim()) throw new WorkflowError("RUN_NOT_FOUND", `Unknown workflow run ${runId} in the current project`);
     for (const sessionId of await listPersistedSessionIds(cwd, home)) {
-      if (!(await listRunIds(cwd, sessionId, home)).includes(runId)) continue;
+      if (!(await listRunIds(cwd, sessionId, home, false)).includes(runId)) continue;
       const store = new RunStore(cwd, sessionId, runId, home);
       try {
-        const run = withLiveActivities((await store.load()).run);
+        const run = withLiveActivities(await store.loadStatus());
         const failedAt = run.failedAt ?? run.error?.failedAt;
         return {
           runId: run.id, workflowName: run.workflowName, state: run.state,
@@ -1963,9 +1966,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           ...(run.delivery ? { delivery: { mode: run.delivery.mode, state: run.delivery.state } } : {}),
           agents: run.agents.map((agent) => ({ id: agent.id, ...(agent.label === undefined ? {} : { label: agent.label }), path: agent.path, state: agent.state, ...(agent.activity === undefined ? {} : { activity: agent.activity }), ...(agent.lastEventAt === undefined ? {} : { lastEventAt: agent.lastEventAt }), ...(agent.accounting === undefined ? {} : { accounting: agent.accounting }) })),
         };
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw error;
+      } catch {
+        continue;
       }
     }
     throw new WorkflowError("RUN_NOT_FOUND", `Unknown workflow run ${runId} in the current project`);
@@ -2292,7 +2294,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     if (completed) return { state: "completed", approved: true, value: completed.value, run: (await run.store.load()).run };
     return { state: "running", approved: true };
   };
-  const resumeWorkflowRun = async (runId: string, rawPatch?: unknown, context?: unknown, signal?: AbortSignal, modeOverride?: boolean, waitForCompletion = true): Promise<Record<string, JsonValue>> => {
+  const resumeWorkflowRun = async (runId: string, rawPatch?: unknown, context?: unknown, signal?: AbortSignal, modeOverride?: boolean, waitForCompletion = true, expectedState?: string): Promise<Record<string, JsonValue>> => {
     const run = runs.get(runId);
     if (!run) {
       const host = object(context) ? context : {};
@@ -2302,6 +2304,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       if (cwd && sessionId) {
         try {
           const state = (await new RunStore(cwd, sessionId, runId, home).load()).run.state;
+          assertExpectedWorkflowState(expectedState, state);
           throw new WorkflowError("RESUME_INCOMPATIBLE", workflowRecoveryGuidance("resume", state));
         } catch (error) {
           if (error instanceof WorkflowError) throw error;
@@ -2310,6 +2313,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       throw new WorkflowError("RESUME_INCOMPATIBLE", `Unknown workflow run ${runId} in the current project and Pi session`);
     }
     const loaded = await run.store.load();
+    assertExpectedWorkflowState(expectedState, loaded.run.state);
     if (loaded.run.state !== "budget_exhausted") throw new WorkflowError("RESUME_INCOMPATIBLE", workflowRecoveryGuidance("resume", loaded.run.state));
     const currentBudget = validateBudget(loaded.run.budget ?? loaded.snapshot.budget);
     const patch = rawPatch === undefined ? {} : validateBudgetPatch(rawPatch);
@@ -2337,7 +2341,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     return { state: "running" };
   };
   const retryReservations = new Set<string>();
-  const retryWorkflowRun = async (runId: string, context: unknown, signal?: AbortSignal, modeOverride?: boolean): Promise<{ runId: string; parentRunId: string; state: "running" | "completed"; value?: JsonValue; run?: PersistedRun }> => {
+  const retryWorkflowRun = async (runId: string, context: unknown, signal?: AbortSignal, modeOverride?: boolean, expectedState?: string): Promise<{ runId: string; parentRunId: string; state: "running" | "completed"; value?: JsonValue; run?: PersistedRun }> => {
     if (typeof runId !== "string" || !runId.trim()) throw new WorkflowError("RESUME_INCOMPATIBLE", "workflow_retry requires an explicit run ID");
     const host = object(context) ? context : {};
     const cwd = typeof host.cwd === "string" ? host.cwd : undefined;
@@ -2348,6 +2352,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const sourceStore = new RunStore(cwd, sessionId, runId, home);
     let loaded: { run: PersistedRun; snapshot: Readonly<LaunchSnapshot> };
     try { loaded = await sourceStore.load(); } catch (error) { throw new WorkflowError("RESUME_INCOMPATIBLE", `Unknown workflow run ${runId} in the current project and Pi session: ${errorText(error)}`); }
+    assertExpectedWorkflowState(expectedState, loaded.run.state);
     if (loaded.run.state !== "failed") throw new WorkflowError("RESUME_INCOMPATIBLE", workflowRecoveryGuidance("retry", loaded.run.state));
     if (loaded.run.retry && (typeof loaded.run.retry.sourceRunId !== "string" || !loaded.run.retry.sourceRunId || typeof loaded.run.retry.lineageRootRunId !== "string" || !loaded.run.retry.lineageRootRunId || !Array.isArray(loaded.run.retry.completedPaths) || loaded.run.retry.completedPaths.some((path) => typeof path !== "string") || !Array.isArray(loaded.run.retry.incompletePaths) || loaded.run.retry.incompletePaths.some((path) => typeof path !== "string") || !Array.isArray(loaded.run.retry.namedWorktrees) || loaded.run.retry.namedWorktrees.some((name) => typeof name !== "string"))) throw new WorkflowError("RESUME_INCOMPATIBLE", "The source retry provenance is incomplete");
     const lineageRootRunId = loaded.run.retry?.lineageRootRunId ?? loaded.run.id;
@@ -2423,7 +2428,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     description: "Retry a failed workflow run by replaying its completed structural operations",
     parameters: WORKFLOW_RETRY_PARAMETERS,
     async execute(_id, params, signal, _onUpdate, ctx) {
-      try { const result = await retryWorkflowRun(params.runId, ctx, signal, params.foreground); return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result }; }
+      try { const result = await retryWorkflowRun(params.runId, ctx, signal, params.foreground, params.expectedState); return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result }; }
       catch (error) { throw mainAgentError(error); }
     },
     renderCall(args, theme) { return styledTextBlock(workflowControlCall("workflow_retry", args, theme)); },
@@ -2433,9 +2438,9 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     name: "workflow_resume",
     label: "Workflow Resume",
     description: "Resume an exhausted workflow with unchanged or patched aggregate budgets",
-    parameters: Type.Object({ runId: Type.String(), budget: Type.Optional(Type.Unknown()), foreground: Type.Optional(Type.Boolean({ description: "Override the source launch mode for this recovery" })) }, { additionalProperties: false }),
+    parameters: Type.Object({ runId: Type.String(), expectedState: Type.Optional(Type.String({ description: "Persisted source state observed before recovery" })), budget: Type.Optional(Type.Unknown()), foreground: Type.Optional(Type.Boolean({ description: "Override the source launch mode for this recovery" })) }, { additionalProperties: false }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      try { const result = await resumeWorkflowRun(params.runId, params.budget, ctx, signal, params.foreground); return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result }; }
+      try { const result = await resumeWorkflowRun(params.runId, params.budget, ctx, signal, params.foreground, true, params.expectedState); return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: result }; }
       catch (error) { throw mainAgentError(error); }
     },
     renderCall(args, theme) { return styledTextBlock(workflowControlCall("workflow_resume", args, theme)); },

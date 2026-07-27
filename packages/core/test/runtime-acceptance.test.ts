@@ -1096,5 +1096,12 @@ void test("workflow_status returns a safe current-project summary across session
   assert.equal(result.content[0]?.text, JSON.stringify(result.details));
   const crossSession = await status.execute("status", { runId: "run-other" }, undefined, undefined, context);
   assert.deepEqual(crossSession.details, { runId: "run-other", workflowName: "other-status", state: "interrupted", agents: [] });
+  const legacy = new RunStore(cwd, "legacy-session", "run-legacy", home);
+  await legacy.create({ id: "run-legacy", workflowName: "legacy-status", cwd, sessionId: "legacy-session", state: "interrupted", agents: [], agentSessions: [] }, snapshot("legacy-status"));
+  writeFileSync(join(legacy.directory, "state.json"), JSON.stringify({ id: "run-legacy", workflowName: "legacy-status", cwd, sessionId: "legacy-session", state: "interrupted", nativeSessions: [], agents: [] }));
+  const legacyResult = await status.execute("status", { runId: "run-legacy" }, undefined, undefined, context);
+  assert.deepEqual(legacyResult.details, { runId: "run-legacy", workflowName: "legacy-status", state: "interrupted", agents: [] });
+  writeFileSync(join(legacy.directory, "state.json"), "{\n");
+  await assert.rejects(status.execute("status", { runId: "run-legacy" }, undefined, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RUN_NOT_FOUND");
   await assert.rejects(status.execute("status", { runId: "missing" }, undefined, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RUN_NOT_FOUND");
 });

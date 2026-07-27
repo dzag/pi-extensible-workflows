@@ -35,14 +35,14 @@ Await `parallel(...)` or `pipeline(...)` results before interpolation. Runs are 
 A reviewed JavaScript file on disk can use `scriptPath` instead of `script`.
 
 Recovery map:
-  - `workflow_status({ runId })` reads a compact authoritative summary for a run in the current project, across sessions; after failure follow-ups, especially `CANCELLED` or `interrupted`, call it before recovery or replacement work;
+  - `workflow_status({ runId })` reads a compact authoritative summary for a run in the current project, across sessions; after failure follow-ups, especially `CANCELLED` or `interrupted`, call it before recovery or replacement work and pass its returned `state` as `expectedState`;
   - `agent(..., { retries })` reruns one agent call in the same run for transient failures;
-  - `workflow_retry({ runId, foreground? })` replays a failed run into a child;
-  - `workflow_resume({ runId, budget?, foreground? })` continues a `budget_exhausted` run;
+  - `workflow_retry({ runId, expectedState?, foreground? })` replays a failed run into a child;
+  - `workflow_resume({ runId, expectedState?, budget?, foreground? })` continues a `budget_exhausted` run;
   - recovery inherits the source snapshot's foreground/background launch mode, while legacy snapshots without `launchMode` recover in background; set `foreground: true` or `false` to override it;
   - `parentRunId` on a new launch only borrows named worktrees and never replays or resumes.
 
-For an explicitly failed run, use the exact `runId` from failure diagnostics with `workflow_retry({ runId, foreground: <prevValue> })`: diagnostics list replayable and incomplete paths, artifacts, and valid named worktrees; the tool creates a linked child, replays completed agent, shell, function, and checkpoint operations, and executes incomplete work. External side effects before failure are not guaranteed exactly once.
+For an explicitly failed run, call `workflow_status({ runId })` first and pass its returned state as `expectedState` to `workflow_retry({ runId, expectedState, foreground: <prevValue> })`: diagnostics list replayable and incomplete paths, artifacts, and valid named worktrees; the tool creates a linked child, replays completed agent, shell, function, and checkpoint operations, and executes incomplete work. External side effects before failure are not guaranteed exactly once.
 `workflow_stop` requires the exact run ID; `workflow_status({ runId })` returns only run metadata, state, delivery, budget/usage when configured, and agent summary shims, not transcripts or session payloads. Foreground launches and foreground recovery retain their terminal value and completed `runId`, while background launches and recovery return `runId` immediately and deliver completion or failure as a follow-up. Retry versus per-agent `retries` and `workflow_resume` is always explicit.
 Inspect tool `workflow_catalog` result at least once before creating the first workflow for a task. Make sure to call workflow_catalog more than once if you need to inspect details about a global function.
 

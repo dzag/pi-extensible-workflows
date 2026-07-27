@@ -1,6 +1,10 @@
 # Changelog
 ## Unreleased
 
+### New capabilities
+
+- Added `workflow_status({ runId })` summaries across current-project sessions and guarded retry/resume recovery with an optional `expectedState` ([#164](https://github.com/vekexasia/pi-extensible-workflows/issues/164)).
+
 ### Breaking changes
 
 - Removed the exported Herdr pane `inspect`, `transcript`, and `fork` actions. Pane inspection was already non-functional after the CLI extraction, while attempt forking did work; `piewf inspect` and `piewf transcript` remain available as ordinary CLI commands.

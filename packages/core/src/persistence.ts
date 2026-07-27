@@ -178,11 +178,11 @@ export async function acquireSessionLease(cwd: string, sessionId: string, home =
   }
 }
 
-export async function listRunIds(cwd: string, sessionId: string, home = homedir()): Promise<string[]> {
+export async function listRunIds(cwd: string, sessionId: string, home = homedir(), cleanTemps = true): Promise<string[]> {
   const directory = runsDirectory(cwd, sessionId, home);
   try {
     const entries = await readdir(directory, { withFileTypes: true });
-    await cleanupRunTemps(directory, entries);
+    if (cleanTemps) await cleanupRunTemps(directory, entries);
     return entries.filter((entry) => entry.isDirectory() && !entry.name.startsWith(".")).map(({ name }) => name);
   }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
@@ -294,6 +294,12 @@ export class RunStore {
     const persisted = run as unknown as Record<string, unknown>;
     if (!Array.isArray(persisted.agentSessions) || Object.hasOwn(persisted, "nativeSessions")) throw new WorkflowError("RESUME_INCOMPATIBLE", "Persisted run uses an unsupported agent session format");
     return { run, snapshot: loadLaunchSnapshot(await json<LaunchSnapshot>(join(this.directory, "snapshot.json"))) };
+  }
+  async loadStatus(): Promise<PersistedRun> {
+    await this.stateWrite;
+    const run = await json<PersistedRun>(join(this.directory, "state.json"));
+    if (resolve(run.cwd) !== this.cwd || run.sessionId !== this.sessionId || run.id !== this.runId) throw new WorkflowError("RUN_NOT_FOUND", "Persisted run does not belong to this project");
+    return run;
   }
   async loadSummary(): Promise<RunSummary> {
     await this.stateWrite;

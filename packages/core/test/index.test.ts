@@ -199,7 +199,7 @@ void test("registers the workflow tool, command, and conditional skill", async (
   assert.ok(tool);
   assert.equal(tool.promptGuidelines, undefined);
   assert.match(tool.promptSnippet ?? "", /After failure follow-ups.*workflow_status\(\{ runId \}\).*before recovery or replacement work/);
-  assert.match(tool.promptSnippet ?? "", /Recovery map: agent\(\.\.\., \{ retries \}\).*workflow_retry\(\{ runId, foreground\? \}\).*workflow_resume\(\{ runId, budget\?, foreground\? \}\).*parentRunId/);
+  assert.match(tool.promptSnippet ?? "", /Recovery map: agent\(\.\.\., \{ retries \}\).*workflow_retry\(\{ runId, expectedState\?, foreground\? \}\).*workflow_resume\(\{ runId, expectedState\?, budget\?, foreground\? \}\).*parentRunId/);
   assert.ok(discover);
   assert.ok(discover()?.skillPaths?.some((path) => existsSync(path)));
   const skillPath = discover()?.skillPaths?.find((path) => existsSync(path));
@@ -433,6 +433,10 @@ void test("workflow_retry rejects unsupported states, routes cross-wired recover
   const resume = tools.find(({ name }) => name === "workflow_resume");
   assert.ok(retry && resume);
   const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
+  await createRun("expected-retry-state", "completed");
+  await assert.rejects(retry.execute("retry-expected-state", { runId: "expected-retry-state", expectedState: "failed" }, undefined, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE" && error.message.includes("expected state failed"));
+  await createRun("expected-resume-state", "failed");
+  await assert.rejects(resume.execute("resume-expected-state", { runId: "expected-resume-state", expectedState: "budget_exhausted" }, undefined, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE" && error.message.includes("expected state budget_exhausted"));
   for (const [index, state] of (["completed", "stopped", "interrupted", "running", "budget_exhausted"] as const).entries()) {
     await createRun(`unsupported-${String(index)}`, state);
     await assert.rejects(retry.execute("retry", { runId: `unsupported-${String(index)}` }, undefined, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE" && (state === "budget_exhausted" ? error.message.includes("workflow_resume({ runId, budget? })") : error.message.toLowerCase().includes(state.replace("_", "-"))));
@@ -591,6 +595,7 @@ void test("workflow control tools render styled calls and compact or expanded re
     { name: "workflow_respond", args: { runId: "run-checkpoint", name: "approval", approved: true }, details: { accepted: true, state: "checkpoint_answered", approved: true, reason: "checkpoint" }, identifier: "approval", expectedAction: "approved" },
     { name: "workflow_stop", args: { runId: "run-stop" }, details: { runId: "run-stop", state: "stopped", stopped: true }, identifier: "run-stop", expectedAction: "stopped" },
     { name: "workflow_retry", args: { runId: "run-failed" }, details: { runId: "run-retry", parentRunId: "run-failed", state: "running" }, identifier: "run-retry", expectedAction: "started" },
+    { name: "workflow_status", args: { runId: "run-status" }, details: { runId: "run-status", workflowName: "status", state: "failed", agents: [] }, identifier: "run-status", expectedAction: "failed" },
     { name: "workflow_retry", args: { runId: "run-failed" }, details: { runId: "run-retry", parentRunId: "run-failed", state: "completed", value: true }, identifier: "run-retry", expectedAction: "completed" },
     { name: "workflow_resume", args: { runId: "run-budget", budget: { tokens: { hard: 10 } } }, details: { state: "awaiting_approval", proposalId: "proposal-1" }, identifier: "proposal-1", expectedAction: "approval required" },
     { name: "workflow_resume", args: { runId: "run-budget" }, details: { state: "completed", value: true }, identifier: "run-budget", expectedAction: "completed" },
@@ -625,7 +630,7 @@ void test("workflow control tools show error content for failed executions", () 
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never);
   const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
   const errorText = "Control operation failed: unknown run";
-  for (const name of ["workflow_respond", "workflow_stop", "workflow_retry", "workflow_resume"]) {
+  for (const name of ["workflow_respond", "workflow_stop", "workflow_status", "workflow_retry", "workflow_resume"]) {
     const tool = tools.find((candidate) => candidate.name === name);
     assert.ok(tool?.renderResult);
     const args = name === "workflow_respond" ? { runId: "run-error", name: "approval", approved: false } : { runId: "run-error" };
