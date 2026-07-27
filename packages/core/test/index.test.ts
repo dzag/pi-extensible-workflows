@@ -1406,7 +1406,7 @@ void test("foreground workflow reports parallel agent activities together", { ti
   let combined = false;
   let resolveReported!: () => void;
   const reported = new Promise<void>((resolve) => { resolveReported = resolve; });
-  const execution = tool.execute("id", { name: "parallel-progress", script: `return Promise.all([agent("one", {label:"first"}), agent("two", {label:"second"})]);`, foreground: true }, new AbortController().signal, (update: Update) => {
+  const execution = tool.execute("id", { name: "parallel-progress", script: `return Promise.all([agent("one", {label:"first"}), agent("two", {label:"second"})]);`, concurrency: 2, foreground: true }, new AbortController().signal, (update: Update) => {
     const activities = update.details.run.agents.flatMap(({ activity }) => activity?.kind === "tool" ? [activity.text] : []);
     for (const activity of activities) seen.add(activity);
     if (activities.length === 2) combined = true;
