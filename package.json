@@ -15,7 +15,7 @@
     "build": "npm run build --workspace=packages/core",
     "inspect": "npm run inspect --workspace=packages/core",
     "lint": "eslint .",
-    "test": "npm run test --workspace=packages/core && npm run test:template",
+    "test": "npm run test --workspace=packages/core && npm run test --workspace=packages/extensions/herdr && npm run test:template",
     "test:run": "npm run test:run --workspace=packages/core",
     "test:template": "node --test packages/core/examples/workflow-extension-template/extension.test.mjs",
     "acceptance": "npm run acceptance --workspace=packages/core",

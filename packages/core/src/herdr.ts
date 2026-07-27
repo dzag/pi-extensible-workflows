@@ -1,11 +1,14 @@
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-export type HerdrPaneAction = "inspect" | "transcript" | "fork";
-export interface HerdrPaneRequest { action: HerdrPaneAction; cwd: string; sessionId?: string; original?: string; readOnly?: boolean }
+export type HerdrPaneAction = "inspect" | "transcript" | "fork" | "live";
+export type HerdrAgentState = "idle" | "working" | "blocked" | "unknown";
+export interface HerdrPaneRequest { action: HerdrPaneAction; cwd: string; sessionId?: string; original?: string; command?: string; paneId?: string; readOnly?: boolean }
+export interface HerdrWorkspacePaneRequest { cwd: string; workspaceLabel: string; tabLabel: string; command: string }
+export interface HerdrWorkspacePane { workspaceId: string; tabId: string; paneId: string }
 export type HerdrCommandRunner = (args: readonly string[]) => Promise<string>;
 
-const runHerdr: HerdrCommandRunner = (args) => new Promise<string>((resolve, reject) => {
+export const herdrCommandRunner: HerdrCommandRunner = (args) => new Promise<string>((resolve, reject) => {
   execFile("herdr", [...args], { encoding: "utf8", maxBuffer: 1024 * 1024 }, (error, stdout) => {
     if (error) { reject(new Error(error.message)); return; }
     resolve(stdout);
@@ -17,6 +20,7 @@ export function herdrPaneId(env: NodeJS.ProcessEnv = process.env): string | unde
   const paneId = env.HERDR_PANE_ID?.trim();
   return paneId || undefined;
 }
+export function herdrAvailable(env: NodeJS.ProcessEnv = process.env): boolean { return Boolean(herdrPaneId(env) && env.HERDR_SOCKET_PATH); }
 
 function shellQuote(value: string): string { return `'${value.replace(/'/g, `'\\''`)}'`; }
 function json(value: string): unknown { return JSON.parse(value) as unknown; }
@@ -49,17 +53,19 @@ function commandFor(request: HerdrPaneRequest): string {
     ? [shellQuote(process.execPath), shellQuote(cliPath), "inspect", shellQuote(request.sessionId ?? "")]
     : request.action === "transcript"
       ? [shellQuote(process.execPath), shellQuote(cliPath), "transcript", shellQuote(request.original ?? "")]
-      : ["pi", "--fork", shellQuote(request.original ?? ""), ...(request.readOnly ? ["--tools", shellQuote("read,grep,find,ls")] : [])];
+      : request.action === "fork"
+        ? ["pi", "--fork", shellQuote(request.original ?? ""), ...(request.readOnly ? ["--tools", shellQuote("read,grep,find,ls")] : [])]
+        : [request.command ?? ""];
   return `cd ${shellQuote(request.cwd)} && ${environment.length ? `${environment.join(" ")} ` : ""}${command.join(" ")}`;
 }
 
 export function herdrPaneCommand(request: HerdrPaneRequest): string { return commandFor(request); }
 
-export async function openHerdrPane(request: HerdrPaneRequest, runner: HerdrCommandRunner = runHerdr): Promise<string> {
-  const targetPane = herdrPaneId();
+export async function openHerdrPane(request: HerdrPaneRequest, runner: HerdrCommandRunner = herdrCommandRunner): Promise<string> {
+  const targetPane = request.paneId ?? herdrPaneId();
   if (!targetPane) throw new Error("Pane actions require a Herdr-managed session with HERDR_PANE_ID.");
   if (!request.cwd) throw new Error("Pane actions require a working directory.");
-  if ((request.action === "inspect" && !request.sessionId) || (request.action !== "inspect" && !request.original)) throw new Error("Pane action is missing its session source.");
+  if ((request.action === "inspect" && !request.sessionId) || (request.action === "transcript" && !request.original) || (request.action === "fork" && !request.original) || (request.action === "live" && !request.command)) throw new Error("Pane action is missing its session source.");
   const layout = paneLayout(json(await runner(["pane", "layout", "--pane", targetPane])), targetPane);
   const direction = layout.width > layout.height ? "right" : "down";
   const paneId = splitPaneId(json(await runner(["pane", "split", targetPane, "--direction", direction, "--no-focus"])));
@@ -70,4 +76,112 @@ export async function openHerdrPane(request: HerdrPaneRequest, runner: HerdrComm
     await runner(["pane", "close", paneId]).catch(() => undefined);
     throw error;
   }
+}
+
+function resourceId(value: unknown, resource: string, field: string): string {
+  const result = record(record(value)?.result);
+  const item = record(result?.[resource]);
+  const id = item?.[field];
+  if (typeof id !== "string" || !id) throw new Error(`Herdr returned an invalid ${resource} ID.`);
+  return id;
+}
+
+export async function openHerdrWorkspacePane(request: HerdrWorkspacePaneRequest, runner: HerdrCommandRunner = herdrCommandRunner): Promise<HerdrWorkspacePane> {
+  if (!request.cwd || !request.workspaceLabel || !request.tabLabel || !request.command) throw new Error("Herdr workspace pane is missing required data.");
+  const created = json(await runner(["workspace", "create", "--cwd", request.cwd, "--label", request.workspaceLabel, "--no-focus"]));
+  const workspaceId = resourceId(created, "workspace", "workspace_id");
+  const tabId = resourceId(created, "tab", "tab_id");
+  const paneId = resourceId(created, "root_pane", "pane_id");
+  try {
+    await runner(["tab", "rename", tabId, request.tabLabel]);
+    await runner(["pane", "run", paneId, commandFor({ action: "live", cwd: request.cwd, command: request.command })]);
+    return { workspaceId, tabId, paneId };
+  } catch (error) {
+    await runner(["workspace", "close", workspaceId]).catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function openHerdrLivePane(request: HerdrPaneRequest | HerdrWorkspacePaneRequest, runner: HerdrCommandRunner = herdrCommandRunner): Promise<string | HerdrWorkspacePane> {
+  if ("workspaceLabel" in request) return openHerdrWorkspacePane(request, runner);
+  return openHerdrPane({ ...request, action: "live" }, runner);
+}
+
+function hasPiProcess(value: unknown): boolean {
+  const result = record(record(value)?.result);
+  const info = record(result?.process_info);
+  const processes = info?.foreground_processes;
+  if (!Array.isArray(processes)) return false;
+  return processes.some((candidate) => {
+    const process = record(candidate);
+    const name = process?.name;
+    const argv = process?.argv;
+    const commandLine = process?.cmdline;
+    return name === "pi" || Array.isArray(argv) && argv[0] === "pi" || typeof commandLine === "string" && commandLine.includes("/bin/pi");
+  });
+}
+function herdrAgentStatus(value: unknown): string | undefined {
+  const result = record(record(value)?.result);
+  const agent = record(result?.agent);
+  return typeof agent?.agent_status === "string" ? agent.agent_status : undefined;
+}
+
+export async function waitForHerdrPane(paneId: string, runner: HerdrCommandRunner = herdrCommandRunner, options: { signal?: AbortSignal; intervalMs?: number; startupTimeoutMs?: number } = {}): Promise<"closed" | "exited" | "idle" | "aborted"> {
+  const intervalMs = options.intervalMs ?? 250;
+  const startupTimeoutMs = options.startupTimeoutMs ?? 10000;
+  const startedAt = Date.now();
+  let sawPi = false;
+  let sawWorking = false;
+  for (;;) {
+    if (options.signal?.aborted) return "aborted";
+    let piRunning: boolean;
+    try {
+      const output = await runner(["pane", "process-info", "--pane", paneId]);
+      piRunning = hasPiProcess(json(output));
+    } catch { return "closed"; }
+    if (!piRunning) {
+      if (sawPi) return "exited";
+    } else {
+      if (!sawPi) { sawPi = true; }
+      try {
+        const status = herdrAgentStatus(json(await runner(["agent", "get", paneId])));
+        if (status === "working") sawWorking = true;
+        if (sawWorking && (status === "idle" || status === "done")) return "idle";
+      } catch { /* The process monitor remains authoritative when no agent report is available. */ }
+    }
+    if (!piRunning && !sawPi && Date.now() - startedAt >= startupTimeoutMs) throw new Error("Herdr pane did not start Pi.");
+    await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+export interface HerdrAgentReporter { reportSession(session: { sessionId?: string; sessionPath?: string }, sessionStartSource?: string): Promise<void>; reportState(state: HerdrAgentState, message?: string, session?: { sessionId?: string; sessionPath?: string }): Promise<void>; release(): Promise<void> }
+
+export function createHerdrAgentReporter(paneId: string, agent: string, runner: HerdrCommandRunner = herdrCommandRunner): HerdrAgentReporter {
+  const source = "herdr:pi-extensible-workflows";
+  let sequence = Date.now() * 1000;
+  let released = false;
+  let queue = Promise.resolve();
+  const next = () => ++sequence;
+  const sessionArgs = (session?: { sessionId?: string; sessionPath?: string }): string[] => session?.sessionPath ? ["--agent-session-path", session.sessionPath] : session?.sessionId ? ["--agent-session-id", session.sessionId] : [];
+  const retry = async (operation: () => Promise<string>) => {
+    try { await operation(); } catch { try { await operation(); } catch { /* Herdr reporting must not stop the Pi session. */ } }
+  };
+  const enqueue = (operation: () => Promise<void>) => {
+    const result = queue.then(operation);
+    queue = result.then(() => undefined, () => undefined);
+    return result;
+  };
+  return {
+    async reportSession(session, sessionStartSource) {
+      await enqueue(() => retry(() => runner(["pane", "report-agent-session", paneId, "--source", source, "--agent", agent, "--seq", String(next()), ...(sessionStartSource ? ["--session-start-source", sessionStartSource] : []), ...sessionArgs(session)])));
+    },
+    async reportState(state, message, session) {
+      await enqueue(() => retry(() => runner(["pane", "report-agent", paneId, "--source", source, "--agent", agent, "--state", state, "--seq", String(next()), ...(message ? ["--message", message] : []), ...sessionArgs(session)])));
+    },
+    async release() {
+      if (released) return;
+      released = true;
+      await enqueue(() => retry(() => runner(["pane", "release-agent", paneId, "--source", source, "--agent", agent, "--seq", String(next())])));
+    },
+  };
 }

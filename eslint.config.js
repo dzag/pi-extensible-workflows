@@ -13,4 +13,12 @@ export default tseslint.config(
     },
     rules: { "@typescript-eslint/require-await": "off" },
   },
+  {
+    files: ["packages/extensions/herdr/**/*.js", "packages/extensions/herdr/**/*.mjs"],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      parserOptions: { project: false, projectService: false },
+      globals: { process: "readonly", AbortController: "readonly" },
+    },
+  },
 );

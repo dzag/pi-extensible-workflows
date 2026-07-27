@@ -242,6 +242,33 @@ void test("uses a role body as the full system prompt when requested", async () 
   assert.equal((input as { systemPrompt?: string }).systemPrompt, "Replace the system prompt");
   assert.equal((input as { systemPromptAppend?: string }).systemPromptAppend, "");
 });
+void test("prepares the resolved workflow system prompt path for external transports", async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-system-prompt-path-"));
+  const cwd = join(rootDir, "project");
+  const systemPromptPath = join(cwd, ".pi", "pi-extensible-workflows", "SYSTEM.md");
+  mkdirSync(join(cwd, ".pi", "pi-extensible-workflows"), { recursive: true });
+  writeFileSync(systemPromptPath, "Project workflow system");
+  let prepared: import("../src/types.js").PreparedAgentSession | undefined;
+  const transport: import("../src/types.js").AgentTransport = {
+    id: "capture",
+    async createSession(value) {
+      prepared = value;
+      return {
+        reference: { transport: "capture", sessionId: "system-prompt-path" },
+        getState: () => ({ model: value.model, tools: value.tools }),
+        getSessionStats: sessionStats,
+        subscribe: () => () => {},
+        async prompt() { return { assistant: assistant("done") }; },
+        async steer() {},
+        async abort() {},
+        async dispose() {},
+      };
+    },
+  };
+  await new WorkflowAgentExecutor({ ...root, cwd, agentDir: join(rootDir, "agent") }, transport).execute("work", { label: "worker", workflowName: "flow" });
+  assert.equal(prepared?.systemPrompt, undefined);
+  assert.equal(prepared?.systemPromptPath, systemPromptPath);
+});
 
 void test("persists the effective role system prompt emitted for the native turn", async () => {
   const saved: Array<{ sessionId: string; attempt: number; turn: number; prompt: string }> = [];
@@ -1250,8 +1277,12 @@ void test("filters disabled native extensions before factories and skills before
   writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ extensions: [disabledExtension, allowedExtension], skills: [skillsDir] }));
   writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ extensions: [projectDisabledExtension, projectAllowedExtension], skills: [projectSkills] }));
   const resourcePolicy: AgentResourcePolicy = { globalSettingsPath: "/workflow/settings.json", projectSettingsPath: "/project/.pi/pi-extensible-workflows/settings.json", projectTrusted: false, global: { skills: ["disabled-skill"], extensions: [resolve(disabledExtension)] }, project: { skills: [], extensions: [] }, effective: { skills: ["disabled-skill"], extensions: [resolve(disabledExtension)] }, unmatchedSkills: [], unmatchedExtensions: [] };
-  const session = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-filter", resourcePolicy });
+  const session = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-filter", resourcePolicy, extensionFactories: [() => {}] });
   const loaded = (session as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> }; getExtensions(): { extensions: Array<{ resolvedPath: string }> } } }).resourceLoader;
+  const resourcePaths = (session as unknown as { herdrResourcePaths: { extensions: readonly string[]; skills: readonly string[] } }).herdrResourcePaths;
+  assert.deepEqual(resourcePaths.extensions, [resolve(allowedExtension)]);
+  assert.ok(resourcePaths.skills.includes(resolve(join(skillsDir, "kept-skill", "SKILL.md"))));
+  assert.equal(resourcePaths.skills.some((path) => path.includes("disabled-skill")), false);
   assert.equal(existsSync(disabledMarker), false);
   assert.equal(existsSync(allowedMarker), true);
   assert.equal(existsSync(projectDisabledMarker), false);

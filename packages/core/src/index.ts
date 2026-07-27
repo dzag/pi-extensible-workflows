@@ -12,6 +12,8 @@ export { acquireSessionLease, hasLiveSessionLease, listPersistedSessionIds, proj
 export type { AwaitingCheckpoint, CompletedOperation, PendingWorkflowDecision, PersistedOwnershipNode, PersistedRun, RunSummary, RunSummaryAgent, RunSummaryArtifacts, WorktreeReference } from "./persistence.js";
 export { FairAgentScheduler, WorkflowAgentExecutor, createLocalWorkflowAgentSession, localAgentTransport } from "./agent-execution.js";
 export type { AgentAttempt, AgentBudgetHooks, AgentExecutionOptions, AgentExecutionResult, AgentExecutionRoot, AgentProgress, AgentProviderFailure, AgentProviderRecovery, AgentToolCallProgress, AgentSetup, AgentSetupContext, AgentSetupHook, AgentTransport, AgentTransportContext, PreparedAgentSession, RegisteredAgentSetupHook, SessionInput, WorkflowAgentMessage, WorkflowAgentSession, WorkflowAgentSessionEvent, WorkflowAgentSessionReference, WorkflowAgentSessionState, WorkflowAgentSessionStats, WorkflowAgentTurnResult } from "./agent-execution.js";
+export { createLiveSessionHandoff } from "./session-handoff.js";
+export * from "./herdr.js";
 export { doctor, doctorExitCode, formatDoctorReport } from "./doctor.js";
 export type { DoctorDiagnostic, DoctorFunction, DoctorOptions, DoctorPiState, DoctorReport, DoctorRole, DoctorSeverity, DoctorTrust } from "./doctor.js";
 export { doctorCleanup, doctorCleanupExitCode, formatDoctorCleanupReport } from "./doctor-cleanup.js";

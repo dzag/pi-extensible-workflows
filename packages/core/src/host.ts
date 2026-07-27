@@ -8,7 +8,6 @@ import { Type } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
 import { copyToClipboard, getAgentDir, SettingsManager, truncateToVisualLines, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
 import { FairAgentScheduler, WorkflowAgentExecutor, localAgentTransport, type AgentActivity, type AgentAttempt, type AgentDefinition, type AgentProgress, type AgentProviderFailure, type AgentProviderRecovery } from "./agent-execution.js";
-import { herdrPaneId, openHerdrPane } from "./herdr.js";
 import { acquireSessionLease, listRunIds, RunStore, SessionLease, structuralPath as operationPath } from "./persistence.js";
 import type { AwaitingCheckpoint, PersistedRun, WorktreeReference } from "./persistence.js";
 import { budgetRelaxed, budgetUsage, mergeBudget, resumeBudgetAllowed, validateBudget, validateBudgetPatch, WorkflowBudgetRuntime } from "./budget.js";
@@ -1623,7 +1622,13 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
   const liveActivities = new Map<string, Map<string, AgentActivity>>();
   const liveEventTimes = new Map<string, Map<string, number>>();
   const liveAgentSessions = new Map<string, import("./types.js").WorkflowAgentSession>();
+  const liveAgentPrepared = new Map<string, Readonly<import("./types.js").PreparedAgentSession>>();
+  const liveAgentHandoffs = new Map<string, import("./types.js").LiveSessionHandoff>();
   const setLiveAgentSession = (runId: string, agentId: string, session?: import("./types.js").WorkflowAgentSession) => { const key = `${runId}:${agentId}`; if (session) liveAgentSessions.set(key, session); else liveAgentSessions.delete(key); };
+  const setLiveAgentHandoff = (runId: string, agentId: string, attempt: AgentAttempt) => {
+    const key = `${runId}:${agentId}`;
+    if (attempt.liveSession && attempt.prepared && attempt.handoff) { liveAgentPrepared.set(key, attempt.prepared); liveAgentHandoffs.set(key, attempt.handoff); } else { liveAgentPrepared.delete(key); liveAgentHandoffs.delete(key); }
+  };
   const setLiveActivity = (runId: string, agentId: string, activity?: AgentActivity) => {
     const activities = liveActivities.get(runId);
     if (activity) {
@@ -1797,6 +1802,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       };
       const onAttempt = async (attempt: AgentAttempt) => {
         setLiveAgentSession(runId, id, attempt.liveSession);
+        setLiveAgentHandoff(runId, id, attempt);
         await scheduler.flush();
         scheduler.attemptStarted(id);
         const lastEventAt = Date.now();
@@ -1868,6 +1874,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     liveActivities.delete(runId);
     liveEventTimes.delete(runId);
     for (const key of liveAgentSessions.keys()) if (key.startsWith(`${runId}:`)) liveAgentSessions.delete(key);
+    for (const key of liveAgentPrepared.keys()) if (key.startsWith(`${runId}:`)) liveAgentPrepared.delete(key);
+    for (const key of liveAgentHandoffs.keys()) if (key.startsWith(`${runId}:`)) liveAgentHandoffs.delete(key);
     eventPublisher.removeRun(runId);
     runs.delete(runId);
   };
@@ -2758,18 +2766,9 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           const terminalStates = HARD_TERMINAL_RUN_STATES;
           const hasCompleted = sorted.some(({ loaded: { run } }) => run.state === "completed");
           const hasFailed = sorted.some(({ loaded: { run } }) => run.state === "failed");
-          const pickerOptions = [...labels, ...(herdrPaneId() ? ["Inspect session in pane"] : []), "Model aliases", "Close", ...(hasCompleted ? ["Delete all completed"] : []), ...(hasFailed ? ["Delete all failed"] : [])];
+          const pickerOptions = [...labels, "Model aliases", "Close", ...(hasCompleted ? ["Delete all completed"] : []), ...(hasFailed ? ["Delete all failed"] : [])];
           const runChoice = await ctx.ui.select("Workflows\n", pickerOptions);
           if (!runChoice || runChoice === "Close") return;
-          if (runChoice === "Inspect session in pane") {
-            try {
-              await openHerdrPane({ action: "inspect", cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId() });
-              ctx.ui.notify("Opened session inspector in pane.", "info");
-            } catch (error) {
-              ctx.ui.notify(`Cannot open session inspector in pane: ${error instanceof Error ? error.message : String(error)}`, "warning");
-            }
-            continue;
-          }
           if (runChoice === "Model aliases") { await manageAliases(); stores = await loadStores(); continue; }
           if (runChoice === "Delete all completed") {
             if (!await ctx.ui.confirm("Delete completed runs?", "Delete all completed workflow runs and their artifacts? This cannot be undone.")) continue;
@@ -2853,7 +2852,9 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             const run = runs.get(dashboard.run.id);
             const ui = { notify: (message: string, level: "info" | "warning" | "error" = "info") => { ctx.ui.notify(message, level); }, confirm: (title: string, message: string) => ctx.ui.confirm(title, message), select: (title: string, options: readonly string[]) => { return ctx.ui.select(title, [...options]); }, input: (title: string, placeholder?: string) => ctx.ui.input(title, placeholder) };
             const attemptSnapshot = deepFreeze(structuredClone(attempt));
-            return { run: deepFreeze(structuredClone(dashboard.run)), agent: deepFreeze(structuredClone(agent)), attempt: attemptSnapshot, ...(attemptSnapshot.session ? { session: attemptSnapshot.session } : {}), ...(live ? { liveSession: live } : {}), signal: run?.abortController.signal ?? new AbortController().signal, ui: Object.freeze(ui) };
+            const prepared = live ? liveAgentPrepared.get(`${dashboard.run.id}:${agent.id}`) : undefined;
+            const handoff = live ? liveAgentHandoffs.get(`${dashboard.run.id}:${agent.id}`) : undefined;
+            return { run: deepFreeze(structuredClone(dashboard.run)), agent: deepFreeze(structuredClone(agent)), attempt: attemptSnapshot, ...(attemptSnapshot.session ? { session: attemptSnapshot.session } : {}), ...(live ? { liveSession: live } : {}), ...(prepared ? { prepared } : {}), ...(handoff ? { handoff } : {}), signal: run?.abortController.signal ?? new AbortController().signal, ui: Object.freeze(ui) };
           };
           const visibleAgentAttemptActions = (dashboard: Awaited<ReturnType<typeof loadDashboard>>, agent: AgentRecord): readonly [string, import("./types.js").AgentAttemptAction][] => {
             const context = agentAttemptActionContext(dashboard, agent);

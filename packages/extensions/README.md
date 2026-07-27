@@ -1,6 +1,3 @@
 # Extension workspaces
 
-Future extension packages will live under this directory as separate npm workspaces.
-No extension package is published yet. The existing
-`packages/core/examples/workflow-extension-template` remains the source and
-reference template until an extension boundary and package name are approved.
+Extension packages live here as separate npm workspaces. The first repo-local package is `packages/extensions/herdr`; it is not published yet. The existing `packages/core/examples/workflow-extension-template` remains the general extension reference.

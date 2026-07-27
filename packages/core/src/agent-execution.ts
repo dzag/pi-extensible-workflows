@@ -13,16 +13,18 @@ type PiSession = {
   getSessionStats(): { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number }; cost: number };
   readonly systemPrompt?: string;
   readonly model?: { provider: string; model?: string; id?: string };
-  readonly agent?: { state: { tools: readonly { name: string }[] } };
+  readonly agent?: { state: { tools: readonly { name: string }[] }; subscribe?(listener: (event: unknown) => void | Promise<void>): () => void };
+  readonly herdrResourcePaths?: { extensions: readonly string[]; skills: readonly string[] };
   subscribe?(listener: (event: unknown) => void): () => void;
   prompt(text: string): Promise<void>;
   steer?(text: string): Promise<void>;
   abort?(): Promise<void>;
   dispose(): void;
 };
-import type { AgentIdentity, AgentResourceExclusions, AgentResourcePolicy, AgentSetup, AgentSetupSummary, AgentTransport, AgentTransportContext, JsonSchema, JsonValue, ModelSpec, PreparedAgentSession, RegisteredAgentSetupHook, SessionInput, WorkflowAgentMessage, WorkflowAgentSession, WorkflowAgentSessionEvent, WorkflowAgentSessionReference, WorkflowAgentSessionState, WorkflowAgentSessionStats, WorkflowAgentTurnResult, WorkflowRunContext } from "./types.js";
+import type { AgentIdentity, AgentResourceExclusions, AgentResourcePolicy, AgentSetup, AgentSetupSummary, AgentTransport, AgentTransportContext, JsonSchema, JsonValue, LiveSessionHandoff, ModelSpec, PreparedAgentSession, RegisteredAgentSetupHook, SessionInput, WorkflowAgentMessage, WorkflowAgentSession, WorkflowAgentSessionEvent, WorkflowAgentSessionReference, WorkflowAgentSessionState, WorkflowAgentSessionStats, WorkflowAgentTurnResult, WorkflowRunContext } from "./types.js";
 import { deepFreeze, jsonObject, disabledResources, mergeAgentResourceExclusions, modelAliasName, modelCapability, resolveModelReference, unmatchedResourcePatterns } from "./utils.js";
 import { WorkflowError } from "./types.js";
+import { createLiveSessionHandoff } from "./session-handoff.js";
 import type { RunStore } from "./persistence.js";
 export type { AgentSetup, AgentSetupContext, AgentSetupHook, AgentTransport, AgentTransportContext, PreparedAgentSession, RegisteredAgentSetupHook, SessionInput, WorkflowAgentMessage, WorkflowAgentSession, WorkflowAgentSessionEvent, WorkflowAgentSessionReference, WorkflowAgentSessionState, WorkflowAgentSessionStats, WorkflowAgentTurnResult } from "./types.js";
 export interface AgentBudgetHooks {
@@ -81,7 +83,7 @@ export interface AgentAccounting { input: number; output: number; cacheRead: num
 export interface AgentToolCallProgress { id: string; name: string; state: "running" | "completed" | "failed" }
 export interface AgentActivity { kind: "reasoning" | "tool" | "text"; text: string }
 export interface AgentProgress { accounting: AgentAccounting; toolCalls: readonly AgentToolCallProgress[]; state?: WorkflowAgentSessionState; activity?: AgentActivity; lastEventAt?: number; persist: boolean }
-export interface AgentAttempt { attempt: number; transport: string; session?: WorkflowAgentSessionReference; liveSession?: WorkflowAgentSession; result?: JsonValue; error?: { code: string; message: string }; accounting: AgentAccounting; setup: AgentSetupSummary }
+export interface AgentAttempt { attempt: number; transport: string; session?: WorkflowAgentSessionReference; liveSession?: WorkflowAgentSession; prepared?: Readonly<PreparedAgentSession>; handoff?: LiveSessionHandoff; result?: JsonValue; error?: { code: string; message: string }; accounting: AgentAccounting; setup: AgentSetupSummary }
 export interface AgentExecutionResult { value: JsonValue; attempts: readonly AgentAttempt[]; cwd: string }
 
 function parseModel(value: string | undefined, fallback: ModelSpec, thinking?: ThinkingLevel, aliases: Readonly<Record<string, string>> = {}, knownModels?: ReadonlySet<string>, settingsPath?: string): ModelSpec {
@@ -119,6 +121,7 @@ function terminalProviderError(error: WorkflowError): TerminalProviderError | un
 }
 type ProviderRecoveryMarker = { providerRecoveryHandled?: boolean; providerRecovery?: AgentProviderRecovery; providerRecoveryFailed?: boolean };
 const providerContinuationPrompt = "The provider error was transient. Continue the task from your current state.";
+const handoffContinuationPrompt = "Continue the task from the current session state.";
 async function recoverTerminalProviderError(session: WorkflowAgentSession, label: string, recovery: AgentExecutionOptions["providerErrorRecovery"], continuePrompt: () => Promise<void>, getAssistant: () => WorkflowAgentMessage | undefined): Promise<boolean> {
   let continued = false;
   for (;;) {
@@ -152,8 +155,8 @@ export async function createLocalPiSession(input: SessionInput): Promise<PiSessi
   const agentDir = input.agentDir ?? getAgentDir();
   const systemPromptSource = workflowSystemPromptPath(input.cwd, agentDir, input.resourcePolicy?.projectTrusted ?? true);
   const systemPromptOptions = input.systemPrompt !== undefined ? { systemPromptOverride: () => input.systemPrompt } : systemPromptSource !== undefined ? { systemPrompt: systemPromptSource } : {};
-  const manager = input.agentDir ? SessionManager.create(input.cwd, join(agentDir, "sessions")) : SessionManager.create(input.cwd);
-  manager.appendSessionInfo(input.sessionLabel);
+  const manager = input.sessionPath ? SessionManager.open(input.sessionPath, join(agentDir, "sessions"), input.cwd) : input.agentDir ? SessionManager.create(input.cwd, join(agentDir, "sessions")) : SessionManager.create(input.cwd);
+  if (!input.sessionPath) manager.appendSessionInfo(input.sessionLabel);
   const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") });
   const model = modelRuntime.getModel(input.model.provider, input.model.model);
   if (!model) throw new WorkflowError("UNKNOWN_MODEL", `Unknown model: ${input.model.provider}/${input.model.model}`);
@@ -200,9 +203,11 @@ export async function createLocalPiSession(input: SessionInput): Promise<PiSessi
     await resourceLoader.reload();
   }
   const { session } = await createAgentSession({ ...(input.options ?? {}), cwd: input.cwd, agentDir, modelRuntime, model, ...(settingsManager ? { settingsManager } : {}), ...(input.model.thinking ? { thinkingLevel: input.model.thinking } : {}), tools, ...(customTools.length ? { customTools } : {}), ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}), ...(resourceLoader ? { resourceLoader } : {}), sessionManager: manager });
+  const resourcePaths = resourceLoader ? { extensions: resourceLoader.getExtensions().extensions.filter(({ path }) => !path.startsWith("<")).map(({ resolvedPath }) => canonicalSourcePath(resolvedPath)), skills: resourceLoader.getSkills().skills.map(({ filePath }) => canonicalSourcePath(filePath)) } : undefined;
   return Object.assign(session, {
     getLeafId: () => manager.getLeafId(),
     getToolDefinitions: () => session.getAllTools().map(({ name, description, parameters, promptGuidelines }) => ({ name, description, parameters, ...(promptGuidelines ? { promptGuidelines } : {}) })),
+    ...(resourcePaths ? { herdrResourcePaths: resourcePaths } : {}),
   }) as unknown as PiSession;
 }
 function workflowAgentMessage(message: AgentMessage | undefined): WorkflowAgentMessage | undefined { return message ? { role: message.role, ...(message.content === undefined ? {} : { content: message.content }), ...(message.stopReason === undefined ? {} : { stopReason: message.stopReason }), ...(message.errorMessage === undefined ? {} : { errorMessage: message.errorMessage }), ...(message.usage === undefined ? {} : { usage: message.usage }) } : undefined; }
@@ -223,19 +228,36 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
     ...(prepared.systemPromptAppend ? { systemPromptAppend: prepared.systemPromptAppend } : {}), ...(prepared.extensionFactories?.length ? { extensionFactories: [...prepared.extensionFactories] } : {}),
     ...(prepared.additionalSkillPaths?.length ? { additionalSkillPaths: [...prepared.additionalSkillPaths] } : {}), ...(prepared.resourcePolicy ? { resourcePolicy: structuredClone(prepared.resourcePolicy) } : {}), ...(prepared.options ? { options: { ...prepared.options } } : {}),
   };
-  const native = await createLocalPiSession(input);
+  let native = await createLocalPiSession(input);
   let disposal: Promise<void> | undefined;
   let aborting: Promise<void> | undefined;
+  let suspended = false;
   const prompts = new Set<Promise<WorkflowAgentTurnResult>>();
+  const listeners = new Set<(event: WorkflowAgentSessionEvent) => void | Promise<void>>();
   let disposed = false;
-  const startAbort = () => aborting ??= Promise.resolve().then(() => native.abort?.()).then(() => undefined).finally(() => { aborting = undefined; });
+  let coreUnsubscribe: (() => void) | undefined;
+  let sessionUnsubscribe: (() => void) | undefined;
+  const notify = async (event: WorkflowAgentSessionEvent) => { for (const listener of listeners) await listener(event); };
+  const bindNative = (next: PiSession) => {
+    coreUnsubscribe?.();
+    sessionUnsubscribe?.();
+    coreUnsubscribe = next.agent?.subscribe?.((event) => notify(localSessionEvent(event)));
+    sessionUnsubscribe = next.subscribe?.((event) => { if (typeof event === "object" && event !== null && (event as { type?: unknown }).type === "agent_settled") void notify(localSessionEvent(event)); });
+  };
+  bindNative(native);
+  const startAbort = () => {
+    if (suspended) return Promise.resolve();
+    return aborting ??= Promise.resolve().then(() => native.abort?.()).then(() => undefined).finally(() => { aborting = undefined; });
+  };
   const reference: WorkflowAgentSessionReference = { transport: "local", sessionId: native.sessionId, ...(native.sessionFile ? { locator: { sessionFile: native.sessionFile } } : {}) };
   const session = {
     reference,
+    getHerdrResourcePaths: () => native.herdrResourcePaths,
     getState: () => Object.freeze(workflowAgentState(native, prepared)),
     getSessionStats: () => workflowAgentStats(native.getSessionStats()),
-    subscribe(listener: (event: WorkflowAgentSessionEvent) => void) { listener({ type: "state_changed", state: workflowAgentState(native, prepared) }); return native.subscribe?.((event) => { listener(localSessionEvent(event)); }) ?? (() => undefined); },
     getLastAssistant: () => latestUsableAssistant(native.messages),
+    subscribe(listener: (event: WorkflowAgentSessionEvent) => void) { listeners.add(listener); listener({ type: "state_changed", state: workflowAgentState(native, prepared) }); return () => listeners.delete(listener); },
+    subscribeAsync(listener: (event: WorkflowAgentSessionEvent) => void | Promise<void>) { listeners.add(listener); void Promise.resolve(listener({ type: "state_changed", state: workflowAgentState(native, prepared) })).catch(() => undefined); return () => listeners.delete(listener); },
     async prompt(text: string) {
       if (disposed) throw new WorkflowError("INTERNAL_ERROR", "Local workflow session is disposed");
       const prompt = Promise.resolve().then(async () => { await native.prompt(text); const assistant = latestUsableAssistant(native.messages); return assistant ? { assistant } : {}; });
@@ -244,11 +266,29 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
     },
     async steer(text: string) { if (!native.steer) throw new WorkflowError("INTERNAL_ERROR", "Local workflow session does not support steering"); await native.steer(text); },
     async abort() { if (disposed) return; await startAbort(); },
+    async suspendForHandoff() {
+      if (disposed || suspended || !native.sessionFile) return;
+      coreUnsubscribe?.();
+      sessionUnsubscribe?.();
+      native.dispose();
+      suspended = true;
+    },
+    async resumeFromHandoff() {
+      const sessionFile = native.sessionFile;
+      if (disposed || !sessionFile) return;
+      await Promise.allSettled(prompts);
+      if (!suspended) native.dispose();
+      native = await createLocalPiSession({ ...input, sessionPath: sessionFile });
+      suspended = false;
+      bindNative(native);
+    },
     async dispose() {
       disposal ??= (async () => {
         disposed = true;
         try { await startAbort(); } catch { /* Abort failure must not prevent the prompt from settling. */ }
         await Promise.allSettled(prompts);
+        coreUnsubscribe?.();
+        sessionUnsubscribe?.();
         native.dispose();
       })();
       await disposal;
@@ -296,11 +336,12 @@ function resourcePolicyWidened(ceiling: AgentResourcePolicy | undefined, candida
   if (!ceiling.projectTrusted && candidate.projectTrusted) return true;
   return ceiling.effective.skills.some((pattern) => !candidate.effective.skills.includes(pattern)) || ceiling.effective.extensions.some((pattern) => !candidate.effective.extensions.includes(pattern));
 }
-function preparedAgentSession(input: SessionInput): Readonly<PreparedAgentSession> {
+function preparedAgentSession(input: SessionInput, initialPrompt?: string): Readonly<PreparedAgentSession> {
+  const systemPromptPath = input.systemPrompt === undefined ? workflowSystemPromptPath(input.cwd, input.agentDir ?? getAgentDir(), input.resourcePolicy?.projectTrusted ?? true) : undefined;
   const prepared = {
-    cwd: input.cwd, model: Object.freeze({ ...input.model }), tools: Object.freeze([...input.tools]), sessionLabel: input.sessionLabel,
+    cwd: input.cwd, model: Object.freeze({ ...input.model }), tools: Object.freeze([...input.tools]), sessionLabel: input.sessionLabel, ...(initialPrompt === undefined ? {} : { initialPrompt }),
     ...(input.agentDir ? { agentDir: input.agentDir } : {}), ...(input.customTools?.length ? { customTools: Object.freeze([...input.customTools]) } : {}), ...(input.resultTool ? { resultTool: input.resultTool } : {}), ...(input.options ? { options: Object.freeze(structuredClone(input.options)) } : {}),
-    ...(input.systemPrompt === undefined ? {} : { systemPrompt: input.systemPrompt }), ...(input.systemPromptAppend ? { systemPromptAppend: input.systemPromptAppend } : {}),
+    ...(input.systemPrompt === undefined ? {} : { systemPrompt: input.systemPrompt }), ...(systemPromptPath ? { systemPromptPath } : {}), ...(input.systemPromptAppend ? { systemPromptAppend: input.systemPromptAppend } : {}),
     ...(input.extensionFactories?.length ? { extensionFactories: Object.freeze([...input.extensionFactories]) } : {}), ...(input.additionalSkillPaths?.length ? { additionalSkillPaths: Object.freeze([...input.additionalSkillPaths]) } : {}),
     ...(input.resourcePolicy ? { resourcePolicy: Object.freeze(structuredClone(input.resourcePolicy)) } : {}),
   };
@@ -319,17 +360,17 @@ async function prepareAgentSetup(root: AgentExecutionRoot, transport: AgentTrans
   const resourcePolicy = baseResourcePolicy && roleExclusions ? { ...baseResourcePolicy, effective: mergeAgentResourceExclusions(baseResourcePolicy.effective, roleExclusions) } : baseResourcePolicy;
   const resourcePolicyCeiling = resourcePolicy ? structuredClone(resourcePolicy) : undefined;
   const sessionInput: SessionInput = { cwd, model: { ...resolved.model }, tools: [...resolved.tools], sessionLabel: `${options.workflowName}:${options.label}:attempt-${String(attempt)}`, ...(root.agentDir ? { agentDir: root.agentDir } : {}), ...(root.additionalSkillPaths?.length ? { additionalSkillPaths: [...root.additionalSkillPaths] } : {}), ...(customTools.length ? { customTools: [...customTools] } : {}), ...(resultTool ? { resultTool } : {}), ...(resolved.systemPrompt !== undefined ? { systemPrompt: resolved.systemPrompt } : {}), systemPromptAppend: resolved.systemPromptAppend, ...(resourcePolicy ? { resourcePolicy } : {}), options: structuredClone(baselineOptions) };
-  const setup = { prompt: task, options: sessionInput.options ?? {}, sessionInput, prepared: preparedAgentSession(sessionInput), transport };
+  const setup = { prompt: task, options: sessionInput.options ?? {}, sessionInput, prepared: preparedAgentSession(sessionInput, task), transport };
   const base = fallbackSetupContext(root, options, setupSignal);
   const context = Object.freeze({ run: base.run, identity: base.identity, attempt, signal: setupSignal });
   const hookNames: string[] = [];
   for (const hook of [...(root.agentSetupHooks ?? [])].sort((left, right) => left.priority - right.priority || (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))) {
     if (setupSignal.aborted) return { setup, summary: agentSetupSummary(setup, hookNames), failure: { error: new WorkflowError("CANCELLED", "Agent cancelled") } };
     try { await hook.setup(setup, context); } catch (error) {
-      setup.prepared = preparedAgentSession(setup.sessionInput);
+      setup.prepared = preparedAgentSession(setup.sessionInput, task);
       return { setup, summary: agentSetupSummary(setup, hookNames), failure: { error: setupSignal.reason !== undefined ? new WorkflowError("CANCELLED", "Agent cancelled") : error } };
     }
-    setup.prepared = preparedAgentSession(setup.sessionInput);
+    setup.prepared = preparedAgentSession(setup.sessionInput, task);
     hookNames.push(hook.name);
     if (setupSignal.reason !== undefined) return { setup, summary: agentSetupSummary(setup, hookNames), failure: { error: new WorkflowError("CANCELLED", "Agent cancelled") } };
   }
@@ -345,10 +386,10 @@ async function prepareAgentSetup(root: AgentExecutionRoot, transport: AgentTrans
     const outsideTool = widened ?? setup.sessionInput.tools.find((tool) => !root.tools.has(tool) && !customToolNames.has(tool));
     if (outsideTool) throw new WorkflowError("UNKNOWN_TOOL", `Tool is outside the prepared agent policy: ${outsideTool}`);
   } catch (error) {
-    setup.prepared = preparedAgentSession(setup.sessionInput);
+    setup.prepared = preparedAgentSession(setup.sessionInput, task);
     return { setup, summary: agentSetupSummary(setup, hookNames), failure: { error } };
   }
-  setup.prepared = preparedAgentSession(setup.sessionInput);
+  setup.prepared = preparedAgentSession(setup.sessionInput, task);
   return { setup, summary: agentSetupSummary(setup, hookNames) };
 }
 function attemptRecord(transport: string, attempt: number, session: WorkflowAgentSession, setup: AgentSetupSummary, stats: AgentAccounting, result?: JsonValue, error?: { code: string; message: string }): AgentAttempt {
@@ -416,6 +457,7 @@ export class WorkflowAgentExecutor {
       options.budget?.beforeAttempt();
       let schemaResult: JsonValue | undefined;
       let session: WorkflowAgentSession | undefined;
+      let handoff: LiveSessionHandoff | undefined;
       let setup: AgentSetup | undefined;
       let setupSummary: AgentSetupSummary = { hookNames: [], model: { ...resolved.model }, tools: [...resolved.tools], cwd };
       let setupFailed = false;
@@ -476,7 +518,8 @@ export class WorkflowAgentExecutor {
           throw new WorkflowError("INTERNAL_ERROR", `Agent transport ${setup.transport.id} created a session for ${createdSession.reference.transport}`);
         }
         session = createdSession;
-        await options.onAttempt?.({ attempt, transport: setup.transport.id, session: session.reference, liveSession: session, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, setup: setupSummary });
+        handoff = createLiveSessionHandoff();
+        await options.onAttempt?.({ attempt, transport: setup.transport.id, session: session.reference, liveSession: session, prepared: setup.prepared, handoff, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, setup: setupSummary });
         const preparedTools = new Set([...setup.prepared.tools, ...(setup.prepared.customTools ?? []).map(({ name }) => name), ...(setup.prepared.resultTool ? [setup.prepared.resultTool.name] : [])]);
         if (session.getState().tools.some((tool) => !preparedTools.has(tool))) throw new WorkflowError("INTERNAL_ERROR", `Agent transport ${setup.transport.id} widened the prepared tool policy`);
         if (setup.sessionInput.resourcePolicy) setupSummary = { ...setupSummary, disabledAgentResources: resourcePolicySummary(setup.sessionInput.resourcePolicy) };
@@ -494,9 +537,19 @@ export class WorkflowAgentExecutor {
           let promptError: unknown;
           try { acceptAssistant((await promptWithProviderPause(activeSession, prompt, remaining(options.timeoutMs, started), attemptSignal, this.root.providerPause)).assistant); } catch (error) { acceptAssistant((activeSession as WorkflowAgentSession & { getLastAssistant?: () => WorkflowAgentMessage | undefined }).getLastAssistant?.() ?? lastAssistant); promptFailed = true; promptError = error; }
           const recovered = await recoverTerminal();
+          await handoff?.waitForResume();
+          const resumed = (activeSession as WorkflowAgentSession & { getLastAssistant?: () => WorkflowAgentMessage | undefined }).getLastAssistant?.();
+          acceptAssistant(resumed);
+          let handoffError: unknown;
+          if (handoff?.transferred && !hasSchemaResult() && (!resumed || resumed.stopReason === "aborted" || latestAssistantHasToolCall(resumed))) {
+            try { acceptAssistant((await promptWithProviderPause(activeSession, handoffContinuationPrompt, remaining(options.timeoutMs, started), attemptSignal, this.root.providerPause)).assistant); } catch (error) { handoffError = error; }
+          }
+          if (handoffError && !hasSchemaResult()) throw handoffError instanceof Error ? handoffError : new Error(typeof handoffError === "string" ? handoffError : "Herdr handoff continuation failed");
           if (promptFailed && !hasSchemaResult() && !recovered) throw promptError;
         };
-        unsubscribe = activeSession.subscribe((event) => {
+        const handleSessionEvent = async (event: WorkflowAgentSessionEvent) => {
+          handoff?.observe(event);
+          if (event.type === "turn_end" || event.type === "turnEnded") await handoff?.waitForTakeover();
           lastEventAt = Date.now();
           let persist = false;
           let shouldReport = false;
@@ -540,7 +593,8 @@ export class WorkflowAgentExecutor {
           if (event.type === "tool_execution_end" && event.toolCallId && event.toolName) { toolCalls.set(event.toolCallId, { id: event.toolCallId, name: event.toolName, state: event.isError ? "failed" : "completed" }); if (activity?.kind === "tool" && activity.text === event.toolName) activity = undefined; shouldReport = true; removeToolCallId = event.toolCallId; }
           if (shouldReport || persist) report(persist); else reportTimestamp();
           if (removeToolCallId) toolCalls.delete(removeToolCallId);
-        });
+        };
+        unsubscribe = activeSession.subscribeAsync ? activeSession.subscribeAsync(handleSessionEvent) : activeSession.subscribe((event) => { void handleSessionEvent(event); });
         report(false);
         if (setSteer) {
           setSteer((message) => activeSession.steer(message));

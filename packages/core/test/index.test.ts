@@ -2238,7 +2238,7 @@ void test("navigator omits transcript actions outside and inside Herdr", async (
       await command("", ctx as never);
       const renderedActions = dashboardActions.flat().join("\n");
       const runPicker = workflowPickers[0] ?? [];
-      assert.equal(runPicker.includes("Inspect session in pane"), inHerdr);
+      assert.equal(runPicker.includes("Inspect session in pane"), false);
       assert.doesNotMatch(renderedActions, /View transcript|Transcript paths|Copy transcript path|Open transcript in pane/);
       assert.equal(agentActions.length, 1);
       const selectedAgentActions = agentActions[0];
@@ -3121,6 +3121,10 @@ void test("strict settings use defaults and reject unknown or unsafe values", ()
   const path = join(dir, "settings.json");
   writeFileSync(path, JSON.stringify({ concurrency: 4 }));
   assert.deepEqual(loadSettings(path), { concurrency: 4 });
+  writeFileSync(path, JSON.stringify({ extensions: { herdr: { enableFullyInspectableMode: true } } }));
+  assert.equal(loadSettings(path).extensions?.herdr?.enableFullyInspectableMode, true);
+  writeFileSync(path, JSON.stringify({ extensions: { herdr: { enableFullyInspectableMode: "yes" } } }));
+  assert.throws(() => loadSettings(path), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_SETTINGS");
   writeFileSync(path, JSON.stringify({ agentTimeoutMs: 500 }));
   assert.throws(() => loadSettings(path), /Unknown workflow setting/);
   writeFileSync(path, JSON.stringify({ concurrency: 17 }));

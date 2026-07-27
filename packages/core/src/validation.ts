@@ -8,7 +8,7 @@ import { Script } from "node:vm";
 import { Value } from "typebox/value";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { WorkflowError } from "./types.js";
-import type { AgentDefinition, AgentResourceExclusions, AgentResourcePolicy, CheckpointInput, JsonSchema, JsonValue, LaunchSnapshot, PreflightCapabilities, PreflightResult, ShellOptions, StaticWorkflowCall, StaticWorkflowExecution, StaticWorkflowScope, ValidatedWorkflowLaunch, WorkflowCallKind, WorkflowErrorCode, WorkflowExtensionMetadata, WorkflowMetadata, WorkflowRoleDirectoryRegistration, WorkflowSettings, WorkflowSettingsOverrides, WorkflowSettingsResolution, WorkflowSettingsSources, WorkflowValidationContext, WorkflowValidationParameters } from "./types.js";
+import type { AgentDefinition, AgentResourceExclusions, AgentResourcePolicy, CheckpointInput, JsonSchema, JsonValue, LaunchSnapshot, PreflightCapabilities, PreflightResult, ShellOptions, StaticWorkflowCall, StaticWorkflowExecution, StaticWorkflowScope, ValidatedWorkflowLaunch, WorkflowCallKind, WorkflowErrorCode, WorkflowExtensionMetadata, WorkflowExtensionSettings, WorkflowMetadata, WorkflowRoleDirectoryRegistration, WorkflowSettings, WorkflowSettingsOverrides, WorkflowSettingsResolution, WorkflowSettingsSources, WorkflowValidationContext, WorkflowValidationParameters } from "./types.js";
 import type { WorkflowRegistryApi } from "./registry.js";
 import { registeredWorkflowRoleDirectoryRegistrations } from "./registry.js";
 import { annotateModelAliasError, deepFreeze, errorText, fail, jsonValue, modelAliasName, modelCapability, object, parseThinking, positiveInteger, resolveModelReference, unknownModel, validateModelAliases, validateResourcePattern } from "./utils.js";
@@ -67,6 +67,17 @@ function validateAgentResourceExclusions(value: unknown, settingsPath: string, e
   }
   return Object.freeze({ skills: Object.freeze(normalized.skills), extensions: Object.freeze(normalized.extensions) });
 }
+function validateWorkflowExtensions(value: unknown, settingsPath: string, errorCode: "INVALID_SETTINGS" | "INVALID_METADATA" = "INVALID_SETTINGS"): WorkflowExtensionSettings | undefined {
+  if (value === undefined) return undefined;
+  const base = `${settingsPath}.extensions`;
+  if (!object(value)) fail(errorCode, `${base} must be an object`);
+  if (Object.keys(value).some((key) => key !== "herdr")) fail(errorCode, `${base} contains an unsupported extension setting`);
+  if (value.herdr === undefined) return Object.freeze({});
+  if (!object(value.herdr)) fail(errorCode, `${base}.herdr must be an object`);
+  if (Object.keys(value.herdr).some((key) => key !== "enableFullyInspectableMode")) fail(errorCode, `${base}.herdr contains an unsupported setting`);
+  if (value.herdr.enableFullyInspectableMode !== undefined && typeof value.herdr.enableFullyInspectableMode !== "boolean") fail(errorCode, `${base}.herdr.enableFullyInspectableMode must be a boolean`);
+  return Object.freeze({ herdr: Object.freeze({ ...(value.herdr.enableFullyInspectableMode === undefined ? {} : { enableFullyInspectableMode: value.herdr.enableFullyInspectableMode }) }) });
+}
 function parseSettings(path: string, partial: false): Readonly<WorkflowSettings>;
 function parseSettings(path: string, partial: true): Readonly<WorkflowSettingsOverrides>;
 function parseSettings(path: string, partial: boolean): Readonly<WorkflowSettings | WorkflowSettingsOverrides> {
@@ -77,14 +88,15 @@ function parseSettings(path: string, partial: boolean): Readonly<WorkflowSetting
     fail("CONFIG_ERROR", `Invalid workflow settings JSON at ${path}: ${errorText(error)}`);
   }
   if (!object(parsed)) fail("INVALID_SETTINGS", `Workflow settings at ${path} must be an object`);
-  const allowed = new Set(["concurrency", "modelAliases", "disabledAgentResources"]);
+  const allowed = new Set(["concurrency", "modelAliases", "disabledAgentResources", "extensions"]);
   const unknown = Object.keys(parsed).find((key) => !allowed.has(key));
   if (unknown) fail("INVALID_SETTINGS", `Unknown workflow setting at ${path}: ${unknown}`);
   const concurrency = parsed.concurrency === undefined ? (partial ? undefined : DEFAULT_SETTINGS.concurrency) : parsed.concurrency;
   if (concurrency !== undefined && (!positiveInteger(concurrency) || concurrency > 16)) fail("INVALID_SETTINGS", `${path}.concurrency must be an integer from 1 to 16`);
   const modelAliases = parsed.modelAliases === undefined ? undefined : validateModelAliases(parsed.modelAliases, path);
   const disabledAgentResources = validateAgentResourceExclusions(parsed.disabledAgentResources, path);
-  return Object.freeze({ ...(concurrency === undefined ? {} : { concurrency }), ...(modelAliases === undefined ? {} : { modelAliases }), ...(disabledAgentResources === undefined ? {} : { disabledAgentResources }) });
+  const extensions = validateWorkflowExtensions(parsed.extensions, path);
+  return Object.freeze({ ...(concurrency === undefined ? {} : { concurrency }), ...(modelAliases === undefined ? {} : { modelAliases }), ...(disabledAgentResources === undefined ? {} : { disabledAgentResources }), ...(extensions === undefined ? {} : { extensions }) });
 }
 export function loadSettings(path = workflowSettingsPath()): Readonly<WorkflowSettings> { return parseSettings(path, false); }
 export function loadSettingsOverrides(path: string): Readonly<WorkflowSettingsOverrides> { return parseSettings(path, true); }
@@ -102,6 +114,7 @@ export function resolveWorkflowSettings(cwd: string, projectTrusted: boolean, gl
     concurrency: project.concurrency ?? global.concurrency,
     ...(projectHas("modelAliases") ? { modelAliases: project.modelAliases } : global.modelAliases === undefined ? {} : { modelAliases: global.modelAliases }),
     ...(projectHas("disabledAgentResources") ? { disabledAgentResources: project.disabledAgentResources } : global.disabledAgentResources === undefined ? {} : { disabledAgentResources: global.disabledAgentResources }),
+    ...(global.extensions === undefined ? {} : { extensions: global.extensions }),
   });
   return { globalSettingsPath, projectSettingsPath, projectTrusted, global, project, effective, sources };
 }

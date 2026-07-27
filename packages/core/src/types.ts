@@ -61,8 +61,10 @@ export interface ModelSpec { provider: string; model: string; thinking?: "off" |
 export interface WorkflowModelAliasResolverContext { cwd: string; projectTrusted: boolean; rootModel: ModelSpec; knownModels: ReadonlySet<string>; availableModels: ReadonlySet<string>; signal: AbortSignal }
 export interface WorkflowModelAlias { resolve: (context: Readonly<WorkflowModelAliasResolverContext>) => string | Promise<string> }
 export interface WorkflowMetadata { name: string; description?: string }
-export interface WorkflowSettings { concurrency: number; modelAliases?: Readonly<Record<string, string>>; disabledAgentResources?: Readonly<AgentResourceExclusions> }
-export interface WorkflowSettingsOverrides { concurrency?: number; modelAliases?: Readonly<Record<string, string>>; disabledAgentResources?: Readonly<AgentResourceExclusions> }
+export interface HerdrExtensionSettings { enableFullyInspectableMode?: boolean }
+export interface WorkflowExtensionSettings { herdr?: Readonly<HerdrExtensionSettings> }
+export interface WorkflowSettings { concurrency: number; modelAliases?: Readonly<Record<string, string>>; disabledAgentResources?: Readonly<AgentResourceExclusions>; extensions?: Readonly<WorkflowExtensionSettings> }
+export interface WorkflowSettingsOverrides { concurrency?: number; modelAliases?: Readonly<Record<string, string>>; disabledAgentResources?: Readonly<AgentResourceExclusions>; extensions?: Readonly<WorkflowExtensionSettings> }
 export interface WorkflowSettingsSources { concurrency: string; modelAliases: string; disabledAgentResources: string }
 export interface WorkflowSettingsResolution { globalSettingsPath: string; projectSettingsPath: string; projectTrusted: boolean; global: Readonly<WorkflowSettings>; project: Readonly<WorkflowSettingsOverrides>; effective: Readonly<WorkflowSettings>; sources: Readonly<WorkflowSettingsSources> }
 export interface AgentResourceExclusions { skills: readonly string[]; extensions: readonly string[] }
@@ -100,15 +102,29 @@ export interface WorkflowAgentSessionStats { readonly tokens: { readonly input: 
 export interface WorkflowAgentMessage { readonly role: string; readonly content?: unknown; readonly stopReason?: string; readonly errorMessage?: string; readonly usage?: { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number; readonly cost: { readonly total: number } } }
 export interface WorkflowAgentSessionState { readonly model: ModelSpec; readonly thinking?: ModelSpec["thinking"]; readonly tools: readonly string[]; readonly systemPrompt?: string }
 export interface WorkflowAgentSessionEvent { readonly type: string; readonly state?: Readonly<WorkflowAgentSessionState>; readonly message?: WorkflowAgentMessage; readonly assistantMessageEvent?: { readonly type: string }; readonly toolCallId?: string; readonly toolName?: string; readonly isError?: boolean }
+export type LiveSessionHandoffState = "local-running" | "handoff-pending" | "herdr-running" | "returning-local" | "completed";
+export interface LiveSessionHandoff {
+  readonly state: LiveSessionHandoffState;
+  readonly transferred: boolean;
+  observe(event: WorkflowAgentSessionEvent): void;
+  request(launch: () => Promise<void>): Promise<void>;
+  waitForTakeover(): Promise<void>;
+  takeover(): void;
+  waitForResume(): Promise<void>;
+  release(reason?: string): void;
+}
 export interface WorkflowAgentTurnResult { readonly assistant?: WorkflowAgentMessage }
 export interface WorkflowAgentSession {
   readonly reference: WorkflowAgentSessionReference;
   getState(): Readonly<WorkflowAgentSessionState>;
   getSessionStats(): WorkflowAgentSessionStats;
   subscribe(listener: (event: WorkflowAgentSessionEvent) => void): () => void;
+  subscribeAsync?(listener: (event: WorkflowAgentSessionEvent) => void | Promise<void>): () => void;
   prompt(text: string): Promise<WorkflowAgentTurnResult>;
   steer(text: string): Promise<void>;
   abort(): Promise<void>;
+  suspendForHandoff?(): Promise<void>;
+  resumeFromHandoff?(): Promise<void>;
   dispose(): Promise<void>;
 }
 type SessionTools = NonNullable<CreateAgentSessionOptions["tools"]>;
@@ -118,6 +134,7 @@ export interface SessionInput {
   model: ModelSpec;
   tools: SessionTools;
   sessionLabel: string;
+  sessionPath?: string;
   agentDir?: string;
   customTools?: SessionCustomTools;
   resultTool?: ToolDefinition;
@@ -133,11 +150,13 @@ export interface PreparedAgentSession {
   readonly model: ModelSpec;
   readonly tools: readonly string[];
   readonly sessionLabel: string;
+  readonly initialPrompt?: string;
   readonly agentDir?: string;
   readonly customTools?: readonly ToolDefinition[];
   readonly resultTool?: ToolDefinition;
   readonly options?: Readonly<Record<string, JsonValue>>;
   readonly systemPrompt?: string;
+  readonly systemPromptPath?: string;
   readonly systemPromptAppend?: string;
   readonly extensionFactories?: readonly InlineExtension[];
   readonly additionalSkillPaths?: readonly string[];
@@ -152,7 +171,7 @@ export interface RegisteredAgentSetupHook { name: string; priority: number; setu
 export interface WorkflowExtensionMetadata { version: string; headline: string; description: string }
 export interface WorkflowRoleDirectoryRegistration { path: string; extension: WorkflowExtensionMetadata }
 export interface AgentAttemptActionUi { notify(message: string, level?: "info" | "warning" | "error"): void; confirm(title: string, message: string): Promise<boolean>; select(title: string, options: readonly string[]): Promise<string | undefined>; input(title: string, placeholder?: string): Promise<string | undefined> }
-export interface AgentAttemptActionContext { readonly run: Readonly<RunRecord>; readonly agent: Readonly<AgentRecord>; readonly attempt: Readonly<AgentAttemptSummary>; readonly session?: WorkflowAgentSessionReference; readonly liveSession?: WorkflowAgentSession; readonly signal: AbortSignal; readonly ui: Readonly<AgentAttemptActionUi> }
+export interface AgentAttemptActionContext { readonly run: Readonly<RunRecord>; readonly agent: Readonly<AgentRecord>; readonly attempt: Readonly<AgentAttemptSummary>; readonly session?: WorkflowAgentSessionReference; readonly liveSession?: WorkflowAgentSession; readonly prepared?: Readonly<PreparedAgentSession>; readonly handoff?: LiveSessionHandoff; readonly signal: AbortSignal; readonly ui: Readonly<AgentAttemptActionUi> }
 export interface AgentAttemptAction { readonly label: string; visible(context: Readonly<AgentAttemptActionContext>): boolean; run(context: Readonly<AgentAttemptActionContext>): void | Promise<void> }
 export interface WorkflowExtension extends WorkflowExtensionMetadata { functions?: Readonly<Record<string, WorkflowFunction>>; variables?: Readonly<Record<string, WorkflowVariable>>; modelAliases?: Readonly<Record<string, WorkflowModelAlias>>; agentSetupHooks?: Readonly<Record<string, AgentSetupHook>>; agentAttemptActions?: Readonly<Record<string, AgentAttemptAction>>; roleDirectories?: readonly (string | URL)[] }
 export interface WorkflowJournal { get(path: string): JsonValue | undefined; put(path: string, value: JsonValue): void }
@@ -171,7 +190,7 @@ export interface StaticWorkflowCall { kind: WorkflowCallKind; start: number; end
 export interface WorkflowCatalogFunction { name: string; version: string; headline: string; extensionDescription: string; description: string; input: JsonSchema; output: JsonSchema }
 export interface WorkflowCatalogVariable { name: string; version: string; headline: string; extensionDescription: string; description: string; schema: JsonSchema }
 export interface WorkflowCatalogModelAlias { name: string; kind: "static" | "dynamic"; provenance: string; version?: string; headline?: string; extensionDescription?: string }
-export interface WorkflowCatalogSettings { concurrency: number; modelAliases: Readonly<Record<string, string>>; disabledAgentResources: AgentResourceExclusions; globalSettingsPath: string; projectSettingsPath: string; projectTrusted: boolean; sources: WorkflowSettingsSources }
+export interface WorkflowCatalogSettings { concurrency: number; modelAliases: Readonly<Record<string, string>>; disabledAgentResources: AgentResourceExclusions; extensions?: Readonly<WorkflowExtensionSettings>; globalSettingsPath: string; projectSettingsPath: string; projectTrusted: boolean; sources: WorkflowSettingsSources }
 export interface WorkflowCatalogContext { cwd: string; projectTrusted: boolean; globalSettingsPath?: string }
 export interface WorkflowCatalog { functions: readonly WorkflowCatalogFunction[]; variables: readonly WorkflowCatalogVariable[]; modelAliases?: Readonly<Record<string, string>>; modelAliasEntries?: readonly WorkflowCatalogModelAlias[]; settings?: WorkflowCatalogSettings }
 export interface WorkflowCatalogIndexFunction { name: string; description: string; input: JsonSchema }
