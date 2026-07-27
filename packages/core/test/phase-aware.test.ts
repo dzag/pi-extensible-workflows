@@ -131,6 +131,15 @@ void test("phase dashboard shows agent accounting breakdown only when measured",
   assert.match(free, /Tokens: 3 \(in=1 out=2 cache-read=0 cache-write=0\)/);
   assert.match(free, /Cost: \$0\.00/);
 });
+void test("phase dashboard shows workflow and selected agent durations", () => {
+  const now = 100_000;
+  const live = { ...agent("live", "running"), startedAt: now - 12_345 };
+  const completed = { ...agent("completed"), durationMs: 65_432 };
+  const render = (selected: AgentRecord): string => formatWorkflowPhaseDashboard({ ...run("running", [selected]), usage: { tokens: 0, costUsd: 0, durationMs: 12_345, agentLaunches: 0 } }, snapshot(["review"]), 120, { detailsOnly: true, agentId: selected.id }, undefined, now).join("\n");
+  assert.match(render(live), /Run state: running runtime=12s/);
+  assert.match(render(live), /Duration: 12s/);
+  assert.match(render(completed), /Duration: 1m 5s/);
+});
 
 void test("phase and agent selections survive read-model polling", () => {
   const before = buildWorkflowPhaseModel(run("running", [agent("one")], [{ phase: "build", afterAgent: 0 }]), ["build", "review"]);

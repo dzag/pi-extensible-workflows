@@ -824,7 +824,8 @@ function navigatorRunLabels(entries: readonly { store: RunStore; loaded: { run: 
     const suffix = (nameCount.get(run.workflowName) ?? 0) > 1 ? ` ${store.runId.slice(0, 8)}` : "";
     const cost = run.agents.reduce((sum, a) => sum + (a.accounting?.cost ?? 0), 0);
     const costStr = cost > 0 ? ` $${cost.toFixed(2)}` : "";
-    return `${glyph} ${run.workflowName}${suffix}  ${run.state}  ${run.phase ?? ""}  ${String(done)}/${String(run.agents.length)} agents${costStr}`;
+    const runtime = run.usage ? ` runtime=${formatWorkflowRuntime(run.usage.durationMs)}` : "";
+    return `${glyph} ${run.workflowName}${suffix}  ${run.state}  ${run.phase ?? ""}  ${String(done)}/${String(run.agents.length)} agents${costStr}${runtime}`;
   });
 }
 
@@ -865,6 +866,11 @@ function stalledDuration(agent: AgentRecord, now: number): number | undefined {
   const duration = now - agent.lastEventAt;
   return duration >= WORKFLOW_AGENT_STALL_THRESHOLD_MS ? duration : undefined;
 }
+function agentDuration(agent: AgentRecord, now: number): number | undefined {
+  if (agent.durationMs !== undefined && Number.isFinite(agent.durationMs)) return Math.max(0, agent.durationMs);
+  if (agent.startedAt === undefined || !Number.isFinite(agent.startedAt)) return undefined;
+  return Math.max(0, now - agent.startedAt);
+}
 function formatAgentActivity(agent: AgentRecord, spinner: string, styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES, now = Date.now()): string {
   const label = agent.activity?.kind === "reasoning" ? "reasoning" : agent.activity?.kind === "text" ? "responding" : agent.activity?.kind === "tool" ? agent.activity.text : [...(agent.toolCalls ?? [])].reverse().find(({ state }) => state === "running")?.name ?? "";
   const activity = label ? `${styles.accent(spinner)} ${styles.dim(label)}` : "";
@@ -895,7 +901,8 @@ export function formatNavigatorDashboard(run: PersistedRun, checkpoints: readonl
   const hasAccounting = run.agents.some((a) => a.accounting);
   const glyph = runStateGlyph(run.state, "⠦");
   const header = `${glyph} ${run.workflowName}`;
-  const meta = [run.state, run.phase ? `phase: ${run.phase}` : "", `${String(done)}/${String(run.agents.length)} agents`, hasAccounting ? formatAccounting(totalAccounting) : "", totalAccounting.cost > 0 ? `$${totalAccounting.cost.toFixed(2)}` : ""].filter(Boolean).join(" · ");
+  const runtime = run.usage ? `runtime=${formatWorkflowRuntime(run.usage.durationMs)}` : "";
+  const meta = [run.state, run.phase ? `phase: ${run.phase}` : "", `${String(done)}/${String(run.agents.length)} agents`, runtime, hasAccounting ? formatAccounting(totalAccounting) : "", totalAccounting.cost > 0 ? `$${totalAccounting.cost.toFixed(2)}` : ""].filter(Boolean).join(" · ");
   const lines = [header, meta, ...formatCompactBudgetStatus(run)];
   if (run.error) lines.push(`Error: ${run.error.code}: ${run.error.message}`);
   if (run.events?.length) lines.push(...run.events.map((event) => `Warning: ${event.message}`));
@@ -1009,7 +1016,8 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
     const agent = node.agent;
     if (!agent) return [styles.muted("Agent details are unavailable")];
     const byId = new Map(run.agents.map((candidate) => [candidate.id, candidate]));
-    const result = [styles.bold(`Selected agent: ${agentBreadcrumb(agent, byId, true)}`), `State: ${phaseStyle(agent.state)(agent.state)}`, `Structural path: ${agent.structuralPath?.join(" > ") || "(root)"}`, `Model: ${agent.model.provider}/${agent.model.model}${agent.model.thinking ? `:${agent.model.thinking}` : ""}`, `Role: ${agent.role ?? "(none)"}`, `Tools: ${agent.tools.join(", ") || "(none)"}`, `Attempts: ${String(agent.attempts)}`, ...(agent.accounting ? formatAgentAccounting(agent.accounting) : []), ...(selection.actions ? [] : [styles.muted("enter for agent actions")])];
+    const duration = agentDuration(agent, now);
+    const result = [styles.bold(`Selected agent: ${agentBreadcrumb(agent, byId, true)}`), `State: ${phaseStyle(agent.state)(agent.state)}`, `Structural path: ${agent.structuralPath?.join(" > ") || "(root)"}`, `Model: ${agent.model.provider}/${agent.model.model}${agent.model.thinking ? `:${agent.model.thinking}` : ""}`, `Role: ${agent.role ?? "(none)"}`, `Tools: ${agent.tools.join(", ") || "(none)"}`, `Attempts: ${String(agent.attempts)}`, ...(duration === undefined ? [] : [`Duration: ${formatWorkflowRuntime(duration)}`]), ...(agent.accounting ? formatAgentAccounting(agent.accounting) : []), ...(selection.actions ? [] : [styles.muted("enter for agent actions")])];
     const error = agent.attemptDetails?.at(-1)?.error;
     if (error) result.push(styles.error(`Error: ${error.code}: ${error.message}`));
     if (agent.activity) result.push(`Activity: ${agent.activity.text}`);
@@ -1021,7 +1029,8 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
   const statusSummary = stateNames.filter((state) => (model.counts[state] ?? 0) > 0).map((state) => `${String(model.counts[state])} ${state}`).join(" · ") || "0 phases";
   const lines: string[] = [styles.bold(styles.accent(`Workflow: ${run.workflowName}`))];
   if (run.error) lines.push(styles.error(`ERROR ${run.error.code}: ${run.error.message}`));
-  lines.push(`phase: ${run.phase ?? selectedPhase?.name ?? "none"}`, `Run state: ${run.state}`, `Phases: ${statusSummary}`);
+  const runtime = run.usage ? ` runtime=${formatWorkflowRuntime(run.usage.durationMs)}` : "";
+  lines.push(`phase: ${run.phase ?? selectedPhase?.name ?? "none"}`, `Run state: ${run.state}${runtime}`, `Phases: ${statusSummary}`);
   for (const event of run.events ?? []) lines.push(styles.warning(`Warning: ${event.message}`));
   lines.push(...formatCompactBudgetStatus(run));
   const renderTree = (limit: number): string[] => [styles.bold("Tree"), ...(visibleNodes.length ? visibleNodes.flatMap((node) => wrap(treeLine(node), limit)) : [styles.muted("(empty)")])];
@@ -1877,8 +1886,11 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         try { effective = run.executor.resolve(requested); }
         catch { effective = previous ? { model: previous.model, ...(previous.requestedModel ? { requestedModel: previous.requestedModel } : {}), tools: previous.tools } : { model: node.options.model ? modelSpec(node.options.model, run.model) : { ...run.model, ...(node.options.thinking ? { thinking: node.options.thinking } : {}) }, ...(node.options.model ? { requestedModel: node.options.model } : {}), tools: node.options.tools }; }
         const resultPath = !node.parentId && node.options.agentIdentity ? agentIdentityPath(node.options.agentIdentity) : undefined;
-        const lastEventAt = node.state === "running" ? previous?.state === "running" && previous.lastEventAt !== undefined ? previous.lastEventAt : Date.now() : previous?.lastEventAt;
-        return { ...(previous?.systemPrompt === undefined ? {} : { systemPrompt: previous.systemPrompt }), ...(node.prompt !== undefined ? { prompt: node.prompt } : previous?.prompt !== undefined ? { prompt: previous.prompt } : {}), id: node.id, name: node.label, ...(node.options.requestedLabel ? { label: node.options.requestedLabel } : {}), path: node.id, state: node.state, ...(node.parentId ? { parentId: node.parentId } : {}), structuralPath: [...(node.options.agentIdentity?.structuralPath ?? [])], ...(resultPath ? { resultPath } : {}), ...(node.options.parentBreadcrumb ? { parentBreadcrumb: node.options.parentBreadcrumb } : {}), ...(node.options.worktreeOwner ? { worktreeOwner: node.options.worktreeOwner } : {}), ...(node.options.role ? { role: node.options.role } : {}), ...(effective.requestedModel ? { requestedModel: effective.requestedModel } : {}), model: effective.model, tools: effective.tools, attempts: previous?.attempts ?? 0, ...(previous?.attemptDetails ? { attemptDetails: previous.attemptDetails } : {}), ...(previous?.accounting ? { accounting: previous.accounting } : {}), ...(previous?.toolCalls ? { toolCalls: previous.toolCalls } : {}), ...(previous?.activity ? { activity: previous.activity } : {}), ...(lastEventAt === undefined ? {} : { lastEventAt }) };
+        const now = Date.now();
+        const lastEventAt = node.state === "running" ? previous?.state === "running" && previous.lastEventAt !== undefined ? previous.lastEventAt : now : previous?.lastEventAt;
+        const startedAt = previous?.startedAt ?? (node.state === "running" ? now : undefined);
+        const durationMs = previous?.durationMs ?? (SETTLED_AGENT_STATES.has(node.state) && startedAt !== undefined ? Math.max(0, now - startedAt) : undefined);
+        return { ...(previous?.systemPrompt === undefined ? {} : { systemPrompt: previous.systemPrompt }), ...(node.prompt !== undefined ? { prompt: node.prompt } : previous?.prompt !== undefined ? { prompt: previous.prompt } : {}), id: node.id, name: node.label, ...(node.options.requestedLabel ? { label: node.options.requestedLabel } : {}), path: node.id, state: node.state, ...(node.parentId ? { parentId: node.parentId } : {}), structuralPath: [...(node.options.agentIdentity?.structuralPath ?? [])], ...(resultPath ? { resultPath } : {}), ...(node.options.parentBreadcrumb ? { parentBreadcrumb: node.options.parentBreadcrumb } : {}), ...(node.options.worktreeOwner ? { worktreeOwner: node.options.worktreeOwner } : {}), ...(node.options.role ? { role: node.options.role } : {}), ...(effective.requestedModel ? { requestedModel: effective.requestedModel } : {}), model: effective.model, tools: effective.tools, attempts: previous?.attempts ?? 0, ...(startedAt === undefined ? {} : { startedAt }), ...(durationMs === undefined ? {} : { durationMs }), ...(previous?.attemptDetails ? { attemptDetails: previous.attemptDetails } : {}), ...(previous?.accounting ? { accounting: previous.accounting } : {}), ...(previous?.toolCalls ? { toolCalls: previous.toolCalls } : {}), ...(previous?.activity ? { activity: previous.activity } : {}), ...(lastEventAt === undefined ? {} : { lastEventAt }) };
       });
       return { ...current, agents };
     });
@@ -2824,7 +2836,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           };
           const loadDashboard = async () => {
             const loaded = await store.load();
-            const liveRun = withLiveActivities(loaded.run);
+            const activeRun = runs.get(store.runId);
+            const liveRun = withLiveActivities({ ...loaded.run, ...(activeRun ? { usage: activeRun.budget.usage } : {}) });
             const checkpoints = await store.awaitingCheckpoints();
             const worktrees = await store.worktrees();
             const completedOperations = ctx.mode === "tui" ? await store.replayableOperations().catch(() => []) : [];
