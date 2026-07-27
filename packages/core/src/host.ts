@@ -75,6 +75,7 @@ const WORKFLOW_ERROR_PROSE: Record<WorkflowErrorCode, (detail: string) => string
   SHELL_FAILED: (detail) => `The workflow shell command failed: ${detail}.`,
   AGENT_TIMEOUT: (detail) => `The workflow agent timed out: ${detail}.`,
   AGENT_FAILED: (detail) => `The workflow agent failed: ${detail}.`,
+  AGENT_RESULT_COLLECTED: (detail) => `The nested agent result was already collected: ${detail}.`,
   RESULT_INVALID: (detail) => `The workflow produced an invalid result: ${detail}.`,
   CANCELLED: (detail) => `The workflow was cancelled: ${detail}.`,
   WORKER_UNRESPONSIVE: (detail) => `The workflow worker stopped responding: ${detail}.`,

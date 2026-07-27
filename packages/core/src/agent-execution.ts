@@ -751,7 +751,8 @@ export class FairAgentScheduler {
     const parent = this.#node(parentId);
     const child = this.#node(childId);
     if (child.parentId !== parentId) throw new WorkflowError("UNKNOWN_AGENT_TYPE", "Results are scoped to direct children");
-    if (child.collected || child.collecting || !child.promise) throw new WorkflowError("AGENT_FAILED", "Child result has already been collected; nested results are one-shot");
+    if (child.collected || !child.promise) throw new WorkflowError("AGENT_RESULT_COLLECTED", "Child result has already been collected; nested results are one-shot");
+    if (child.collecting) throw new WorkflowError("AGENT_FAILED", "Child result is already being collected");
     child.collecting = true;
     const childPromise = child.promise;
     try {
@@ -783,10 +784,11 @@ export class FairAgentScheduler {
 
   cancel(id: string): void { this.#cancelTree(this.#node(id)); }
   releaseResult(id: string): void {
-    const node = this.#node(id);
-    if (!node.promise) return;
+    const node = this.#nodes.get(id);
+    if (!node || !node.promise) return;
     if (!["completed", "failed", "cancelled"].includes(node.state)) throw new WorkflowError("INTERNAL_ERROR", `Cannot release active agent result: ${id}`);
     node.promise = undefined;
+    node.task = async () => undefined;
   }
   cancelChildren(id: string): void {
     for (const childId of this.#node(id).children) { const child = this.#nodes.get(childId); if (child) this.#cancelTree(child); }
@@ -845,7 +847,7 @@ export class FairAgentScheduler {
       },
     } as ToolDefinition;
     const resultTool = {
-      name: "get_subagent_result", label: "Child Result", description: "Wait for a direct child and return its result once; repeated retrieval fails",
+      name: "get_subagent_result", label: "Child Result", description: "Wait for a direct child and return its result once; repeated retrieval fails with AGENT_RESULT_COLLECTED",
       parameters: Type.Object({ id: Type.String() }),
       execute: async (_id: string, params: { id: string }) => { const value = await this.result(parentId, params.id); if (!value.ok && value.error.code === "BUDGET_EXHAUSTED") throw new WorkflowError("BUDGET_EXHAUSTED", value.error.message); return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value }; }
     } as ToolDefinition;

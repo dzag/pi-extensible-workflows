@@ -98,6 +98,8 @@ const fix = await agent(
 return { findings, fix };
 ```
 
+Direct nested-agent results are one-shot: `get_subagent_result` releases the scheduler payload after successful delivery, and a repeated retrieval fails with `AGENT_RESULT_COLLECTED`. Retry only when the earlier tool call failed before delivering the result.
+
 ## Worktrees
 
 Use `withWorktree(name, callback)` for top-level agents that collaborate in one explicitly named worktree scope:
