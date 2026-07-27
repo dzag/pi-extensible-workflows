@@ -212,7 +212,6 @@ const functions = Object.freeze(Object.fromEntries(Object.entries(config.functio
   Object.defineProperty(result, "toJSON", { value() { throw workError("INVALID_METADATA", "Workflow function result is a Promise; await it before serialization"); } });
   return result;
 }])));
-const freeze = value => { if (value && typeof value === "object" && !Object.isFrozen(value)) { Object.freeze(value); for (const child of Object.values(value)) freeze(child); } return value; };
 const recordEntries = (value, kind) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw workError("INVALID_METADATA", kind + " must be a record");
   return Object.entries(value);
@@ -271,7 +270,6 @@ const pipeline = async (operationName, items, stages) => {
 const safeMath = Object.fromEntries(Object.getOwnPropertyNames(Math).filter(name => name !== "random").map(name => [name, Math[name]]));
 const sandbox = { agent, shell, withWorktree: rejectWorktree, prompt, checkpoint, parallel, pipeline, phase, log, args: config.args, Promise, JSON, Math: Object.freeze(safeMath) };
 for (const [name, fn] of Object.entries(functions)) Object.defineProperty(sandbox, name, { value: fn, writable: false, configurable: false });
-for (const [name, value] of Object.entries(config.variables || {})) Object.defineProperty(sandbox, name, { value: freeze(value), writable: false, configurable: false });
 for (const name of ["Date","eval","Function","WebAssembly","process","require","module","exports","console","fetch","XMLHttpRequest","WebSocket","performance","crypto","setTimeout","setInterval","setImmediate","queueMicrotask","Intl","SharedArrayBuffer","Atomics"]) sandbox[name] = undefined;
 const context = vm.createContext(sandbox, { codeGeneration: { strings: false, wasm: false } });
 const body = config.script;
@@ -395,7 +393,7 @@ function workflowErrorFromWorker(error: WorkerErrorShape): WorkflowError {
 }
 export function runWorkflow(script: string, args: JsonValue = null, bridge: WorkflowBridge = {}, signal?: AbortSignal): WorkflowExecution {
   encoded(args);
-  const config = JSON.stringify({ script: instrumentWorkflow(script), args: structuredClone(args), functions: bridge.functions ?? {}, variables: bridge.variables ?? {} });
+  const config = JSON.stringify({ script: instrumentWorkflow(script), args: structuredClone(args), functions: bridge.functions ?? {} });
   const childDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-wf-")));
   const childFile = join(childDir, "child.cjs");
   writeFileSync(childFile, childSource);

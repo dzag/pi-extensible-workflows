@@ -3,6 +3,7 @@
 
 ### Breaking changes
 
+- Removed extension variables. Use registered functions for reusable host-side capabilities and return values ([#155](https://github.com/vekexasia/pi-extensible-workflows/issues/155)).
 - Removed the exported Herdr pane `inspect`, `transcript`, and `fork` actions. Pane inspection was already non-functional after the CLI extraction, while attempt forking did work; `piewf inspect` and `piewf transcript` remain available as ordinary CLI commands.
 
 ### Packaging
