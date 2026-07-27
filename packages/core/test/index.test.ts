@@ -193,11 +193,12 @@ void test("registers the workflow tool, command, and conditional skill", async (
     on(name: string, candidate: unknown) { if (name === "resources_discover") discover = candidate as typeof discover; },
   };
   workflowExtension(pi as never);
-  assert.deepEqual(tools.map(({ name }) => name), ["workflow_respond", "workflow_stop", "workflow_retry", "workflow_resume", "workflow"]);
+  assert.deepEqual(tools.map(({ name }) => name), ["workflow_respond", "workflow_stop", "workflow_status", "workflow_retry", "workflow_resume", "workflow"]);
   assert.deepEqual(commands.map(({ name }) => name), ["workflow"]);
   const tool = tools.find(({ name }) => name === "workflow");
   assert.ok(tool);
   assert.equal(tool.promptGuidelines, undefined);
+  assert.match(tool.promptSnippet ?? "", /After failure follow-ups.*workflow_status\(\{ runId \}\).*before recovery or replacement work/);
   assert.match(tool.promptSnippet ?? "", /Recovery map: agent\(\.\.\., \{ retries \}\).*workflow_retry\(\{ runId, foreground\? \}\).*workflow_resume\(\{ runId, budget\?, foreground\? \}\).*parentRunId/);
   assert.ok(discover);
   assert.ok(discover()?.skillPaths?.some((path) => existsSync(path)));
