@@ -4,9 +4,9 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Type } from "@earendil-works/pi-ai";
+import { Type, type Api, type Model } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
-import { copyToClipboard, getAgentDir, SettingsManager, truncateToVisualLines, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
+import { copyToClipboard, getAgentDir, ModelSelectorComponent, SettingsManager, truncateToVisualLines, type ExtensionAPI, type ExtensionUIContext, type ModelRuntime, type Theme } from "@earendil-works/pi-coding-agent";
 import { FairAgentScheduler, WorkflowAgentExecutor, localAgentTransport, type AgentActivity, type AgentAttempt, type AgentDefinition, type AgentProgress, type AgentProviderFailure, type AgentProviderRecovery } from "./agent-execution.js";
 import { herdrPaneId, openHerdrPane } from "./herdr.js";
 import { acquireSessionLease, listRunIds, RunStore, SessionLease, structuralPath as operationPath } from "./persistence.js";
@@ -1493,15 +1493,17 @@ function piHostCapabilities(pi: unknown): PiHostCapabilities {
   return { ...(registerEntryRenderer ? { registerEntryRenderer } : {}), ...(isWorkflowEventSink(events) ? { events } : {}) };
 }
 type ContextHostCapabilities = { modelRegistry?: ModelRegistryCapability };
-type ModelSummary = { provider: string; id: string };
-type ModelRegistryGetter = () => readonly ModelSummary[];
-type ModelRegistryCapability = { getAll?: ModelRegistryGetter; getAvailable?: ModelRegistryGetter };
+type ModelRegistryGetter = () => readonly Model<Api>[];
+type ModelRegistryCapability = { getAll?: ModelRegistryGetter; getAvailable?: ModelRegistryGetter; find?: (provider: string, model: string) => Model<Api> | undefined; refresh?: () => Promise<void>; getError?: () => string | undefined };
 function contextHostCapabilities(ctx: unknown): ContextHostCapabilities {
   if (!object(ctx) || !object(ctx.modelRegistry)) return {};
   const registry = ctx.modelRegistry;
-  const getAll = (asFn(registry.getAll) as ModelRegistryGetter | undefined);
-  const getAvailable = (asFn(registry.getAvailable) as ModelRegistryGetter | undefined);
-  return { modelRegistry: { ...(getAll ? { getAll: () => getAll.call(registry) } : {}), ...(getAvailable ? { getAvailable: () => getAvailable.call(registry) } : {}) } };
+  const getAll = asFn(registry.getAll) as ModelRegistryGetter | undefined;
+  const getAvailable = asFn(registry.getAvailable) as ModelRegistryGetter | undefined;
+  const find = asFn(registry.find) as ModelRegistryCapability["find"];
+  const refresh = asFn(registry.refresh) as ModelRegistryCapability["refresh"];
+  const getError = asFn(registry.getError) as ModelRegistryCapability["getError"];
+  return { modelRegistry: { ...(getAll ? { getAll: () => getAll.call(registry) } : {}), ...(getAvailable ? { getAvailable: () => getAvailable.call(registry) } : {}), ...(find ? { find: (provider, model) => find.call(registry, provider, model) } : {}), ...(refresh ? { refresh: () => refresh.call(registry) } : {}), ...(getError ? { getError: () => getError.call(registry) } : {}) } };
 }
 function modelInventory(root: ModelSpec | undefined, registry: ModelRegistryCapability | undefined): { knownModels: ReadonlySet<string>; availableModels: ReadonlySet<string> } {
   const all = registry?.getAll?.() ?? registry?.getAvailable?.() ?? [];
@@ -1533,13 +1535,14 @@ async function resolveLaunchAliases(registry: WorkflowRegistryApi, staticAliases
 type UiSelect = (title: string, options: string[]) => Promise<string | undefined>;
 type UiInput = (title: string, placeholder?: string) => Promise<string | undefined>;
 type UiSetStatus = (key: string, text?: string) => void;
-type UiHostCapabilities = { select?: UiSelect; input?: UiInput; setStatus?: UiSetStatus };
+type UiHostCapabilities = { select?: UiSelect; input?: UiInput; setStatus?: UiSetStatus; custom?: ExtensionUIContext["custom"] };
 function uiHostCapabilities(ui: unknown): UiHostCapabilities | undefined {
   if (!object(ui)) return undefined;
-  const select = (asFn(ui.select) as UiSelect | undefined);
-  const input = (asFn(ui.input) as UiInput | undefined);
-  const setStatus = (asFn(ui.setStatus) as UiSetStatus | undefined);
-  return { ...(select ? { select } : {}), ...(input ? { input } : {}), ...(setStatus ? { setStatus } : {}) };
+  const select = asFn(ui.select) as UiSelect | undefined;
+  const input = asFn(ui.input) as UiInput | undefined;
+  const setStatus = asFn(ui.setStatus) as UiSetStatus | undefined;
+  const custom = asFn(ui.custom) as ExtensionUIContext["custom"] | undefined;
+  return { ...(select ? { select } : {}), ...(input ? { input } : {}), ...(setStatus ? { setStatus } : {}), ...(custom ? { custom } : {}) };
 }
 function tuiRows(tui: unknown): number {
   const rows = object(tui) && object(tui.terminal) ? tui.terminal.rows : undefined;
@@ -1602,20 +1605,45 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
   const createProviderErrorRecovery = (host: unknown, fallbackModels: ReadonlySet<string>, abort: () => void) => {
     if (!object(host) || host.mode !== "tui" || host.hasUI !== true) return undefined;
     const ui = object(host.ui) ? host.ui : undefined;
-    const select = uiHostCapabilities(ui)?.select;
+    const uiCapabilities = uiHostCapabilities(ui);
+    const select = uiCapabilities?.select;
     if (!select) return undefined;
     const hostModels = contextHostCapabilities(host).modelRegistry;
     const choose = (title: string, options: string[]) => select.call(ui, title, options);
-    return (failure: AgentProviderFailure): Promise<AgentProviderRecovery> => enqueueProviderRecovery(async () => {
-      const action = await choose(`Subagent "${failure.label}" failed\nCurrent provider/model: ${failure.provider}/${failure.model}\nProvider error: ${failure.error}\nChoose what to do`, ["Retry", "Change model", "Abort workflow"]);
-      if (action === "Retry") return "retry";
-      if (action === "Change model") {
-        const available = hostModels?.getAvailable?.().map((model) => `${model.provider}/${model.id}`) ?? [...fallbackModels];
-        const selected = await choose(`Available models for subagent "${failure.label}"`, [...new Set(available)].sort());
-        if (selected) return { model: selected };
+    const chooseModel = async (failure: AgentProviderFailure): Promise<string | undefined> => {
+      const custom = uiCapabilities.custom;
+      const getAvailable = hostModels?.getAvailable;
+      if (!custom || !getAvailable) {
+        const available = getAvailable ? getAvailable().map((model) => `${model.provider}/${model.id}`) : [...fallbackModels];
+        return choose(`Available models for subagent "${failure.label}"`, [...new Set(available)].sort());
       }
-      abort();
-      return "abort";
+      const available = getAvailable();
+      const current = hostModels.find?.(failure.provider, failure.model) ?? available.find((model) => model.provider === failure.provider && model.id === failure.model);
+      const runtime = {
+        getAvailableSnapshot: getAvailable,
+        refresh: async ({ signal }: { signal?: AbortSignal } = {}) => {
+          if (signal?.aborted) return { aborted: true, errors: new Map() };
+          try { await hostModels.refresh?.(); return { aborted: false, errors: new Map() }; }
+          catch (error) { return { aborted: false, errors: new Map([["models", error]]) }; }
+        },
+        getModel: (provider: string, model: string) => hostModels.find?.(provider, model) ?? getAvailable().find((candidate) => candidate.provider === provider && candidate.id === model),
+        getError: () => hostModels.getError?.(),
+      } as unknown as ModelRuntime;
+      const settings = { setDefaultModelAndProvider() {} } as unknown as SettingsManager;
+      return await custom.call(ui, (tui, _theme, _keybindings, done) => new ModelSelectorComponent(tui, current, settings, runtime, [], (model) => { done(`${model.provider}/${model.id}`); }, () => { done(undefined); })) as string | undefined;
+    };
+    return (failure: AgentProviderFailure): Promise<AgentProviderRecovery> => enqueueProviderRecovery(async () => {
+      for (;;) {
+        const action = await choose(`Subagent "${failure.label}" failed\nCurrent provider/model: ${failure.provider}/${failure.model}\nProvider error: ${failure.error}\nChoose what to do`, ["Retry", "Change model", "Abort workflow"]);
+        if (action === "Retry") return "retry";
+        if (action === "Change model") {
+          const selected = await chooseModel(failure);
+          if (selected) return { model: selected };
+          continue;
+        }
+        abort();
+        return "abort";
+      }
     });
   };
   const pendingFailureDiagnostics = new Map<string, WorkflowFailureDiagnostics>();

@@ -770,6 +770,33 @@ void test("TUI terminal provider recovery changes model before a fresh attempt",
     await shutdown?.();
   }
 });
+void test("escaping the searchable recovery model picker returns to the recovery action menu", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-provider-recovery-model-cancel-"));
+  let prompts = 0;
+  let customCalls = 0;
+  let shutdown: (() => Promise<void>) | undefined;
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => {
+    const messages: Array<{ role: string; content: unknown; stopReason?: string; errorMessage?: string }> = [{ role: "assistant", content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: "MODEL_UNAVAILABLE" }];
+    return { sessionId: "recovery-model-cancel", sessionFile: "/sessions/recovery-model-cancel.jsonl", model: { provider: input.model.provider, model: input.model.model }, messages, getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { if (prompts >= 2) messages[0] = { role: "assistant", content: [{ type: "text", text: "done" }] }; }, steer: async () => {}, dispose() {} };
+  };
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
+  const workflow = tools.find(({ name }) => name === "workflow");
+  assert.ok(workflow);
+  const models = [{ provider: "openai", id: "gpt", name: "GPT" }, { provider: "anthropic", id: "opus", name: "Opus" }];
+  const context = { cwd: home, mode: "tui", hasUI: true, model: models[0], modelRegistry: { getAvailable: () => models, find: (provider: string, id: string) => models.find((model) => model.provider === provider && model.id === id) }, sessionManager: { getSessionId: () => "session" }, ui: {
+    select: async () => { prompts += 1; return prompts === 1 ? "Change model" : "Retry"; },
+    custom: async () => { customCalls += 1; return undefined; },
+  } };
+  try {
+    const result = await workflow.execute("id", { name: "provider-recovery-model-cancel", script: "return await agent('work', {label:'worker'});", foreground: true }, new AbortController().signal, undefined, context) as { details?: { value?: unknown } };
+    assert.equal(result.details?.value, "done");
+    assert.equal(customCalls, 1);
+    assert.equal(prompts, 2);
+  } finally {
+    await shutdown?.();
+  }
+});
 void test("TUI provider recovery aborts the workflow even when workflow code catches the agent failure", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-provider-recovery-abort-"));
   let shutdown: (() => Promise<void>) | undefined;
