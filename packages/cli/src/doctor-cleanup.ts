@@ -12,7 +12,7 @@ const TERMINAL_STATES = new Set<RunState>(["completed", "failed", "stopped"]);
 const DAY_MS = 24 * 60 * 60 * 1000;
 const REQUIRED_RUN_FILES = ["workflow.js", "state.json", "snapshot.json", "journal.json", "ownership.json", "worktrees.json", "borrowed-worktrees.json", "system-prompts.json"] as const;
 const OPTIONAL_RUN_FILES = new Set(["result.json", "summary.json"]);
-const RUN_DIRECTORIES = new Set(["worktrees"]);
+const RUN_DIRECTORIES = new Set(["worktrees", ".system-prompts"]);
 const RUN_FILES = new Set<string>([...REQUIRED_RUN_FILES, ...OPTIONAL_RUN_FILES]);
 const AGENT_STATES = new Set(["queued", "running", "waiting_for_child", "paused", "retrying", "completed", "failed", "cancelled"]);
 const SCHEDULER_STATES = new Set(["queued", "running", "waiting_for_child", "paused", "retrying", "completed", "failed", "cancelled"]);
@@ -145,7 +145,9 @@ function validateSnapshot(snapshot: unknown): void {
   for (const [index, schema] of snapshot.schemas.entries()) validateSchema(schema, `Persisted snapshot schema[${String(index)}]`);
 }
 function validateJournal(value: unknown): void { if (!object(value) || !object(value.completed) || (value.awaiting !== undefined && !object(value.awaiting)) || (value.decisions !== undefined && !object(value.decisions))) throw new Error("Persisted workflow journal is invalid"); for (const operation of Object.values(value.completed)) if (!object(operation) || typeof operation.path !== "string" || !operation.path || !jsonValue(operation.value)) throw new Error("Persisted completed operation is invalid"); for (const checkpoint of Object.values(value.awaiting ?? {})) if (!object(checkpoint) || typeof checkpoint.path !== "string" || !checkpoint.path || typeof checkpoint.name !== "string" || !checkpoint.name || typeof checkpoint.prompt !== "string" || !jsonValue(checkpoint.context)) throw new Error("Persisted awaiting checkpoint is invalid"); for (const decision of Object.values(value.decisions ?? {})) { if (!object(decision) || decision.kind !== "budget" || typeof decision.proposalId !== "string" || !decision.proposalId || typeof decision.runId !== "string" || !decision.runId || !object(decision.previous) || !object(decision.proposed) || !Number.isSafeInteger(decision.budgetVersion) || Number(decision.budgetVersion) < 1) throw new Error("Persisted budget decision is invalid"); validateUsage(decision.consumed, "Persisted budget decision usage"); validateBudget(decision.previous); validateBudget(decision.proposed); } }
-function validateSystemPrompts(value: unknown): void {
+async function validateSystemPrompts(store: RunStore): Promise<void> {
+  const value = await jsonFile(store.systemPromptPath());
+  if (object(value) && value.version === 2) { await store.systemPrompts(); return; }
   if (!object(value) || value.version !== 1 || !Array.isArray(value.entries)) throw new Error("Persisted system prompts are invalid");
   for (const [index, entry] of value.entries.entries()) {
     const label = `system-prompts.entries[${String(index)}]`;
@@ -164,7 +166,7 @@ async function validateRunArtifacts(store: RunStore, workflowScript: string, sta
   await validateRunDirectory(store);
   for (const name of REQUIRED_RUN_FILES) await requiredFile(join(store.directory, name));
   if (await readFile(join(store.directory, "workflow.js"), "utf8") !== workflowScript) throw new Error("Persisted workflow source does not match its launch snapshot");
-  validateSystemPrompts(await jsonFile(join(store.directory, "system-prompts.json")));
+  await validateSystemPrompts(store);
   const result = await jsonFile(join(store.directory, "result.json")).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
   if (result === undefined && state === "completed") throw new Error("Completed run result is missing");
   if (result !== undefined && !jsonValue(result)) throw new Error("Persisted workflow result is invalid");

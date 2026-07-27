@@ -23,6 +23,11 @@ export type PersistedOwnershipNode = OwnershipRecord
 type Journal = { completed: Record<string, CompletedOperation>; awaiting?: Record<string, AwaitingCheckpoint>; decisions?: Record<string, PendingWorkflowDecision> };
 const TERMINAL_SUMMARY_STATES = new Set(["completed", "failed", "stopped"]);
 const EMPTY_USAGE: WorkflowBudgetUsage = { tokens: 0, costUsd: 0, durationMs: 0, agentLaunches: 0 };
+const SYSTEM_PROMPT_STORAGE = ".system-prompts";
+const SYSTEM_PROMPT_RECORDS = "records";
+const SYSTEM_PROMPT_BODIES = "bodies";
+const SYSTEM_PROMPT_SEQUENCE = "sequence";
+const SYSTEM_PROMPT_ARTIFACT = { version: 2 as const, format: "append-only" as const, storage: SYSTEM_PROMPT_STORAGE };
 function summaryArtifacts(directory: string): RunSummaryArtifacts { return { runDirectory: directory, statePath: join(directory, "state.json"), journalPath: join(directory, "journal.json"), snapshotPath: join(directory, "snapshot.json"), workflowPath: join(directory, "workflow.js"), resultPath: join(directory, "result.json"), summaryPath: join(directory, "summary.json") }; }
 function summaryFromRun(run: PersistedRun, directory: string, journal: Journal, previous: Partial<RunSummary> | undefined, fallbackCreatedAt: string, now = new Date().toISOString()): RunSummary {
   const createdAt = typeof previous?.createdAt === "string" ? previous.createdAt : fallbackCreatedAt;
@@ -213,6 +218,18 @@ async function atomicJson(path: string, value: unknown): Promise<void> {
 }
 
 async function json<T>(path: string): Promise<T> { return JSON.parse(await readFile(path, "utf8")) as T; }
+function systemPromptStoragePath(directory: string): string { return join(directory, SYSTEM_PROMPT_STORAGE); }
+function systemPromptRecordsPath(directory: string): string { return join(systemPromptStoragePath(directory), SYSTEM_PROMPT_RECORDS); }
+function systemPromptBodiesPath(directory: string): string { return join(systemPromptStoragePath(directory), SYSTEM_PROMPT_BODIES); }
+function systemPromptSequencePath(directory: string): string { return join(systemPromptStoragePath(directory), SYSTEM_PROMPT_SEQUENCE); }
+function systemPromptRecordName(sequence: number): string { return `${String(sequence).padStart(20, "0")}.json`; }
+async function createSystemPromptStorage(directory: string, writeArtifact: boolean): Promise<void> {
+  const storage = systemPromptStoragePath(directory);
+  await mkdir(join(storage, SYSTEM_PROMPT_RECORDS), { recursive: true, mode: 0o700 });
+  await mkdir(join(storage, SYSTEM_PROMPT_BODIES), { recursive: true, mode: 0o700 });
+  await atomicWriteFile(systemPromptSequencePath(directory), "0\n");
+  if (writeArtifact) await atomicJson(join(directory, "system-prompts.json"), SYSTEM_PROMPT_ARTIFACT);
+}
 
 export class RunStore {
   readonly directory: string;
@@ -244,7 +261,7 @@ export class RunStore {
       await atomicJson(join(temporary, "worktrees.json"), []);
       await atomicJson(join(temporary, "borrowed-worktrees.json"), []);
       await atomicJson(join(temporary, "state.json"), run);
-      await atomicJson(join(temporary, "system-prompts.json"), { version: 1, entries: [] });
+      await createSystemPromptStorage(temporary, true);
       await atomicJson(join(temporary, "summary.json"), summaryFromRun(run, this.directory, { completed: {} }, undefined, new Date().toISOString()));
       await rename(temporary, this.directory);
     } catch (error) {
@@ -336,21 +353,78 @@ export class RunStore {
   }
 
   systemPromptPath(): string { return join(this.directory, "system-prompts.json"); }
-
+  private async readSystemPromptArtifact(): Promise<{ version: number; format?: unknown; storage?: unknown; entries?: EffectiveSystemPrompt[] } | undefined> {
+    return json<{ version: number; format?: unknown; storage?: unknown; entries?: EffectiveSystemPrompt[] }>(this.systemPromptPath()).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
+  }
+  private async appendSystemPromptV2(entry: Omit<EffectiveSystemPrompt, "sha256">): Promise<void> {
+    const sha256 = createHash("sha256").update(entry.prompt).digest("hex");
+    const bodyPath = join(systemPromptBodiesPath(this.directory), sha256);
+    try { await access(bodyPath); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; await atomicWriteFile(bodyPath, entry.prompt); }
+    const previous = Number(await readFile(systemPromptSequencePath(this.directory), "utf8"));
+    if (!Number.isSafeInteger(previous) || previous < 0 || previous >= Number.MAX_SAFE_INTEGER) throw new Error("Persisted system-prompt sequence is invalid");
+    const sequence = previous + 1;
+    await atomicWriteFile(systemPromptSequencePath(this.directory), `${String(sequence)}\n`);
+    await atomicJson(join(systemPromptRecordsPath(this.directory), systemPromptRecordName(sequence)), { sessionId: entry.sessionId, attempt: entry.attempt, turn: entry.turn, sha256 });
+  }
+  private async migrateSystemPrompts(legacy: { version: number; entries?: EffectiveSystemPrompt[] }): Promise<void> {
+    await rm(systemPromptStoragePath(this.directory), { recursive: true, force: true });
+    await createSystemPromptStorage(this.directory, false);
+    for (const entry of legacy.entries ?? []) await this.appendSystemPromptV2(entry);
+    await atomicJson(this.systemPromptPath(), SYSTEM_PROMPT_ARTIFACT);
+  }
+  private async prepareSystemPromptStorage(): Promise<void> {
+    const artifact = await this.readSystemPromptArtifact();
+    if (artifact === undefined) {
+      await rm(systemPromptStoragePath(this.directory), { recursive: true, force: true });
+      await createSystemPromptStorage(this.directory, true);
+    } else if (artifact.version === 1) {
+      if (!Array.isArray(artifact.entries)) throw new Error("Persisted system prompts are invalid");
+      await this.migrateSystemPrompts(artifact);
+    } else if (artifact.version !== SYSTEM_PROMPT_ARTIFACT.version || artifact.format !== SYSTEM_PROMPT_ARTIFACT.format || artifact.storage !== SYSTEM_PROMPT_ARTIFACT.storage) throw new Error("Persisted system prompts are invalid");
+  }
+  private async readSystemPromptsV2(): Promise<readonly EffectiveSystemPrompt[]> {
+    const artifact = await this.readSystemPromptArtifact();
+    if (!artifact || artifact.version !== SYSTEM_PROMPT_ARTIFACT.version || artifact.format !== SYSTEM_PROMPT_ARTIFACT.format || artifact.storage !== SYSTEM_PROMPT_ARTIFACT.storage) throw new Error("Persisted system prompts are invalid");
+    const sequence = Number(await readFile(systemPromptSequencePath(this.directory), "utf8"));
+    if (!Number.isSafeInteger(sequence) || sequence < 0) throw new Error("Persisted system-prompt sequence is invalid");
+    const names = (await readdir(systemPromptRecordsPath(this.directory))).filter((name) => !name.endsWith(".tmp")).sort();
+    const entries: EffectiveSystemPrompt[] = [];
+    let highest = 0;
+    for (const name of names) {
+      const match = /^(\d{20})\.json$/.exec(name);
+      if (!match) throw new Error("Persisted system-prompt records are invalid");
+      const recordSequence = Number(match[1]);
+      if (!Number.isSafeInteger(recordSequence) || recordSequence < 1) throw new Error("Persisted system-prompt records are invalid");
+      highest = Math.max(highest, recordSequence);
+      const record = await json<Record<string, unknown>>(join(systemPromptRecordsPath(this.directory), name));
+      const sessionId = record.sessionId;
+      const attempt = record.attempt;
+      const turn = record.turn;
+      const sha256 = record.sha256;
+      if (typeof sessionId !== "string" || !sessionId || typeof attempt !== "number" || !Number.isSafeInteger(attempt) || attempt < 1 || typeof turn !== "number" || !Number.isSafeInteger(turn) || turn < 1 || typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256)) throw new Error("Persisted system-prompt record is invalid");
+      const prompt = await readFile(join(systemPromptBodiesPath(this.directory), sha256), "utf8");
+      if (createHash("sha256").update(prompt).digest("hex") !== sha256) throw new Error("Persisted system-prompt body is invalid");
+      entries.push({ sessionId, attempt, turn, sha256, prompt });
+    }
+    if (sequence < highest) throw new Error("Persisted system-prompt sequence is invalid");
+    return entries;
+  }
   async recordSystemPrompt(entry: Omit<EffectiveSystemPrompt, "sha256">): Promise<void> {
     const write = this.systemPromptWrite.then(async () => {
-      const path = this.systemPromptPath();
-      const artifact = await json<{ version: 1; entries: EffectiveSystemPrompt[] }>(path).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1 as const, entries: [] as EffectiveSystemPrompt[] }; throw error; });
-      artifact.entries.push({ ...entry, sha256: createHash("sha256").update(entry.prompt).digest("hex") });
-      await atomicJson(path, artifact);
+      await this.prepareSystemPromptStorage();
+      await this.appendSystemPromptV2(entry);
     });
     this.systemPromptWrite = write.catch(() => undefined);
     await write;
   }
-
   async systemPrompts(): Promise<readonly EffectiveSystemPrompt[]> {
     await this.systemPromptWrite;
-    return (await json<{ version: 1; entries: EffectiveSystemPrompt[] }>(this.systemPromptPath()).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1 as const, entries: [] }; throw error; })).entries;
+    const artifact = await this.readSystemPromptArtifact();
+    if (artifact === undefined) return [];
+    if (artifact.version === 1) return artifact.entries ?? [];
+    if (artifact.version === SYSTEM_PROMPT_ARTIFACT.version) return this.readSystemPromptsV2();
+    throw new Error("Persisted system prompts are invalid");
   }
 
   private async updateJournal<T>(update: (journal: Journal) => T | Promise<T>): Promise<T> {
