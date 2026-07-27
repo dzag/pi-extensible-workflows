@@ -75,6 +75,7 @@ const WORKFLOW_ERROR_PROSE: Record<WorkflowErrorCode, (detail: string) => string
   SHELL_FAILED: (detail) => `The workflow shell command failed: ${detail}.`,
   AGENT_TIMEOUT: (detail) => `The workflow agent timed out: ${detail}.`,
   AGENT_FAILED: (detail) => `The workflow agent failed: ${detail}.`,
+  AGENT_RESULT_COLLECTED: (detail) => `The nested agent result was already collected: ${detail}.`,
   RESULT_INVALID: (detail) => `The workflow produced an invalid result: ${detail}.`,
   CANCELLED: (detail) => `The workflow was cancelled: ${detail}.`,
   WORKER_UNRESPONSIVE: (detail) => `The workflow worker stopped responding: ${detail}.`,
@@ -2113,6 +2114,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const outcome = await spawned.result.finally(() => { agentSignal.removeEventListener("abort", cancel); });
       if (!outcome.ok) throw new WorkflowError(outcome.error.code as WorkflowErrorCode, outcome.error.message);
       await store.complete(path, outcome.value);
+      scheduler.releaseResult(spawned.id);
       return outcome.value;
     } finally { await lifecycle.leave(); }
   };

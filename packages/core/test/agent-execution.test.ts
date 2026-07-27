@@ -967,6 +967,70 @@ void test("scheduler flush waits for terminal ownership persistence", async () =
   await scheduler.flush();
   assert.equal((writes.at(-1)?.[0] as { state: string }).state, "completed");
 });
+void test("releases consumed scheduler result payloads while retaining node metadata", async () => {
+  const references: WeakRef<object>[] = [];
+  const scheduler = new FairAgentScheduler(async ({ prompt }) => {
+    const result = { prompt, payload: `${prompt}-${"x".repeat(1024 * 1024)}` };
+    references.push(new WeakRef(result));
+    return result;
+  }, 1);
+  scheduler.addRun("run", 1);
+  const consume = async (index: number) => {
+    const agent = scheduler.spawn("run", `work-${String(index)}`, { label: "worker", cwd: "/repo", tools: ["read"], model: "openai/gpt" });
+    const outcome = await agent.result;
+    assert.equal(outcome.ok, true);
+    scheduler.releaseResult(agent.id);
+  };
+  for (let index = 0; index < 200; index += 1) await consume(index);
+  const forceGc = (globalThis as typeof globalThis & { gc?: () => void }).gc;
+  assert.ok(forceGc, "regression test requires --expose-gc");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    forceGc();
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
+  }
+  const live = references.filter((reference) => reference.deref() !== undefined).length;
+  assert.ok(live < 10, `scheduler retained ${String(live)} of ${String(references.length)} consumed results`);
+  assert.equal(scheduler.snapshot().length, 200);
+  const last = scheduler.snapshot().at(-1);
+  assert.deepEqual(last && { id: last.id, state: last.state, label: last.options.label, model: last.options.model, tools: last.options.tools }, { id: "run:200", state: "completed", label: "worker", model: "openai/gpt", tools: ["read"] });
+});
+void test("collected nested results are one-shot after payload release", async () => {
+  const references: WeakRef<object>[] = [];
+  const scheduler = new FairAgentScheduler(async ({ prompt, signal }) => {
+    if (prompt === "parent") { await new Promise<void>((resolve) => { signal.addEventListener("abort", () => { resolve(); }, { once: true }); }); throw new WorkflowError("CANCELLED", "cancelled"); }
+    const result = { prompt, payload: `${prompt}-${"x".repeat(1024 * 1024)}` };
+    references.push(new WeakRef(result));
+    return result;
+  }, 2);
+  scheduler.addRun("run", 2);
+  const parent = scheduler.spawn("run", "parent", { label: "parent", cwd: "/repo", tools: [] });
+  const child = scheduler.spawn("run", "child", { label: "child", cwd: "/repo", tools: [] }, parent.id);
+  const collect = async () => {
+    const outcome = await scheduler.result(parent.id, child.id);
+    assert.equal(outcome.ok, true);
+  };
+  await collect();
+  const forceGc = (globalThis as typeof globalThis & { gc?: () => void }).gc;
+  assert.ok(forceGc, "regression test requires --expose-gc");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    forceGc();
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
+  }
+  const live = references.filter((reference) => reference.deref() !== undefined).length;
+  assert.ok(live < 2, `scheduler retained ${String(live)} collected nested results`);
+  await assert.rejects(scheduler.result(parent.id, child.id), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_RESULT_COLLECTED" && /one-shot/.test(error.message));
+  scheduler.cancel(parent.id);
+  assert.equal((await parent.result).ok, false);
+});
+void test("releasing a result after run cleanup is harmless", async () => {
+  const scheduler = new FairAgentScheduler(async () => "done", 1);
+  scheduler.addRun("run", 1);
+  const agent = scheduler.spawn("run", "work", { label: "worker", cwd: "/repo", tools: [] });
+  assert.equal((await agent.result).ok, true);
+  scheduler.removeRun("run");
+  scheduler.releaseResult(agent.id);
+  assert.deepEqual(scheduler.snapshot(), []);
+});
 
 
 void test("nested ownership releases permits, contains child failure, and blocks escalation", async () => {
