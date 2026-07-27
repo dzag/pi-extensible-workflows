@@ -2667,6 +2667,46 @@ void test("promotes detached foreground completion and failure to follow-up deli
   assert.equal(messages.length, 2);
   assert.match(messages[1]?.message.content ?? "", /^Workflow detached-failure failed/);
 });
+void test("suppresses a queued foreground failure after the run is resumed", async () => {
+  type Tool = { name: string; execute: (...args: unknown[]) => Promise<unknown> };
+  const tools: Tool[] = [];
+  const messages: string[] = [];
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-stale-failure-delivery-"));
+  workflowExtension({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  const workflow = tools.find(({ name }) => name === "workflow");
+  assert.ok(workflow);
+  const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
+  const updateState = Object.getOwnPropertyDescriptor(RunStore.prototype, "updateState")?.value as RunStore["updateState"];
+  let releasePending!: () => void;
+  let pendingReached!: () => void;
+  const pending = new Promise<void>((resolve) => { pendingReached = resolve; });
+  const hold = new Promise<void>((resolve) => { releasePending = resolve; });
+  let held = false;
+  RunStore.prototype.updateState = async function (update) {
+    const result = await updateState.call(this, update);
+    if (!held && this.cwd === home && result.delivery?.state === "pending") {
+      held = true;
+      pendingReached();
+      await hold;
+    }
+    return result;
+  };
+  try {
+    await assert.rejects(workflow.execute("stale-failure", { name: "stale-failure", script: `throw Object.assign(new Error("cancelled"), {code:"CANCELLED"});`, foreground: true }, new AbortController().signal, undefined, context), WorkflowError);
+    await pending;
+    const runId = (await listRunIds(home, "session", home))[0];
+    assert.ok(runId);
+    const store = new RunStore(home, "session", runId, home);
+    await store.updateState((current) => ({ ...current, state: "running" }));
+    releasePending();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(messages, []);
+    assert.equal((await store.load()).run.delivery?.state, "pending");
+  } finally {
+    releasePending();
+    RunStore.prototype.updateState = updateState;
+  }
+});
 
 void test("workflow log appends capped TUI-only transcript entries", async () => {
   type LogData = { workflowName: string; message: string };
