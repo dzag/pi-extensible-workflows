@@ -542,8 +542,8 @@ void test("portable bundle setup resolves an external runtime, launches, and fai
   mkdirSync(join(agentDir, "npm", "node_modules"), { recursive: true });
   mkdirSync(join(piRoot, "dist", "core", "tools"), { recursive: true });
   symlinkSync(process.cwd(), join(agentDir, "npm", "node_modules", "pi-extensible-workflows"));
-  symlinkSync(join(process.cwd(), "node_modules", "@earendil-works", "pi-coding-agent", "dist", "index.js"), join(piRoot, "dist", "index.js"));
-  symlinkSync(join(process.cwd(), "node_modules", "@earendil-works", "pi-coding-agent", "dist", "core", "tools", "index.js"), join(piRoot, "dist", "core", "tools", "index.js"));
+  symlinkSync(join(process.cwd(), "../../node_modules", "@earendil-works", "pi-coding-agent", "dist", "index.js"), join(piRoot, "dist", "index.js"));
+  symlinkSync(join(process.cwd(), "../../node_modules", "@earendil-works", "pi-coding-agent", "dist", "core", "tools", "index.js"), join(piRoot, "dist", "core", "tools", "index.js"));
   writeFileSync(join(piRoot, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "0.80.9" }));
   const piExecutable = join(piRoot, "dist", "pi");
   writeFileSync(piExecutable, "#!/usr/bin/env node\nif (process.argv[2] === \"--version\") console.log(\"0.82.0\");\n", { mode: 0o755 });

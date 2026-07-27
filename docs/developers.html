@@ -44,10 +44,10 @@
 <span class="tok-command">cd</span> pi-extensible-workflows
 <span class="tok-command">npm</span> ci
 <span class="tok-command">npm</span> run check
-<span class="tok-command">pi</span> install "$PWD"</code></pre>
+<span class="tok-command">pi</span> install "$PWD/packages/core"</code></pre>
         <p>For a one-session trial without changing Pi settings:</p>
-        <pre><code class="language-shell"><span class="tok-command">pi</span> --no-extensions --extension "$PWD/src/index.ts"</code></pre>
-        <p>The package declares Pi AI, Pi coding agent, and TypeBox as peer dependencies. The repository development setup currently pins the Pi packages to 0.80.9.</p>
+        <pre><code class="language-shell"><span class="tok-command">pi</span> --no-extensions --extension "$PWD/packages/core/src/index.ts"</code></pre>
+        <p>The package declares Pi AI, Pi coding agent, and TypeBox as peer dependencies. The repository development setup currently pins the Pi packages to 0.80.9. The repository is an npm-workspaces monorepo: <code>packages/core</code> is the public <code>pi-extensible-workflows</code> package, while the private root orchestrates checks and future extension workspaces.</p>
       </section>
       <section id="settings">
         <h2>Global and project settings</h2>

@@ -10,7 +10,7 @@ into a project, rename the metadata and function, then edit the role body.
 From the repository root after installing dependencies and building the package:
 
 ```sh
-node --test examples/workflow-extension-template/extension.test.mjs
+node --test packages/core/examples/workflow-extension-template/extension.test.mjs
 ```
 
 For a published package, run the same test from this directory after installing

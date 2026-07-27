@@ -1,6 +1,9 @@
 # Changelog
 ## Unreleased
 
+### Packaging
+
+- Reorganized the repository as an npm-workspaces monorepo while keeping `pi-extensible-workflows` as the published core package.
 ## [3.4.2] - 2026-07-27
 
 ### Recovery and navigation

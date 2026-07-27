@@ -167,7 +167,7 @@ void test("workflow guidance leads with the inline parallel-to-summary path", ()
   assert.match(WORKFLOW_TOOL_PROMPT_SNIPPET, /advanced/i);
 });
 void test("agent quick-start keeps the default launch as valid JSON and workflow source", () => {
-  const source = readFileSync(resolve(process.cwd(), "docs/agents.html"), "utf8");
+  const source = readFileSync(resolve(process.cwd(), "../../docs/agents.html"), "utf8");
   const block = /<section id="quick-start">[\s\S]*?<pre><code class="language-json">([\s\S]*?)<\/code><\/pre>/.exec(source)?.[1];
   assert.ok(block);
   const json = block.replace(/<[^>]*>/g, "").replace(/&gt;/g, ">").replace(/&lt;/g, "<").replace(/&amp;/g, "&");
@@ -4105,7 +4105,7 @@ void test("shares the registry between package imports and Pi's jiti loader", ()
 import { createRequire } from "node:module";
 import { join } from "node:path";
 const require = createRequire(import.meta.url);
-const { createJiti } = require(${JSON.stringify(join(process.cwd(), "node_modules/@earendil-works/pi-coding-agent/node_modules/jiti"))});
+const { createJiti } = require(${JSON.stringify(join(process.cwd(), "../../node_modules/@earendil-works/pi-coding-agent/node_modules/jiti"))});
 const native = await import(${JSON.stringify(pathToFileURL(join(process.cwd(), "dist/src/index.js")).href)});
 const jiti = createJiti(import.meta.url, { moduleCache: false, tryNative: false });
 const source = await jiti.import(${JSON.stringify(join(process.cwd(), "src/index.ts"))});
