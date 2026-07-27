@@ -1652,6 +1652,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
   };
   const pendingFailureDiagnostics = new Map<string, WorkflowFailureDiagnostics>();
   const foregroundDeliveries = new Map<string, { store: RunStore; inline: boolean; timer?: ReturnType<typeof setTimeout> }>();
+  const terminalDeliveryQueues = new WeakMap<RunStore, Promise<void>>();
   const liveActivities = new Map<string, Map<string, AgentActivity>>();
   const liveEventTimes = new Map<string, Map<string, number>>();
   const liveAgentSessions = new Map<string, import("./types.js").WorkflowAgentSession>();
@@ -1726,21 +1727,26 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     pendingFailureDiagnostics.delete(event.toolCallId);
     return { content: [{ type: "text" as const, text: serializeWorkflowFailureDiagnostics(diagnostic) }], details: diagnostic, isError: true };
   });
-  const deliverTerminal = async (store: RunStore, content: string, failure = false): Promise<void> => {
-    let claimed: boolean | undefined;
-    await store.updateState((current) => {
-      if (failure && !FAILURE_DELIVERY_STATES.has(current.state)) return current;
-      if (current.delivery?.state === "delivered") return current;
-      if (!current.delivery) { claimed = true; return current; }
-      claimed = true;
-      return { ...current, delivery: { ...current.delivery, mode: "background", state: "delivered" } };
+  const deliverTerminal = (store: RunStore, content: string, failure = false): Promise<void> => {
+    const previous = terminalDeliveryQueues.get(store) ?? Promise.resolve();
+    const delivery = previous.then(async () => {
+      let claimed: boolean | undefined;
+      await store.updateState((current) => {
+        if (failure && !FAILURE_DELIVERY_STATES.has(current.state)) return current;
+        if (current.delivery?.state === "delivered") return current;
+        if (!current.delivery) { claimed = true; return current; }
+        claimed = true;
+        return { ...current, delivery: { ...current.delivery, mode: "background", state: "delivered" } };
+      });
+      if (claimed !== true) return;
+      if (failure && !FAILURE_DELIVERY_STATES.has((await store.load()).run.state)) {
+        await store.updateState((current) => current.delivery?.state === "delivered" ? { ...current, delivery: { ...current.delivery, state: "pending" } } : current);
+        return;
+      }
+      deliver(pi, content);
     });
-    if (claimed !== true) return;
-    if (failure && !FAILURE_DELIVERY_STATES.has((await store.load()).run.state)) {
-      await store.updateState((current) => current.delivery?.state === "delivered" ? { ...current, delivery: { ...current.delivery, state: "pending" } } : current);
-      return;
-    }
-    deliver(pi, content);
+    terminalDeliveryQueues.set(store, delivery.catch(() => undefined));
+    return delivery;
   };
   const scheduleForegroundDelivery = (toolCallId: string, send: () => Promise<void>): void => {
     const delivery = foregroundDeliveries.get(toolCallId);
@@ -1815,6 +1821,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const persisted = await persistRunState(store, metadata, (current) => {
       const nextRun = { ...current, state: next, ...budget.snapshot() };
       if (next === "running" || next === "completed") { delete nextRun.error; delete nextRun.failedAt; }
+      if (next === "running" && (previous === "paused" || previous === "interrupted" || previous === "budget_exhausted") && nextRun.delivery) nextRun.delivery = { ...nextRun.delivery, mode: "background", state: "pending" };
       return nextRun;
     });
     await eventPublisher.runState(store, metadata, previous, next, reason);
@@ -2222,7 +2229,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     run.completion = completion;
     if (!foreground || !waitForCompletion) {
       void completion.then(async ({ value, resultPath }) => {
-        deliver(pi, completionDelivery(run.metadata.name, value, resultPath, await run.store.changedWorktrees()));
+        await deliverTerminal(run.store, completionDelivery(run.metadata.name, value, resultPath, await run.store.changedWorktrees()));
       }, async (error: unknown) => {
         const diagnostic = failureDiagnosticsFrom(error);
         await deliverTerminal(run.store, diagnostic ? formatWorkflowFailureDelivery(diagnostic) : formatWorkflowFailureDeliveryFallback(run.metadata.name, run.store.runId, run.store.directory, error), true);

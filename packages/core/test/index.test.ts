@@ -2708,6 +2708,46 @@ void test("suppresses a queued foreground failure after the run is resumed", asy
   }
 });
 
+void test("delivers a later cold-resume failure after an earlier failure follow-up", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-resumed-failure-delivery-"));
+  const store = new RunStore(home, "session", "run", home);
+  await store.create({ id: "run", workflowName: "resumed-failure", cwd: home, sessionId: "session", state: "budget_exhausted", agents: [], agentSessions: [], delivery: { mode: "background", state: "delivered" } }, createLaunchSnapshot({ script: `throw new Error("resumed failure");`, args: null, metadata: { name: "resumed-failure" }, launchMode: "background", settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  const messages: string[] = [];
+  let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let shutdown: (() => Promise<void>) | undefined;
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  const context = { cwd: home, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
+  try {
+    assert.ok(start);
+    await start({}, context);
+    const resume = tools.find(({ name }) => name === "workflow_resume");
+    assert.ok(resume);
+    await resume.execute("id", { runId: "run" }, undefined, undefined, context);
+    for (let attempt = 0; attempt < 100 && messages.length === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(messages.filter((message) => message.startsWith("Workflow resumed-failure failed")).length, 1);
+  } finally {
+    await shutdown?.();
+  }
+});
+void test("human interrupted-run resume delivers a later failure", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-human-resume-failure-delivery-"));
+  const store = new RunStore(home, "session", "run", home);
+  await store.create({ id: "run", workflowName: "human-resume-failure", cwd: home, sessionId: "session", state: "interrupted", agents: [], agentSessions: [], delivery: { mode: "background", state: "delivered" } }, createLaunchSnapshot({ script: `throw new Error("human resumed failure");`, args: null, metadata: { name: "human-resume-failure" }, launchMode: "background", settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+  const messages: string[] = [];
+  let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let shutdown: (() => Promise<void>) | undefined;
+  workflowExtension({ registerTool() {}, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  const context = { cwd: home, hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { select: async (_prompt: string, options: string[]) => options[0], notify() {} } };
+  try {
+    assert.ok(start);
+    await start({}, context);
+    for (let attempt = 0; attempt < 100 && messages.length === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(messages.filter((message) => message.startsWith("Workflow human-resume-failure failed")).length, 1);
+  } finally {
+    await shutdown?.();
+  }
+});
 void test("workflow log appends capped TUI-only transcript entries", async () => {
   type LogData = { workflowName: string; message: string };
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-log-"));
