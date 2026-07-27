@@ -1,0 +1,53 @@
+{
+  "name": "pi-extensible-workflows-cli",
+  "version": "3.4.2",
+  "description": "CLI for pi-extensible-workflows",
+  "homepage": "https://vekexasia.github.io/pi-extensible-workflows/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vekexasia/pi-extensible-workflows.git",
+    "directory": "packages/cli"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./dist/src/cli.js"
+  },
+  "bin": {
+    "piewf": "./dist/src/cli.js"
+  },
+  "files": [
+    "dist/src"
+  ],
+  "scripts": {
+    "build": "npm --prefix ../.. run build --workspace=../core && rm -rf dist && tsc -p tsconfig.json && chmod +x dist/src/cli.js",
+    "inspect": "node dist/src/cli.js inspect",
+    "test": "npm run build && TEST_FILES='dist/test/*.test.js' npm run test:run",
+    "test:run": "tmp=$(mktemp -d); trap 'rm -rf \"$tmp\"' EXIT; TMPDIR=\"$tmp\" node --test --test-concurrency=1 --test-reporter=dot $TEST_FILES",
+    "lint": "eslint .",
+    "prepack": "npm run build"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.80.9",
+    "@earendil-works/pi-coding-agent": "0.80.9",
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.12.4",
+    "eslint": "10.0.3",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.63.0"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "pi-extensible-workflows": "3.4.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

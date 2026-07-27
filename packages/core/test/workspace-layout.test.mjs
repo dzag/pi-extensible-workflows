@@ -6,19 +6,32 @@ import test from "node:test";
 
 const coreRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(coreRoot, "../..");
+const cliRoot = resolve(repositoryRoot, "packages/cli");
 const readPackage = (path) => JSON.parse(readFileSync(path, "utf8"));
 
 test("the repository keeps the public package in the core workspace", () => {
   const root = readPackage(resolve(repositoryRoot, "package.json"));
   const core = readPackage(resolve(coreRoot, "package.json"));
+  const cli = readPackage(resolve(cliRoot, "package.json"));
 
   assert.equal(root.private, true);
-  assert.deepEqual(root.workspaces, ["packages/core", "packages/extensions/*"]);
+  assert.deepEqual(root.workspaces, ["packages/cli", "packages/core", "packages/extensions/*"]);
   assert.deepEqual(root.pi.extensions, ["./packages/core/src/index.ts"]);
   assert.equal(core.name, "pi-extensible-workflows");
   assert.equal(core.version, root.version);
   assert.notEqual(core.private, true);
-  assert.equal(core.exports, "./dist/src/index.js");
-  assert.equal(core.bin["pi-extensible-workflows"], "./dist/src/cli.js");
-  assert.equal(core.publishConfig.access, "public");
+  assert.deepEqual(core.exports, {
+    ".": "./dist/src/index.js",
+    "./persistence": "./dist/src/persistence.js",
+    "./types": "./dist/src/types.js",
+    "./utils": "./dist/src/utils.js",
+    "./budget": "./dist/src/budget.js",
+    "./validation": "./dist/src/validation.js",
+    "./registry": "./dist/src/registry.js"
+  });
+  assert.equal(core.bin, undefined);
+  assert.equal(cli.name, "pi-extensible-workflows-cli");
+  assert.equal(cli.version, root.version);
+  assert.equal(cli.bin.piewf, "./dist/src/cli.js");
+  assert.equal(cli.publishConfig.access, "public");
 });

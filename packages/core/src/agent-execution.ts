@@ -727,10 +727,13 @@ type ScheduledNode = {
   options: Readonly<ScheduledAgentOptions>;
   children: Set<string>;
   collected: boolean;
+  collecting: boolean;
   state: "queued" | "running" | "waiting_for_child" | "paused" | "retrying" | "completed" | "failed" | "cancelled";
   controller: AbortController;
-  promise: Promise<ScheduledAgentResult>;
-  resolve: (result: ScheduledAgentResult) => void;
+  promise: Promise<ScheduledAgentResult> | undefined;
+  resolve: ((result: ScheduledAgentResult) => void) | undefined;
+  completion: Promise<void>;
+  resolveCompletion: () => void;
   task: () => Promise<void>;
   restored: boolean;
   steer?: (message: string) => void | Promise<void>;
@@ -776,7 +779,9 @@ export class FairAgentScheduler {
     const id = `${runId}:${String(++this.#nextId)}`;
     let resolveResult: (result: ScheduledAgentResult) => void = () => undefined;
     const promise = new Promise<ScheduledAgentResult>((resolve) => { resolveResult = resolve; });
-    const node: ScheduledNode = { id, runId, ...(parentId ? { parentId } : {}), prompt, options: effective, children: new Set<string>(), collected: false, state: "queued", controller: new AbortController(), promise, resolve: resolveResult, task: async () => undefined, restored: false };
+    let resolveCompletion: () => void = () => undefined;
+    const completion = new Promise<void>((resolve) => { resolveCompletion = resolve; });
+    const node: ScheduledNode = { id, runId, ...(parentId ? { parentId } : {}), prompt, options: effective, children: new Set<string>(), collected: false, collecting: false, state: "queued", controller: new AbortController(), promise, resolve: resolveResult, completion, resolveCompletion, task: async () => undefined, restored: false };
     node.task = async () => {
       if (node.controller.signal.aborted) { this.#release(node.runId); return; }
       node.state = "running";
@@ -800,16 +805,27 @@ export class FairAgentScheduler {
     const parent = this.#node(parentId);
     const child = this.#node(childId);
     if (child.parentId !== parentId) throw new WorkflowError("UNKNOWN_AGENT_TYPE", "Results are scoped to direct children");
-    child.collected = true;
-    parent.state = "waiting_for_child";
-    this.#persist(parent.runId);
-    this.#release(parent.runId);
-    const outcome = await child.promise;
-    await new Promise<void>((resolve) => { this.#enqueue(parent.runId, undefined, () => { resolve(); }); });
-    parent.state = "running";
-    if (parent.controller.signal.aborted) throw new WorkflowError("CANCELLED", "Parent agent cancelled");
-    this.#persist(parent.runId);
-    return outcome;
+    if (child.collected || !child.promise) throw new WorkflowError("AGENT_RESULT_COLLECTED", "Child result has already been collected; nested results are one-shot");
+    if (child.collecting) throw new WorkflowError("AGENT_FAILED", "Child result is already being collected");
+    child.collecting = true;
+    const childPromise = child.promise;
+    try {
+      parent.state = "waiting_for_child";
+      this.#persist(parent.runId);
+      this.#release(parent.runId);
+      const outcome = await childPromise;
+      await new Promise<void>((resolve) => { this.#enqueue(parent.runId, undefined, () => { resolve(); }); });
+      parent.state = "running";
+      if (parent.controller.signal.aborted) throw new WorkflowError("CANCELLED", "Parent agent cancelled");
+      child.collected = true;
+      child.collecting = false;
+      this.releaseResult(child.id);
+      this.#persist(parent.runId);
+      return outcome;
+    } catch (error) {
+      child.collecting = false;
+      throw error;
+    }
   }
 
   async steer(parentId: string, childId: string, message: string): Promise<void> {
@@ -821,7 +837,13 @@ export class FairAgentScheduler {
   }
 
   cancel(id: string): void { this.#cancelTree(this.#node(id)); }
-
+  releaseResult(id: string): void {
+    const node = this.#nodes.get(id);
+    if (!node || !node.promise) return;
+    if (!["completed", "failed", "cancelled"].includes(node.state)) throw new WorkflowError("INTERNAL_ERROR", `Cannot release active agent result: ${id}`);
+    node.promise = undefined;
+    node.task = async () => undefined;
+  }
   cancelChildren(id: string): void {
     for (const childId of this.#node(id).children) { const child = this.#nodes.get(childId); if (child) this.#cancelTree(child); }
   }
@@ -840,7 +862,7 @@ export class FairAgentScheduler {
     if (!run) throw new WorkflowError("INTERNAL_ERROR", `Unknown scheduler run: ${runId}`);
     const nodes = [...this.#nodes.values()].filter((node) => node.runId === runId);
     for (const node of nodes) if (!node.parentId) this.#cancelTree(node);
-    await Promise.all(nodes.map(({ promise }) => promise));
+    await Promise.all(nodes.map(({ completion }) => completion));
     if (nodes.every(({ restored }) => restored)) run.logical = 0;
   }
 
@@ -879,9 +901,9 @@ export class FairAgentScheduler {
       },
     } as ToolDefinition;
     const resultTool = {
-      name: "get_subagent_result", label: "Child Result", description: "Wait for a direct child and return its result",
+      name: "get_subagent_result", label: "Child Result", description: "Wait for a direct child and return its result once; repeated retrieval fails with AGENT_RESULT_COLLECTED",
       parameters: Type.Object({ id: Type.String() }),
-      execute: async (_id: string, params: { id: string }) => { const value = await this.result(parentId, params.id); if (!value.ok && value.error.code === "BUDGET_EXHAUSTED") throw new WorkflowError("BUDGET_EXHAUSTED", value.error.message); return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value }; },
+      execute: async (_id: string, params: { id: string }) => { const value = await this.result(parentId, params.id); if (!value.ok && value.error.code === "BUDGET_EXHAUSTED") throw new WorkflowError("BUDGET_EXHAUSTED", value.error.message); return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value }; }
     } as ToolDefinition;
     const steerTool = {
       name: "steer_subagent", label: "Steer Child", description: "Steer a running direct child",
@@ -902,12 +924,14 @@ export class FairAgentScheduler {
       if (record.id.split(":").slice(0, -1).join(":") !== runId) throw new WorkflowError("RESUME_INCOMPATIBLE", `Persisted agent belongs to another run: ${record.id}`);
       let resolveResult: (result: ScheduledAgentResult) => void = () => undefined;
       const promise = new Promise<ScheduledAgentResult>((resolve) => { resolveResult = resolve; });
-      const node: ScheduledNode = { id: record.id, runId, ...(record.parentId ? { parentId: record.parentId } : {}), ...(record.prompt === undefined ? {} : { prompt: record.prompt }), options: this.#inherit(undefined, record.options), children: new Set(), collected: false, state: record.state, controller: new AbortController(), promise, resolve: resolveResult, task: async () => undefined, restored: true };
+      let resolveCompletion: () => void = () => undefined;
+      const completion = new Promise<void>((resolve) => { resolveCompletion = resolve; });
+      const node: ScheduledNode = { id: record.id, runId, ...(record.parentId ? { parentId: record.parentId } : {}), ...(record.prompt === undefined ? {} : { prompt: record.prompt }), options: this.#inherit(undefined, record.options), children: new Set(), collected: false, collecting: false, state: record.state, controller: new AbortController(), promise, resolve: resolveResult, completion, resolveCompletion, task: async () => undefined, restored: true };
       this.#nodes.set(node.id, node);
       run.logical += 1;
       this.#nextId = Math.max(this.#nextId, Number(node.id.slice(node.id.lastIndexOf(":") + 1)) || 0);
-      if (record.state === "completed") resolveResult({ id: node.id, ok: true, value: null });
-      else if (record.state === "failed" || record.state === "cancelled") resolveResult({ id: node.id, ok: false, error: { code: record.state === "cancelled" ? "CANCELLED" : "AGENT_FAILED", message: `Persisted agent ${record.state}` } });
+      if (record.state === "completed") { resolveResult({ id: node.id, ok: true, value: null }); resolveCompletion(); }
+      else if (record.state === "failed" || record.state === "cancelled") { resolveResult({ id: node.id, ok: false, error: { code: record.state === "cancelled" ? "CANCELLED" : "AGENT_FAILED", message: `Persisted agent ${record.state}` } }); resolveCompletion(); }
     }
     for (const node of this.#nodes.values()) if (node.runId === runId && node.parentId) this.#nodes.get(node.parentId)?.children.add(node.id);
   }
@@ -960,7 +984,10 @@ export class FairAgentScheduler {
     this.#persist(node.runId);
     if (heldPermit) this.#release(node.runId);
     for (const childId of node.children) { const child = this.#nodes.get(childId); if (child && !child.collected) this.#cancelTree(child); }
-    node.resolve(result);
+    const resolve = node.resolve;
+    node.resolve = undefined;
+    resolve?.(result);
+    node.resolveCompletion();
   }
 
   #cancelTree(node: ScheduledNode): void {

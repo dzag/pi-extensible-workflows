@@ -15,7 +15,7 @@ export const WORKFLOW_BUDGET_EVENT = "workflow:budget-event";
 export const WORKFLOW_WORKTREE_CREATED_EVENT = "workflow:worktree-created";
 export const ERROR_CODES = [
   "CONFIG_ERROR", "INVALID_SETTINGS", "INVALID_SYNTAX", "INVALID_METADATA", "DUPLICATE_NAME", "INVALID_SCHEMA", "UNKNOWN_MODEL", "UNKNOWN_TOOL", "UNKNOWN_AGENT_TYPE",
-  "RUN_OWNED", "REGISTRY_FROZEN", "GLOBAL_COLLISION", "MISSING_WORKFLOW", "RPC_LIMIT_EXCEEDED", "SHELL_FAILED", "AGENT_TIMEOUT", "AGENT_FAILED", "RESULT_INVALID",
+  "RUN_OWNED", "REGISTRY_FROZEN", "GLOBAL_COLLISION", "MISSING_WORKFLOW", "RPC_LIMIT_EXCEEDED", "SHELL_FAILED", "AGENT_TIMEOUT", "AGENT_FAILED", "AGENT_RESULT_COLLECTED", "RESULT_INVALID",
   "CANCELLED", "WORKER_UNRESPONSIVE", "WORKTREE_FAILED", "RESUME_INCOMPATIBLE", "BUDGET_EXHAUSTED", "INTERNAL_ERROR",
   ] as const;
 
@@ -77,7 +77,7 @@ export interface AgentAttemptError { code: string; message: string }
 export interface AgentAttemptSummary { attempt: number; transport: string; session?: WorkflowAgentSessionReference; setup: AgentSetupSummary; error?: AgentAttemptError; accounting: AgentAccounting }
 export interface WorkflowWorktreeCreatedEvent extends WorkflowEventBase { owner: string; branch: string; path: string; base: string }
 export interface WorkflowWorktreeReference { readonly path: string; readonly branch: string }
-export interface AgentRecord { systemPrompt?: string; prompt?: string; id: string; name: string; label?: string; path: string; state: AgentState; parentId?: string; structuralPath?: readonly string[]; resultPath?: string; parentBreadcrumb?: string; worktreeOwner?: string; role?: string; requestedModel?: string; model: ModelSpec; tools: readonly string[]; attempts: number; attemptDetails?: readonly AgentAttemptSummary[]; accounting?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }; toolCalls?: readonly { id: string; name: string; state: "running" | "completed" | "failed" }[]; activity?: AgentActivity | undefined; lastEventAt?: number }
+export interface AgentRecord { systemPrompt?: string; prompt?: string; id: string; name: string; label?: string; path: string; state: AgentState; parentId?: string; structuralPath?: readonly string[]; resultPath?: string; parentBreadcrumb?: string; worktreeOwner?: string; role?: string; requestedModel?: string; model: ModelSpec; tools: readonly string[]; attempts: number; startedAt?: number; durationMs?: number; attemptDetails?: readonly AgentAttemptSummary[]; accounting?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }; toolCalls?: readonly { id: string; name: string; state: "running" | "completed" | "failed" }[]; activity?: AgentActivity | undefined; lastEventAt?: number }
 export type WorkflowDeliveryMode = "foreground" | "background";
 export type WorkflowDeliveryStatus = "attached" | "pending" | "delivered";
 export interface WorkflowRunDelivery { mode: WorkflowDeliveryMode; state: WorkflowDeliveryStatus; toolCallId?: string }

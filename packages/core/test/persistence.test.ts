@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -127,11 +127,39 @@ void test("persists exact effective system prompts as private run artifacts", as
   const cwd = join(home, "project");
   const store = new RunStore(cwd, "session-a", "run-a", home);
   await store.create(run(cwd), snapshot);
-  const prompts = ["BASE\n\nROLE: α", "BASE\n\nROLE: β"];
+  const prompts = ["BASE\n\nROLE: α", "BASE\n\nROLE: β", "BASE\n\nROLE: α"];
   await Promise.all(prompts.map((prompt, index) => store.recordSystemPrompt({ sessionId: "native-a", attempt: 1, turn: index + 1, prompt })));
   const saved = await new RunStore(cwd, "session-a", "run-a", home).systemPrompts();
   assert.deepEqual(saved, prompts.map((prompt, index) => ({ sessionId: "native-a", attempt: 1, turn: index + 1, sha256: createHash("sha256").update(prompt).digest("hex"), prompt })));
   assert.equal(statSync(store.systemPromptPath()).mode & 0o777, 0o600);
+  assert.equal(readdirSync(join(store.directory, ".system-prompts", "bodies")).filter((name) => /^[0-9a-f]{64}$/.test(name)).length, 2);
+});
+void test("keeps long repeated system-prompt histories append-only", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-system-prompts-long-"));
+  const cwd = join(home, "project");
+  const store = new RunStore(cwd, "session-a", "run-a", home);
+  await store.create(run(cwd), snapshot);
+  const prompt = "long prompt\n" + "x".repeat(8192);
+  const records = Array.from({ length: 64 }, (_, index) => ({ sessionId: "native-a", attempt: Math.floor(index / 16) + 1, turn: (index % 16) + 1, prompt }));
+  const artifact = readFileSync(store.systemPromptPath(), "utf8");
+  await Promise.all(records.map((entry) => store.recordSystemPrompt(entry)));
+  assert.equal(readFileSync(store.systemPromptPath(), "utf8"), artifact);
+  assert.equal(readdirSync(join(store.directory, ".system-prompts", "records")).filter((name) => name.endsWith(".json")).length, records.length);
+  assert.equal(readdirSync(join(store.directory, ".system-prompts", "bodies")).filter((name) => /^[0-9a-f]{64}$/.test(name)).length, 1);
+  assert.deepEqual(await new RunStore(cwd, "session-a", "run-a", home).systemPrompts(), records.map((entry) => ({ ...entry, sha256: createHash("sha256").update(prompt).digest("hex") })));
+});
+void test("migrates version-1 system-prompt artifacts when appending", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-system-prompts-v1-"));
+  const cwd = join(home, "project");
+  const store = new RunStore(cwd, "session-a", "run-a", home);
+  await store.create(run(cwd), snapshot);
+  const legacyPrompt = "legacy prompt";
+  writeFileSync(store.systemPromptPath(), JSON.stringify({ version: 1, entries: [{ sessionId: "native-a", attempt: 1, turn: 1, sha256: createHash("sha256").update(legacyPrompt).digest("hex"), prompt: legacyPrompt }] }));
+  await store.recordSystemPrompt({ sessionId: "native-a", attempt: 1, turn: 2, prompt: "new prompt" });
+  assert.deepEqual(await store.systemPrompts(), [
+    { sessionId: "native-a", attempt: 1, turn: 1, sha256: createHash("sha256").update(legacyPrompt).digest("hex"), prompt: legacyPrompt },
+    { sessionId: "native-a", attempt: 1, turn: 2, sha256: createHash("sha256").update("new prompt").digest("hex"), prompt: "new prompt" },
+  ]);
 });
 void test("serializes concurrent state updates without losing fields", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-state-"));

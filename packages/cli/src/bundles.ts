@@ -2,14 +2,14 @@ import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, re
 import { basename, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import type { AgentDefinition, WorkflowCatalogFunction } from "./types.js";
+import type { AgentDefinition, WorkflowCatalogFunction } from "pi-extensible-workflows";
 
 export interface PortableWorkflowManifest {
   format: "pi-extensible-workflows-bundle";
   version: 1;
   command: string;
   workflow: { name: string; description: string; input: Record<string, unknown>; output: Record<string, unknown> };
-  runtime: { pi: string; "pi-extensible-workflows": string };
+  runtime: { pi: string; "pi-extensible-workflows-cli": string };
   requirements: { roles: readonly string[]; aliases: readonly string[]; tools: readonly string[]; commands: readonly string[]; environment: readonly string[] };
   aliasTargets?: Readonly<Record<string, string>>;
   payload?: { extensions?: readonly string[]; skills?: readonly string[]; static?: readonly string[]; dependencies?: readonly string[] };
@@ -71,6 +71,7 @@ function runnerSource(): string {
     "import { delimiter, dirname, join, sep } from 'node:path';",
     "import { createInterface } from 'node:readline/promises';",
     "import { spawnSync } from 'node:child_process';",
+    "import { createRequire } from 'node:module';",
     "import { fileURLToPath, pathToFileURL } from 'node:url';",
     "const bundleRoot = dirname(dirname(fileURLToPath(import.meta.url)));",
     "const manifest = JSON.parse(readFileSync(join(bundleRoot, 'manifest.json'), 'utf8'));",
@@ -144,36 +145,36 @@ function runnerSource(): string {
     "  const settings = agent.SettingsManager.create(process.cwd(), agentDir, { projectTrusted: false });",
     "  const manager = new agent.DefaultPackageManager({ cwd: process.cwd(), agentDir, settingsManager: settings });",
     "  const configured = manager.listConfiguredPackages();",
-    "  const roots = configured.filter((entry) => /^npm:(?:@[^/]+\\/)?pi-extensible-workflows(?:@|$)/.test(entry.source)).map((entry) => entry.installedPath);",
-    "  roots.push(join(agentDir, 'npm', 'node_modules', 'pi-extensible-workflows'));",
+    "  const roots = configured.filter((entry) => /^npm:(?:@[^/]+\\/)?pi-extensible-workflows-cli(?:@|$)/.test(entry.source)).map((entry) => entry.installedPath);",
+    "  roots.push(join(agentDir, 'npm', 'node_modules', 'pi-extensible-workflows-cli'));",
     "  return [...new Set(roots.filter((root) => typeof root === 'string' && existsSync(join(root, 'package.json'))))];",
     "}",
     "async function findEngine(pi) {",
     "  for (const root of await engineCandidates(pi)) {",
     "    const version = packageVersion(root);",
-    "    if (typeof version === 'string' && satisfies(version, manifest.runtime['pi-extensible-workflows'])) return { root: realpathSync(root), version };",
+    "    if (typeof version === 'string' && satisfies(version, manifest.runtime['pi-extensible-workflows-cli'])) return { root: realpathSync(root), version };",
     "  }",
     "  return undefined;",
     "}",
     "async function confirmInstall(pi, expected) {",
-    "  const spec = `npm:pi-extensible-workflows@${installationVersion(expected)}`;",
-    "  if (!(process.stdin.isTTY && process.stderr.isTTY)) throw new Error(`The compatible pi-extensible-workflows package is missing. Re-run '${manifest.command} setup --yes' to approve: ${pi} install ${spec}`);",
+    "  const spec = `npm:pi-extensible-workflows-cli@${installationVersion(expected)}`;",
+    "  if (!(process.stdin.isTTY && process.stderr.isTTY)) throw new Error(`The compatible pi-extensible-workflows-cli package is missing. Re-run '${manifest.command} setup --yes' to approve: ${pi} install ${spec}`);",
     "  const prompt = createInterface({ input: process.stdin, output: process.stderr });",
     "  try { const answer = await prompt.question(`Install ${spec} through Pi now? [y/N] `); return /^y(es)?$/i.test(answer.trim()); } finally { prompt.close(); }",
     "}",
     "async function ensureEngine(pi, allowInstall, approve) {",
-    "  const expected = manifest.runtime['pi-extensible-workflows'];",
+    "  const expected = manifest.runtime['pi-extensible-workflows-cli'];",
     "  let engine = await findEngine(pi);",
     "  if (engine) return engine;",
-    "  if (!allowInstall) throw new Error(`Compatible pi-extensible-workflows${expected === 'unknown' ? '' : `@${expected}`} is not installed through Pi. Run '${manifest.command} setup' first; no installation is performed during launch.`);",
-    "  if (expected === 'unknown') throw new Error('The bundle does not record a compatible pi-extensible-workflows version. Re-export the bundle.');",
+    "  if (!allowInstall) throw new Error(`Compatible pi-extensible-workflows-cli${expected === 'unknown' ? '' : `@${expected}`} is not installed through Pi. Run '${manifest.command} setup' first; no installation is performed during launch.`);",
+    "  if (expected === 'unknown') throw new Error('The bundle does not record a compatible pi-extensible-workflows-cli version. Re-export the bundle.');",
     "  if (!approve && !(await confirmInstall(pi, expected))) throw new Error('Installation was not approved.');",
-    "  const spec = `npm:pi-extensible-workflows@${installationVersion(expected)}`;",
-    "  if (spec.endsWith('@unknown')) throw new Error('The bundle does not record a compatible pi-extensible-workflows version. Re-export the bundle.');",
+    "  const spec = `npm:pi-extensible-workflows-cli@${installationVersion(expected)}`;",
+    "  if (spec.endsWith('@unknown')) throw new Error('The bundle does not record a compatible pi-extensible-workflows-cli version. Re-export the bundle.');",
     "  const result = run(pi, ['install', spec]);",
     "  if (result.status !== 0) throw new Error(`Pi could not install ${spec}: ${result.stderr.trim() || 'installation failed'}`);",
     "  engine = await findEngine(pi);",
-    "  if (!engine) throw new Error(`Pi installed an incompatible pi-extensible-workflows version; expected ${expected}.`);",
+    "  if (!engine) throw new Error(`Pi installed an incompatible pi-extensible-workflows-cli version; expected ${expected}.`);",
     "  return engine;",
     "}",
     "function readJson(path) { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return {}; } }",
@@ -266,10 +267,10 @@ function runnerSource(): string {
     "}",
     "function assertSetupState(pi, engine) {",
     "  const state = readJson(join(bundleRoot, 'bundle-state.json'));",
-    "  if (state.format !== manifest.format || state.version !== manifest.version || typeof state.checkedAt !== 'string' || !satisfies(state.pi, manifest.runtime.pi) || !satisfies(state.engine, manifest.runtime['pi-extensible-workflows'])) throw new Error(`Bundle setup is missing or stale. Run '${manifest.command} setup' before launching.`);",
+    "  if (state.format !== manifest.format || state.version !== manifest.version || typeof state.checkedAt !== 'string' || !satisfies(state.pi, manifest.runtime.pi) || !satisfies(state.engine, manifest.runtime['pi-extensible-workflows-cli'])) throw new Error(`Bundle setup is missing or stale. Run '${manifest.command} setup' before launching.`);",
     "}",
     "async function loadPayload(engine) {",
-    "  const engineIndex = pathToFileURL(join(engine.root, 'dist', 'src', 'index.js')).href;",
+    "  const engineIndex = pathToFileURL(createRequire(pathToFileURL(join(engine.root, 'dist', 'src', 'cli.js'))).resolve('pi-extensible-workflows')).href;",
     "  const api = await import(engineIndex);",
     "  globalThis.__pi_bundle_api = api;",
     "  const payload = await import(pathToFileURL(join(bundleRoot, 'payload', 'workflow.mjs')).href + '?bundle=' + String(Date.now()));",
@@ -289,7 +290,7 @@ function runnerSource(): string {
     "  saveState(pi, engine);",
     "  console.log('Bundle setup complete.');",
     "  console.log('Pi: ' + piVersion(pi));",
-    "  console.log('pi-extensible-workflows: ' + engine.version);",
+    "  console.log('pi-extensible-workflows-cli: ' + engine.version);",
     "}",
     "async function launch(argv) {",
     "  const pi = piCommand();",
@@ -419,7 +420,7 @@ export function writePortableWorkflowBundle(input: PortableWorkflowBundleInput):
     version: 1,
     command: input.command,
     workflow: { name: input.workflow.name, description: input.workflow.description, input: input.workflow.input, output: input.workflow.output },
-    runtime: { pi: input.piVersion?.trim() || "unknown", "pi-extensible-workflows": engineVersion.trim() || "unknown" },
+    runtime: { pi: input.piVersion?.trim() || "unknown", "pi-extensible-workflows-cli": engineVersion.trim() || "unknown" },
     requirements: {
       roles: input.requirements?.roles ?? Object.keys(input.roles ?? {}),
       aliases: input.requirements?.aliases ?? [],

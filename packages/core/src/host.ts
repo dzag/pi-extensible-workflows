@@ -4,9 +4,9 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Type } from "@earendil-works/pi-ai";
+import { Type, type Api, type Model } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
-import { copyToClipboard, getAgentDir, SettingsManager, truncateToVisualLines, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
+import { copyToClipboard, getAgentDir, ModelSelectorComponent, SettingsManager, truncateToVisualLines, type ExtensionAPI, type ExtensionUIContext, type ModelRuntime, type Theme } from "@earendil-works/pi-coding-agent";
 import { FairAgentScheduler, WorkflowAgentExecutor, localAgentTransport, type AgentActivity, type AgentAttempt, type AgentDefinition, type AgentProgress, type AgentProviderFailure, type AgentProviderRecovery } from "./agent-execution.js";
 import { acquireSessionLease, listRunIds, RunStore, SessionLease, structuralPath as operationPath } from "./persistence.js";
 import type { AwaitingCheckpoint, PersistedRun, WorktreeReference } from "./persistence.js";
@@ -74,6 +74,7 @@ const WORKFLOW_ERROR_PROSE: Record<WorkflowErrorCode, (detail: string) => string
   SHELL_FAILED: (detail) => `The workflow shell command failed: ${detail}.`,
   AGENT_TIMEOUT: (detail) => `The workflow agent timed out: ${detail}.`,
   AGENT_FAILED: (detail) => `The workflow agent failed: ${detail}.`,
+  AGENT_RESULT_COLLECTED: (detail) => `The nested agent result was already collected: ${detail}.`,
   RESULT_INVALID: (detail) => `The workflow produced an invalid result: ${detail}.`,
   CANCELLED: (detail) => `The workflow was cancelled: ${detail}.`,
   WORKER_UNRESPONSIVE: (detail) => `The workflow worker stopped responding: ${detail}.`,
@@ -822,7 +823,8 @@ function navigatorRunLabels(entries: readonly { store: RunStore; loaded: { run: 
     const suffix = (nameCount.get(run.workflowName) ?? 0) > 1 ? ` ${store.runId.slice(0, 8)}` : "";
     const cost = run.agents.reduce((sum, a) => sum + (a.accounting?.cost ?? 0), 0);
     const costStr = cost > 0 ? ` $${cost.toFixed(2)}` : "";
-    return `${glyph} ${run.workflowName}${suffix}  ${run.state}  ${run.phase ?? ""}  ${String(done)}/${String(run.agents.length)} agents${costStr}`;
+    const runtime = run.usage ? ` runtime=${formatWorkflowRuntime(run.usage.durationMs)}` : "";
+    return `${glyph} ${run.workflowName}${suffix}  ${run.state}  ${run.phase ?? ""}  ${String(done)}/${String(run.agents.length)} agents${costStr}${runtime}`;
   });
 }
 
@@ -863,6 +865,11 @@ function stalledDuration(agent: AgentRecord, now: number): number | undefined {
   const duration = now - agent.lastEventAt;
   return duration >= WORKFLOW_AGENT_STALL_THRESHOLD_MS ? duration : undefined;
 }
+function agentDuration(agent: AgentRecord, now: number): number | undefined {
+  if (agent.durationMs !== undefined && Number.isFinite(agent.durationMs)) return Math.max(0, agent.durationMs);
+  if (agent.startedAt === undefined || !Number.isFinite(agent.startedAt)) return undefined;
+  return Math.max(0, now - agent.startedAt);
+}
 function formatAgentActivity(agent: AgentRecord, spinner: string, styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES, now = Date.now()): string {
   const label = agent.activity?.kind === "reasoning" ? "reasoning" : agent.activity?.kind === "text" ? "responding" : agent.activity?.kind === "tool" ? agent.activity.text : [...(agent.toolCalls ?? [])].reverse().find(({ state }) => state === "running")?.name ?? "";
   const activity = label ? `${styles.accent(spinner)} ${styles.dim(label)}` : "";
@@ -883,7 +890,7 @@ function formatAccounting(accounting: NonNullable<AgentRecord["accounting"]>): s
 
 function formatAgentAccounting(accounting: NonNullable<AgentRecord["accounting"]>): string[] {
   const total = accounting.input + accounting.output + accounting.cacheRead + accounting.cacheWrite;
-  return [`Tokens: ${formatAccountingValue(total)} (in=${formatAccountingValue(accounting.input)} out=${formatAccountingValue(accounting.output)} cache-read=${formatAccountingValue(accounting.cacheRead)} cache-write=${formatAccountingValue(accounting.cacheWrite)})`, `Cost: $${accounting.cost.toFixed(2)}`];
+  return [`Tokens: ∑${formatAccountingValue(total)} ↑${formatAccountingValue(accounting.input)} ↓${formatAccountingValue(accounting.output)} ⇢${formatAccountingValue(accounting.cacheRead)} ⇠${formatAccountingValue(accounting.cacheWrite)}`, `Cost: $${accounting.cost.toFixed(2)}`];
 }
 
 export function formatNavigatorDashboard(run: PersistedRun, checkpoints: readonly AwaitingCheckpoint[], worktrees: readonly WorktreeReference[], now = Date.now()): string {
@@ -893,7 +900,8 @@ export function formatNavigatorDashboard(run: PersistedRun, checkpoints: readonl
   const hasAccounting = run.agents.some((a) => a.accounting);
   const glyph = runStateGlyph(run.state, "⠦");
   const header = `${glyph} ${run.workflowName}`;
-  const meta = [run.state, run.phase ? `phase: ${run.phase}` : "", `${String(done)}/${String(run.agents.length)} agents`, hasAccounting ? formatAccounting(totalAccounting) : "", totalAccounting.cost > 0 ? `$${totalAccounting.cost.toFixed(2)}` : ""].filter(Boolean).join(" · ");
+  const runtime = run.usage ? `runtime=${formatWorkflowRuntime(run.usage.durationMs)}` : "";
+  const meta = [run.state, run.phase ? `phase: ${run.phase}` : "", `${String(done)}/${String(run.agents.length)} agents`, runtime, hasAccounting ? formatAccounting(totalAccounting) : "", totalAccounting.cost > 0 ? `$${totalAccounting.cost.toFixed(2)}` : ""].filter(Boolean).join(" · ");
   const lines = [header, meta, ...formatCompactBudgetStatus(run)];
   if (run.error) lines.push(`Error: ${run.error.code}: ${run.error.message}`);
   if (run.events?.length) lines.push(...run.events.map((event) => `Warning: ${event.message}`));
@@ -1006,20 +1014,19 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
     }
     const agent = node.agent;
     if (!agent) return [styles.muted("Agent details are unavailable")];
-    const byId = new Map(run.agents.map((candidate) => [candidate.id, candidate]));
-    const result = [styles.bold(`Selected agent: ${agentBreadcrumb(agent, byId, true)}`), `State: ${phaseStyle(agent.state)(agent.state)}`, `Structural path: ${agent.structuralPath?.join(" > ") || "(root)"}`, `Model: ${agent.model.provider}/${agent.model.model}${agent.model.thinking ? `:${agent.model.thinking}` : ""}`, `Role: ${agent.role ?? "(none)"}`, `Tools: ${agent.tools.join(", ") || "(none)"}`, `Attempts: ${String(agent.attempts)}`, ...(agent.accounting ? formatAgentAccounting(agent.accounting) : []), ...(selection.actions ? [] : [styles.muted("enter for agent actions")])];
+    const duration = agentDuration(agent, now);
+    const stalled = stalledDuration(agent, now);
+    const result = [...(agent.activity ? [`Activity: ${agent.activity.text}`] : []), ...(stalled === undefined ? [] : [styles.warning(`stalled? ${formatStalledDuration(stalled)}`)]), `State: ${phaseStyle(agent.state)(agent.state)}`, ...(agent.structuralPath?.length ? [`Structural path: ${agent.structuralPath.join(" > ")}`] : []), `Model: ${agent.model.provider}/${agent.model.model}${agent.model.thinking ? `:${agent.model.thinking}` : ""}`, `Role: ${agent.role ?? "(none)"}`, `Tools: ${agent.tools.join(", ") || "(none)"}`, ...(agent.attempts > 1 ? [`Attempts: ${String(agent.attempts)}`] : []), ...(duration === undefined ? [] : [`Duration: ${formatWorkflowRuntime(duration)}`]), ...(agent.accounting ? formatAgentAccounting(agent.accounting) : []), ...(selection.actions ? [] : [styles.muted("enter for agent actions")])];
     const error = agent.attemptDetails?.at(-1)?.error;
     if (error) result.push(styles.error(`Error: ${error.code}: ${error.message}`));
-    if (agent.activity) result.push(`Activity: ${agent.activity.text}`);
-    const stalled = stalledDuration(agent, now);
-    if (stalled !== undefined) result.push(styles.warning(`stalled? ${formatStalledDuration(stalled)}`));
     return result;
   };
   const stateNames: readonly WorkflowPhaseState[] = ["not started", "running", "completed", "failed", "cancelled", "interrupted", "budget_exhausted"];
   const statusSummary = stateNames.filter((state) => (model.counts[state] ?? 0) > 0).map((state) => `${String(model.counts[state])} ${state}`).join(" · ") || "0 phases";
   const lines: string[] = [styles.bold(styles.accent(`Workflow: ${run.workflowName}`))];
   if (run.error) lines.push(styles.error(`ERROR ${run.error.code}: ${run.error.message}`));
-  lines.push(`phase: ${run.phase ?? selectedPhase?.name ?? "none"}`, `Run state: ${run.state}`, `Phases: ${statusSummary}`);
+  const runtime = run.usage ? ` runtime=${formatWorkflowRuntime(run.usage.durationMs)}` : "";
+  lines.push(`phase: ${run.phase ?? selectedPhase?.name ?? "none"}`, `Run state: ${run.state}${runtime}`, `Phases: ${statusSummary}`);
   for (const event of run.events ?? []) lines.push(styles.warning(`Warning: ${event.message}`));
   lines.push(...formatCompactBudgetStatus(run));
   const renderTree = (limit: number): string[] => [styles.bold("Tree"), ...(visibleNodes.length ? visibleNodes.flatMap((node) => wrap(treeLine(node), limit)) : [styles.muted("(empty)")])];
@@ -1492,15 +1499,17 @@ function piHostCapabilities(pi: unknown): PiHostCapabilities {
   return { ...(registerEntryRenderer ? { registerEntryRenderer } : {}), ...(isWorkflowEventSink(events) ? { events } : {}) };
 }
 type ContextHostCapabilities = { modelRegistry?: ModelRegistryCapability };
-type ModelSummary = { provider: string; id: string };
-type ModelRegistryGetter = () => readonly ModelSummary[];
-type ModelRegistryCapability = { getAll?: ModelRegistryGetter; getAvailable?: ModelRegistryGetter };
+type ModelRegistryGetter = () => readonly Model<Api>[];
+type ModelRegistryCapability = { getAll?: ModelRegistryGetter; getAvailable?: ModelRegistryGetter; find?: (provider: string, model: string) => Model<Api> | undefined; refresh?: () => Promise<void>; getError?: () => string | undefined };
 function contextHostCapabilities(ctx: unknown): ContextHostCapabilities {
   if (!object(ctx) || !object(ctx.modelRegistry)) return {};
   const registry = ctx.modelRegistry;
-  const getAll = (asFn(registry.getAll) as ModelRegistryGetter | undefined);
-  const getAvailable = (asFn(registry.getAvailable) as ModelRegistryGetter | undefined);
-  return { modelRegistry: { ...(getAll ? { getAll: () => getAll.call(registry) } : {}), ...(getAvailable ? { getAvailable: () => getAvailable.call(registry) } : {}) } };
+  const getAll = asFn(registry.getAll) as ModelRegistryGetter | undefined;
+  const getAvailable = asFn(registry.getAvailable) as ModelRegistryGetter | undefined;
+  const find = asFn(registry.find) as ModelRegistryCapability["find"];
+  const refresh = asFn(registry.refresh) as ModelRegistryCapability["refresh"];
+  const getError = asFn(registry.getError) as ModelRegistryCapability["getError"];
+  return { modelRegistry: { ...(getAll ? { getAll: () => getAll.call(registry) } : {}), ...(getAvailable ? { getAvailable: () => getAvailable.call(registry) } : {}), ...(find ? { find: (provider, model) => find.call(registry, provider, model) } : {}), ...(refresh ? { refresh: () => refresh.call(registry) } : {}), ...(getError ? { getError: () => getError.call(registry) } : {}) } };
 }
 function modelInventory(root: ModelSpec | undefined, registry: ModelRegistryCapability | undefined): { knownModels: ReadonlySet<string>; availableModels: ReadonlySet<string> } {
   const all = registry?.getAll?.() ?? registry?.getAvailable?.() ?? [];
@@ -1532,13 +1541,14 @@ async function resolveLaunchAliases(registry: WorkflowRegistryApi, staticAliases
 type UiSelect = (title: string, options: string[]) => Promise<string | undefined>;
 type UiInput = (title: string, placeholder?: string) => Promise<string | undefined>;
 type UiSetStatus = (key: string, text?: string) => void;
-type UiHostCapabilities = { select?: UiSelect; input?: UiInput; setStatus?: UiSetStatus };
+type UiHostCapabilities = { select?: UiSelect; input?: UiInput; setStatus?: UiSetStatus; custom?: ExtensionUIContext["custom"] };
 function uiHostCapabilities(ui: unknown): UiHostCapabilities | undefined {
   if (!object(ui)) return undefined;
-  const select = (asFn(ui.select) as UiSelect | undefined);
-  const input = (asFn(ui.input) as UiInput | undefined);
-  const setStatus = (asFn(ui.setStatus) as UiSetStatus | undefined);
-  return { ...(select ? { select } : {}), ...(input ? { input } : {}), ...(setStatus ? { setStatus } : {}) };
+  const select = asFn(ui.select) as UiSelect | undefined;
+  const input = asFn(ui.input) as UiInput | undefined;
+  const setStatus = asFn(ui.setStatus) as UiSetStatus | undefined;
+  const custom = asFn(ui.custom) as ExtensionUIContext["custom"] | undefined;
+  return { ...(select ? { select } : {}), ...(input ? { input } : {}), ...(setStatus ? { setStatus } : {}), ...(custom ? { custom } : {}) };
 }
 function tuiRows(tui: unknown): number {
   const rows = object(tui) && object(tui.terminal) ? tui.terminal.rows : undefined;
@@ -1601,20 +1611,45 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
   const createProviderErrorRecovery = (host: unknown, fallbackModels: ReadonlySet<string>, abort: () => void) => {
     if (!object(host) || host.mode !== "tui" || host.hasUI !== true) return undefined;
     const ui = object(host.ui) ? host.ui : undefined;
-    const select = uiHostCapabilities(ui)?.select;
+    const uiCapabilities = uiHostCapabilities(ui);
+    const select = uiCapabilities?.select;
     if (!select) return undefined;
     const hostModels = contextHostCapabilities(host).modelRegistry;
     const choose = (title: string, options: string[]) => select.call(ui, title, options);
-    return (failure: AgentProviderFailure): Promise<AgentProviderRecovery> => enqueueProviderRecovery(async () => {
-      const action = await choose(`Subagent "${failure.label}" failed\nCurrent provider/model: ${failure.provider}/${failure.model}\nProvider error: ${failure.error}\nChoose what to do`, ["Retry", "Change model", "Abort workflow"]);
-      if (action === "Retry") return "retry";
-      if (action === "Change model") {
-        const available = hostModels?.getAvailable?.().map((model) => `${model.provider}/${model.id}`) ?? [...fallbackModels];
-        const selected = await choose(`Available models for subagent "${failure.label}"`, [...new Set(available)].sort());
-        if (selected) return { model: selected };
+    const chooseModel = async (failure: AgentProviderFailure): Promise<string | undefined> => {
+      const custom = uiCapabilities.custom;
+      const getAvailable = hostModels?.getAvailable;
+      if (!custom || !getAvailable) {
+        const available = getAvailable ? getAvailable().map((model) => `${model.provider}/${model.id}`) : [...fallbackModels];
+        return choose(`Available models for subagent "${failure.label}"`, [...new Set(available)].sort());
       }
-      abort();
-      return "abort";
+      const available = getAvailable();
+      const current = hostModels.find?.(failure.provider, failure.model) ?? available.find((model) => model.provider === failure.provider && model.id === failure.model);
+      const runtime = {
+        getAvailableSnapshot: getAvailable,
+        refresh: async ({ signal }: { signal?: AbortSignal } = {}) => {
+          if (signal?.aborted) return { aborted: true, errors: new Map() };
+          try { await hostModels.refresh?.(); return { aborted: false, errors: new Map() }; }
+          catch (error) { return { aborted: false, errors: new Map([["models", error]]) }; }
+        },
+        getModel: (provider: string, model: string) => hostModels.find?.(provider, model) ?? getAvailable().find((candidate) => candidate.provider === provider && candidate.id === model),
+        getError: () => hostModels.getError?.(),
+      } as unknown as ModelRuntime;
+      const settings = { setDefaultModelAndProvider() {} } as unknown as SettingsManager;
+      return await custom.call(ui, (tui, _theme, _keybindings, done) => new ModelSelectorComponent(tui, current, settings, runtime, [], (model) => { done(`${model.provider}/${model.id}`); }, () => { done(undefined); })) as string | undefined;
+    };
+    return (failure: AgentProviderFailure): Promise<AgentProviderRecovery> => enqueueProviderRecovery(async () => {
+      for (;;) {
+        const action = await choose(`Subagent "${failure.label}" failed\nCurrent provider/model: ${failure.provider}/${failure.model}\nProvider error: ${failure.error}\nChoose what to do`, ["Retry", "Change model", "Abort workflow"]);
+        if (action === "Retry") return "retry";
+        if (action === "Change model") {
+          const selected = await chooseModel(failure);
+          if (selected) return { model: selected };
+          continue;
+        }
+        abort();
+        return "abort";
+      }
     });
   };
   const pendingFailureDiagnostics = new Map<string, WorkflowFailureDiagnostics>();
@@ -1854,8 +1889,11 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         try { effective = run.executor.resolve(requested); }
         catch { effective = previous ? { model: previous.model, ...(previous.requestedModel ? { requestedModel: previous.requestedModel } : {}), tools: previous.tools } : { model: node.options.model ? modelSpec(node.options.model, run.model) : { ...run.model, ...(node.options.thinking ? { thinking: node.options.thinking } : {}) }, ...(node.options.model ? { requestedModel: node.options.model } : {}), tools: node.options.tools }; }
         const resultPath = !node.parentId && node.options.agentIdentity ? agentIdentityPath(node.options.agentIdentity) : undefined;
-        const lastEventAt = node.state === "running" ? previous?.state === "running" && previous.lastEventAt !== undefined ? previous.lastEventAt : Date.now() : previous?.lastEventAt;
-        return { ...(previous?.systemPrompt === undefined ? {} : { systemPrompt: previous.systemPrompt }), ...(node.prompt !== undefined ? { prompt: node.prompt } : previous?.prompt !== undefined ? { prompt: previous.prompt } : {}), id: node.id, name: node.label, ...(node.options.requestedLabel ? { label: node.options.requestedLabel } : {}), path: node.id, state: node.state, ...(node.parentId ? { parentId: node.parentId } : {}), structuralPath: [...(node.options.agentIdentity?.structuralPath ?? [])], ...(resultPath ? { resultPath } : {}), ...(node.options.parentBreadcrumb ? { parentBreadcrumb: node.options.parentBreadcrumb } : {}), ...(node.options.worktreeOwner ? { worktreeOwner: node.options.worktreeOwner } : {}), ...(node.options.role ? { role: node.options.role } : {}), ...(effective.requestedModel ? { requestedModel: effective.requestedModel } : {}), model: effective.model, tools: effective.tools, attempts: previous?.attempts ?? 0, ...(previous?.attemptDetails ? { attemptDetails: previous.attemptDetails } : {}), ...(previous?.accounting ? { accounting: previous.accounting } : {}), ...(previous?.toolCalls ? { toolCalls: previous.toolCalls } : {}), ...(previous?.activity ? { activity: previous.activity } : {}), ...(lastEventAt === undefined ? {} : { lastEventAt }) };
+        const now = Date.now();
+        const lastEventAt = node.state === "running" ? previous?.state === "running" && previous.lastEventAt !== undefined ? previous.lastEventAt : now : previous?.lastEventAt;
+        const startedAt = previous?.startedAt ?? (node.state === "running" ? now : undefined);
+        const durationMs = previous?.durationMs ?? (SETTLED_AGENT_STATES.has(node.state) && startedAt !== undefined ? Math.max(0, now - startedAt) : undefined);
+        return { ...(previous?.systemPrompt === undefined ? {} : { systemPrompt: previous.systemPrompt }), ...(node.prompt !== undefined ? { prompt: node.prompt } : previous?.prompt !== undefined ? { prompt: previous.prompt } : {}), id: node.id, name: node.label, ...(node.options.requestedLabel ? { label: node.options.requestedLabel } : {}), path: node.id, state: node.state, ...(node.parentId ? { parentId: node.parentId } : {}), structuralPath: [...(node.options.agentIdentity?.structuralPath ?? [])], ...(resultPath ? { resultPath } : {}), ...(node.options.parentBreadcrumb ? { parentBreadcrumb: node.options.parentBreadcrumb } : {}), ...(node.options.worktreeOwner ? { worktreeOwner: node.options.worktreeOwner } : {}), ...(node.options.role ? { role: node.options.role } : {}), ...(effective.requestedModel ? { requestedModel: effective.requestedModel } : {}), model: effective.model, tools: effective.tools, attempts: previous?.attempts ?? 0, ...(startedAt === undefined ? {} : { startedAt }), ...(durationMs === undefined ? {} : { durationMs }), ...(previous?.attemptDetails ? { attemptDetails: previous.attemptDetails } : {}), ...(previous?.accounting ? { accounting: previous.accounting } : {}), ...(previous?.toolCalls ? { toolCalls: previous.toolCalls } : {}), ...(previous?.activity ? { activity: previous.activity } : {}), ...(lastEventAt === undefined ? {} : { lastEventAt }) };
       });
       return { ...current, agents };
     });
@@ -2093,6 +2131,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const outcome = await spawned.result.finally(() => { agentSignal.removeEventListener("abort", cancel); });
       if (!outcome.ok) throw new WorkflowError(outcome.error.code as WorkflowErrorCode, outcome.error.message);
       await store.complete(path, outcome.value);
+      scheduler.releaseResult(spawned.id);
       return outcome.value;
     } finally { await lifecycle.leave(); }
   };
@@ -2602,12 +2641,6 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     description: "Inspect and control workflows for this Pi session",
     handler: async (args, ctx) => {
       const command = args.trim();
-      if (command === "doctor") {
-        const { doctor, doctorExitCode, formatDoctorReport } = await import("./doctor.js");
-        const report = await doctor({ cwd: ctx.cwd, activeTools: pi.getActiveTools().filter((tool) => tool !== "workflow" && tool !== "workflow_respond") });
-        ctx.ui.notify(formatDoctorReport(report), doctorExitCode(report) ? "warning" : "info");
-        return;
-      }
       await ensureSessionLease(ctx.cwd, ctx.sessionManager.getSessionId());
       const loadStores = async () => {
         const entries = await Promise.all((await listRunIds(ctx.cwd, ctx.sessionManager.getSessionId(), home)).map(async (runId) => {
@@ -2618,7 +2651,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         return entries.filter((entry): entry is { store: RunStore; loaded: { run: PersistedRun; snapshot: Readonly<LaunchSnapshot> } } => entry !== undefined);
       };
       let stores = await loadStores();
-      const usage = "Usage: /workflow [doctor|model-aliases], or /workflow pause|resume|stop|approve|reject|delete <run-id> [checkpoint-name]. Approve/reject are for checkpoints only; use workflow_respond with a proposalId or the navigator's budget controls for budget decisions. Use workflow_resume for budget patches."
+      const usage = "Usage: /workflow [model-aliases], or /workflow pause|resume|stop|approve|reject|delete <run-id> [checkpoint-name]. Approve/reject are for checkpoints only; use workflow_respond with a proposalId or the navigator's budget controls for budget decisions. Use workflow_resume for budget patches."
       const setWorkflowStatus = (text: string | undefined) => {
         const setStatus = uiHostCapabilities(ctx.ui)?.setStatus;
         setStatus?.call(ctx.ui, "workflow-stop", text);
@@ -2799,7 +2832,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           };
           const loadDashboard = async () => {
             const loaded = await store.load();
-            const liveRun = withLiveActivities(loaded.run);
+            const activeRun = runs.get(store.runId);
+            const liveRun = withLiveActivities({ ...loaded.run, ...(activeRun ? { usage: activeRun.budget.usage } : {}) });
             const checkpoints = await store.awaitingCheckpoints();
             const worktrees = await store.worktrees();
             const completedOperations = ctx.mode === "tui" ? await store.replayableOperations().catch(() => []) : [];

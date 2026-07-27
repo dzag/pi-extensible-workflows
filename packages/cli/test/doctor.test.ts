@@ -8,7 +8,7 @@ import test from "node:test";
 import { doctor, doctorExitCode, formatDoctorReport, type DoctorPiState } from "../src/doctor.js";
 import { writePortableWorkflowBundle } from "../src/bundles.js";
 import { formatWorkflowCliHelp, parseDoctorCleanupArgs, parseWorkflowCliArgs, runCli } from "../src/cli.js";
-import { registerWorkflowExtension, WorkflowRegistry, type JsonValue, type WorkflowExtension } from "../src/index.js";
+import { registerWorkflowExtension, WorkflowRegistry, type JsonValue, type WorkflowExtension } from "pi-extensible-workflows";
 
 function pi(overrides: Partial<DoctorPiState> = {}): DoctorPiState {
   return {
@@ -63,7 +63,7 @@ function registerCliExtension(): void { registerWorkflowExtension(cliExtension);
 
 function runIsolatedCli(paths: { root: string; cwd: string; agentDir: string }, functionDefinition: string, args: readonly string[], abort = false): { status: number | null; stdout: string; stderr: string } {
   const script = join(paths.root, "isolated-cli.mjs");
-  const indexUrl = pathToFileURL(join(process.cwd(), "dist", "src", "index.js")).href;
+  const indexUrl = pathToFileURL(join(process.cwd(), "../core", "dist", "src", "index.js")).href;
   const cliUrl = pathToFileURL(join(process.cwd(), "dist", "src", "cli.js")).href;
   writeFileSync(script, [`import { registerWorkflowExtension } from ${JSON.stringify(indexUrl)};`, `import { runCli } from ${JSON.stringify(cliUrl)};`, `registerWorkflowExtension({ version: "1.0.0", headline: "Isolated CLI", description: "Isolated CLI test", functions: { ${functionDefinition} } });`, "const controller = new AbortController();", abort ? "setImmediate(() => controller.abort());" : "", `const exit = await runCli(${JSON.stringify(args)}, { cwd: ${JSON.stringify(paths.cwd)}, agentDir: ${JSON.stringify(paths.agentDir)}, signal: controller.signal, stderr: (text) => process.stderr.write(text) });`, "process.exitCode = exit;"].join("\n"));
   const result = spawnSync(process.execPath, [script], { cwd: process.cwd(), encoding: "utf8", timeout: 10_000, env: { ...process.env, HOME: paths.root, PI_CODING_AGENT_DIR: paths.agentDir, PI_OFFLINE: "1" } });
@@ -229,7 +229,7 @@ void test("doctor excludes workflow_catalog from active capabilities and output"
 });
 void test("package bin and CLI expose doctor and inspector commands", async () => {
   const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { bin?: Record<string, string> };
-  assert.equal(pkg.bin?.["pi-extensible-workflows"], "./dist/src/cli.js");
+  assert.equal(pkg.bin?.piewf, "./dist/src/cli.js");
   const paths = fixture();
   let output = "";
   const exit = await withHome(paths.root, () => runCli(["doctor"], { ...paths, discoverPi: async () => pi({ knownModels: [], availableModels: [] }) }, (text) => { output += text; }));
@@ -240,8 +240,8 @@ void test("package bin and CLI expose doctor and inspector commands", async () =
   assert.equal(inspected, "session-a");
   output = "";
   assert.equal(await runCli([], {}, (text) => { output += text; }), 1);
-  assert.equal(output, "Usage: pi-extensible-workflows doctor | inspect [session-id] [--json|--summary] [--failed] | transcript <session-file> | bundle <workflow-name> [--name <command>] [--output <path>] [--force] | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force] [--bundle]\n");
-  const bin = join(paths.root, "bin", "pi-extensible-workflows");
+  assert.equal(output, "Usage: piewf doctor | inspect [session-id] [--json|--summary] [--failed] | transcript <session-file> | bundle <workflow-name> [--name <command>] [--output <path>] [--force] | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force] [--bundle]\n");
+  const bin = join(paths.root, "bin", "piewf");
   mkdirSync(join(paths.root, "bin"), { recursive: true });
   symlinkSync(join(process.cwd(), "dist", "src", "cli.js"), bin);
   const linkedOutput = execFileSync(bin, ["doctor"], { cwd: paths.cwd, env: { ...process.env, HOME: paths.root }, encoding: "utf8" });
@@ -286,23 +286,20 @@ void test("exported launchers are executable and delegate unchanged arguments", 
   const destination = join(paths.root, ".local", "bin", "cli-echo");
   const cliPath = join(process.cwd(), "dist", "src", "cli.js");
   assert.equal(lstatSync(destination).isSymbolicLink(), false);
-  assert.equal(readFileSync(destination, "utf8"), `#!/bin/sh\nexec node '${cliPath}' run 'cliEcho' "$@"\n`);
+  const launcher = readFileSync(destination, "utf8");
+  assert.match(launcher, /^#!\/usr\/bin\/env node\n/);
+  assert.match(launcher, /import\.meta\.resolve\("pi-extensible-workflows-cli"\)/);
+  assert.match(launcher, /pi-extensible-workflows-cli/);
   assert.match(output, /Exported .*cli-echo/);
   assert.match(warning, /not in PATH/);
 
-  const fakeBin = join(paths.root, "fake-bin");
-  const runner = join(fakeBin, "node");
-  const capture = join(paths.root, "launcher-args.json");
-  mkdirSync(fakeBin, { recursive: true });
-  writeFileSync(runner, `#!${process.execPath}\nimport { writeFileSync } from 'node:fs';\nwriteFileSync(process.env.CAPTURE, JSON.stringify(process.argv.slice(2)));\n`);
-  chmodSync(runner, 0o755);
-  execFileSync(destination, ["value with spaces", "--quoted", "a'b"], { env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, CAPTURE: capture }, encoding: "utf8" });
-  assert.deepEqual(JSON.parse(readFileSync(capture, "utf8")), [cliPath, "run", "cliEcho", "value with spaces", "--quoted", "a'b"]);
-  const indexUrl = pathToFileURL(join(process.cwd(), "dist", "src", "index.js")).href;
-  const cliUrl = pathToFileURL(cliPath).href;
-  writeFileSync(runner, `#!${process.execPath}\nimport { registerWorkflowExtension } from ${JSON.stringify(indexUrl)};\nimport { runCli } from ${JSON.stringify(cliUrl)};\nregisterWorkflowExtension({ version: "1.0.0", headline: "Real runner", description: "Real runner", functions: { cliEcho: { description: "Echo", input: { type: "object", properties: { issue: { type: "integer" } }, required: ["issue"], additionalProperties: false }, output: { type: "object", properties: { issue: { type: "integer" } }, required: ["issue"], additionalProperties: false }, run: (input) => ({ issue: input.issue }) } } });\nprocess.exitCode = await runCli(process.argv.slice(3), { stderr: (text) => process.stderr.write(text) });\n`);
-  chmodSync(runner, 0o755);
-  const realOutput = execFileSync(destination, ["7"], { cwd: paths.cwd, env: { ...process.env, HOME: paths.root, PI_CODING_AGENT_DIR: paths.agentDir, PI_OFFLINE: "1", PATH: `${fakeBin}:${process.env.PATH ?? ""}` }, encoding: "utf8" });
+  const packageRoot = join(paths.agentDir, "npm", "node_modules", "pi-extensible-workflows-cli");
+  const fallbackCli = join(packageRoot, "dist", "src");
+  const indexUrl = pathToFileURL(join(process.cwd(), "../core", "dist", "src", "index.js")).href;
+  mkdirSync(fallbackCli, { recursive: true });
+  writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: "pi-extensible-workflows-cli", version: "3.4.2" }));
+  writeFileSync(join(fallbackCli, "cli.js"), `import { registerWorkflowExtension } from ${JSON.stringify(indexUrl)};\nimport { runCli } from ${JSON.stringify(pathToFileURL(cliPath).href)};\nregisterWorkflowExtension({ version: "1.0.0", headline: "Real runner", description: "Real runner", functions: { cliEcho: { description: "Echo", input: { type: "object", properties: { issue: { type: "integer" } }, required: ["issue"], additionalProperties: false }, output: { type: "object", properties: { issue: { type: "integer" } }, required: ["issue"], additionalProperties: false }, run: (input) => ({ issue: input.issue }) } } });\nexport { runCli };\n`);
+  const realOutput = execFileSync(destination, ["7"], { cwd: paths.cwd, env: { ...process.env, HOME: paths.root, PI_CODING_AGENT_DIR: paths.agentDir, PI_OFFLINE: "1" }, encoding: "utf8" });
   assert.equal(realOutput, '{"issue":7}\n');
 });
 
@@ -318,7 +315,7 @@ void test("export refuses existing files and replaces them only with --force", a
   assert.match(error, /use --force/);
   registerCliExtension();
   assert.equal(await runCli(["export", "cliEcho", "--output", destination, "--force"], { cwd: paths.cwd, agentDir: paths.agentDir }, () => {}), 0);
-  assert.match(readFileSync(destination, "utf8"), /^#!\/bin\/sh\n/);
+  assert.match(readFileSync(destination, "utf8"), /^#!\/usr\/bin\/env node\n/);
   registerCliExtension();
 
   const target = join(paths.root, "bin", "target");
@@ -344,16 +341,16 @@ void test("portable bundle export writes a self-contained payload and external-r
   const destination = join(paths.root, "bundle");
   let output = "";
   assert.equal(await runCli(["bundle", "cliEcho", "--output", destination], { cwd: paths.cwd, agentDir: paths.agentDir, stderr: () => {} }, (text) => { output += text; } ), 0);
-  const manifest = JSON.parse(readFileSync(join(destination, "manifest.json"), "utf8")) as { format: string; version: number; command: string; workflow: { name: string; input: unknown; output: unknown }; runtime: { pi: string; "pi-extensible-workflows": string }; requirements: { commands: string[]; environment: string[] } };
+  const manifest = JSON.parse(readFileSync(join(destination, "manifest.json"), "utf8")) as { format: string; version: number; command: string; workflow: { name: string; input: unknown; output: unknown }; runtime: { pi: string; "pi-extensible-workflows-cli": string }; requirements: { commands: string[]; environment: string[] } };
   assert.deepEqual({ format: manifest.format, version: manifest.version, command: manifest.command }, { format: "pi-extensible-workflows-bundle", version: 1, command: "cli-echo" });
   assert.equal(manifest.workflow.name, "cliEcho");
   assert.deepEqual(manifest.requirements, { roles: [], aliases: [], tools: [], commands: [], environment: [] });
   assert.notEqual(manifest.runtime.pi, "");
-  assert.notEqual(manifest.runtime["pi-extensible-workflows"], "unknown");
+  assert.notEqual(manifest.runtime["pi-extensible-workflows-cli"], "unknown");
   assert.equal(lstatSync(join(destination, "cli-echo")).mode & 0o111, 0o111);
   assert.match(readFileSync(join(destination, "cli-echo"), "utf8"), /payload\/runner\.mjs/);
   assert.match(readFileSync(join(destination, "payload", "workflow.mjs"), "utf8"), /registerWorkflowExtension/);
-  assert.match(readFileSync(join(destination, "payload", "runner.mjs"), "utf8"), /pi-extensible-workflows@/);
+  assert.match(readFileSync(join(destination, "payload", "runner.mjs"), "utf8"), /pi-extensible-workflows-cli@/);
   assert.match(output, /Run .* setup/);
   writeFileSync(join(paths.agentDir, "pi-extensible-workflows", "roles", "reviewer.md"), "---\nmodel: openai/gpt\n---\nReview the result");
   registerCliExtension();
@@ -541,14 +538,14 @@ void test("portable bundle setup resolves an external runtime, launches, and fai
   const piRoot = join(root, "node_modules", "@earendil-works", "pi-coding-agent");
   mkdirSync(join(agentDir, "npm", "node_modules"), { recursive: true });
   mkdirSync(join(piRoot, "dist", "core", "tools"), { recursive: true });
-  symlinkSync(process.cwd(), join(agentDir, "npm", "node_modules", "pi-extensible-workflows"));
+  symlinkSync(process.cwd(), join(agentDir, "npm", "node_modules", "pi-extensible-workflows-cli"));
   symlinkSync(join(process.cwd(), "../../node_modules", "@earendil-works", "pi-coding-agent", "dist", "index.js"), join(piRoot, "dist", "index.js"));
   symlinkSync(join(process.cwd(), "../../node_modules", "@earendil-works", "pi-coding-agent", "dist", "core", "tools", "index.js"), join(piRoot, "dist", "core", "tools", "index.js"));
   writeFileSync(join(piRoot, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "0.80.9" }));
   const piExecutable = join(piRoot, "dist", "pi");
   writeFileSync(piExecutable, "#!/usr/bin/env node\nif (process.argv[2] === \"--version\") console.log(\"0.82.0\");\n", { mode: 0o755 });
   chmodSync(piExecutable, 0o755);
-  writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:pi-extensible-workflows"] }));
+  writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:pi-extensible-workflows-cli"] }));
   const workflow = { name: "e2e", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle e2e", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
   const environment = { ...process.env, PATH: `${join(piRoot, "dist")}:${process.env.PATH ?? ""}`, HOME: root, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" };
   const create = (name: string, requirements: Record<string, readonly string[]>) => { const destination = join(root, name); writePortableWorkflowBundle({ destination, command: name, workflow, functionSource: "async run(input) { return input.value; }", requirements, piVersion: ">=0.82.0 <0.83.0", engineVersion: ">=3.4.0 <3.5.0" }); return destination; };

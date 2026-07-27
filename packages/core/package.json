@@ -17,9 +17,14 @@
     "orchestration",
     "automation"
   ],
-  "exports": "./dist/src/index.js",
-  "bin": {
-    "pi-extensible-workflows": "./dist/src/cli.js"
+  "exports": {
+    ".": "./dist/src/index.js",
+    "./persistence": "./dist/src/persistence.js",
+    "./types": "./dist/src/types.js",
+    "./utils": "./dist/src/utils.js",
+    "./budget": "./dist/src/budget.js",
+    "./validation": "./dist/src/validation.js",
+    "./registry": "./dist/src/registry.js"
   },
   "files": [
     "dist/src",
@@ -30,12 +35,11 @@
     "test/fixtures"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.json && chmod +x dist/src/cli.js",
-    "inspect": "node dist/src/cli.js inspect",
+    "build": "rm -rf dist && tsc -p tsconfig.json",
     "lint": "eslint .",
-    "test": "npm run test:layout && npm run build && TEST_FILES='dist/test/*.test.js' npm run test:run",
+    "test": "npm run test:layout && npm run build && TEST_FILES=$(find dist/test -name '*.test.js' ! -name 'herdr.test.js') npm run test:run",
     "test:layout": "node --test test/workspace-layout.test.mjs",
-    "test:run": "tmp=$(mktemp -d); trap 'rm -rf \"$tmp\"' EXIT; TMPDIR=\"$tmp\" node --test --test-concurrency=1 --test-reporter=dot $TEST_FILES",
+    "test:run": "tmp=$(mktemp -d); trap 'rm -rf \"$tmp\"' EXIT; TMPDIR=\"$tmp\" node --expose-gc --test --test-concurrency=1 --test-reporter=dot $TEST_FILES",
     "acceptance": "npm run build && TEST_FILES='dist/test/runtime-acceptance.test.js' npm run test:run",
     "evals": "npm run build && node dist/src/workflow-evals.js",
     "evals:ambient": "node -e \"if (process.env.PI_WORKFLOW_EVAL_AMBIENT !== '1') { console.error('Ambient Tier D evals are opt-in. Set PI_WORKFLOW_EVAL_AMBIENT=1 to run them.'); process.exit(1); }\" && npm run build && node dist/src/ambient-workflow-evals.js",

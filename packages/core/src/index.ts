@@ -6,7 +6,6 @@ export * from "./registry.js";
 export * from "./execution.js";
 export * from "./host.js";
 export * from "./workflow-artifacts.js";
-export * from "./bundles.js";
 export { default } from "./host.js";
 export { acquireSessionLease, hasLiveSessionLease, listPersistedSessionIds, projectSessionsDirectory, projectStorageKey, RunStore, runsDirectory, SessionLease, structuralPath } from "./persistence.js";
 export type { AwaitingCheckpoint, CompletedOperation, PendingWorkflowDecision, PersistedOwnershipNode, PersistedRun, RunSummary, RunSummaryAgent, RunSummaryArtifacts, WorktreeReference } from "./persistence.js";
@@ -14,7 +13,3 @@ export { FairAgentScheduler, WorkflowAgentExecutor, createLocalWorkflowAgentSess
 export type { AgentAttempt, AgentBudgetHooks, AgentExecutionOptions, AgentExecutionResult, AgentExecutionRoot, AgentProgress, AgentProviderFailure, AgentProviderRecovery, AgentToolCallProgress, AgentSetup, AgentSetupContext, AgentSetupHook, AgentTransport, AgentTransportContext, PreparedAgentSession, RegisteredAgentSetupHook, SessionInput, WorkflowAgentMessage, WorkflowAgentSession, WorkflowAgentSessionEvent, WorkflowAgentSessionReference, WorkflowAgentSessionState, WorkflowAgentSessionStats, WorkflowAgentTurnResult } from "./agent-execution.js";
 export { createLiveSessionHandoff } from "./session-handoff.js";
 export * from "./herdr.js";
-export { doctor, doctorExitCode, formatDoctorReport } from "./doctor.js";
-export type { DoctorDiagnostic, DoctorFunction, DoctorOptions, DoctorPiState, DoctorReport, DoctorRole, DoctorSeverity, DoctorTrust } from "./doctor.js";
-export { doctorCleanup, doctorCleanupExitCode, formatDoctorCleanupReport } from "./doctor-cleanup.js";
-export type { CleanupFailure, CleanupRunResult, CleanupSessionReport, DoctorCleanupOptions, DoctorCleanupReport } from "./doctor-cleanup.js";

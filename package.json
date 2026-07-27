@@ -5,6 +5,7 @@
   "description": "Workspace orchestrator for pi-extensible-workflows",
   "type": "module",
   "workspaces": [
+    "packages/cli",
     "packages/core",
     "packages/extensions/*"
   ],
@@ -12,11 +13,11 @@
     "extensions": ["./packages/core/src/index.ts"]
   },
   "scripts": {
-    "build": "npm run build --workspace=packages/core",
-    "inspect": "npm run inspect --workspace=packages/core",
-    "lint": "eslint .",
-    "test": "npm run test --workspace=packages/core && npm run test --workspace=packages/extensions/herdr && npm run test:template",
-    "test:run": "npm run test:run --workspace=packages/core",
+    "build": "npm run build --workspace=packages/core && npm run build --workspace=packages/cli",
+    "inspect": "npm run inspect --workspace=packages/cli",
+    "lint": "npm run lint --workspace=packages/core && npm run lint --workspace=packages/cli",
+    "test": "npm run test --workspace=packages/core && npm run test --workspace=packages/cli && npm run test --workspace=packages/extensions/herdr && npm run test:template",
+    "test:run": "npm run test:run --workspace=packages/core && npm run test:run --workspace=packages/cli",
     "test:template": "node --test packages/core/examples/workflow-extension-template/extension.test.mjs",
     "acceptance": "npm run acceptance --workspace=packages/core",
     "docs:check": "node scripts/check-docs.mjs",
@@ -24,7 +25,7 @@
     "evals": "npm run evals --workspace=packages/core",
     "evals:ambient": "npm run evals:ambient --workspace=packages/core",
     "pack:core": "npm pack --workspace=packages/core --dry-run",
-    "prepack": "npm run build --workspace=packages/core"
+    "prepack": "npm run build"
   },
   "engines": {
     "node": ">=22.19.0"

@@ -3,16 +3,16 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, linkSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { ProjectTrustStore, SessionManager, SettingsManager, createAgentSessionFromServices, createAgentSessionServices, getAgentDir, hasTrustRequiringProjectResources, type LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
 import { Value } from "typebox/value";
 import { doctor, doctorExitCode, formatDoctorReport, type DoctorOptions } from "./doctor.js";
 import { doctorCleanup, doctorCleanupExitCode, formatDoctorCleanupReport, type DoctorCleanupOptions } from "./doctor-cleanup.js";
-import workflowExtension, { formatWorkflowProgress, loadAgentDefinitions, registeredWorkflowFunctions, truncateWorkflowProgress, workflowCatalog, workflowSettingsPath, type JsonSchema, type JsonValue, type WorkflowProgressStyles } from "./index.js";
+import workflowExtension, { formatWorkflowProgress, loadAgentDefinitions, registeredWorkflowFunctions, truncateWorkflowProgress, workflowCatalog, workflowSettingsPath, type JsonSchema, type JsonValue, type WorkflowProgressStyles } from "pi-extensible-workflows";
 import { portableEngineVersion, portablePiVersion, writePortableWorkflowBundle } from "./bundles.js";
 import { runSessionInspector, transcriptFileLines, type InspectMode } from "./session-inspector.js";
-import type { PersistedRun } from "./persistence.js";
-import type { WorkflowCatalogFunction } from "./index.js";
+import type { PersistedRun } from "pi-extensible-workflows/persistence";
+import type { WorkflowCatalogFunction } from "pi-extensible-workflows";
 
 export interface CliOptions extends DoctorOptions { inspect?: (sessionId?: string, mode?: InspectMode, failedOnly?: boolean) => Promise<void>; transcript?: (sessionFile: string) => Promise<void>; stderr?: (text: string) => void; signal?: AbortSignal; trustOverride?: boolean; isTTY?: boolean; skillPaths?: readonly string[] }
 
@@ -59,7 +59,7 @@ function fieldDescription(field: CliField): string {
   return [description, required, defaultValue, enumValue].filter(Boolean).join("; ");
 }
 
-export function formatWorkflowCliHelp(fn: WorkflowCatalogFunction, command = "pi-extensible-workflows"): string {
+export function formatWorkflowCliHelp(fn: WorkflowCatalogFunction, command = "piewf"): string {
   const plan = schemaPlan(fn.input);
   const lines = [`Usage: ${command} run ${fn.name}${plan.positional ? ` <${plan.positional.name}>` : ""} [options]`, "", fn.description];
   if (plan.positional) {
@@ -158,9 +158,9 @@ function launcherHelpLines(): string[] {
     "  --".padEnd(28) + "End launcher option parsing; pass later tokens to workflow input",
   ];
 }
-function workflowUsage(): string { return [`Usage: pi-extensible-workflows run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force]`, "", "Launcher options:", ...launcherHelpLines()].join("\n") + "\n"; }
-function exportUsage(): string { return [`Usage: pi-extensible-workflows export <workflow-name> [--name <command>] [--output <path>] [--force] [--bundle]`, "", "Launcher options:", ...launcherHelpLines()].join("\n") + "\n"; }
-function bundleUsage(): string { return [`Usage: pi-extensible-workflows bundle <workflow-name> [--name <command>] [--output <directory>] [--force]`, "", "The bundle contains a launcher, manifest, workflow payload, and external-runtime setup instructions.", "Repeat --role, --alias, --tool, --command, or --environment to declare recipient requirements.", "Use --extension, --skill, --resource, and --dependency to copy selected payload resources."].join("\n") + "\n"; }
+function workflowUsage(): string { return [`Usage: piewf run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force]`, "", "Launcher options:", ...launcherHelpLines()].join("\n") + "\n"; }
+function exportUsage(): string { return [`Usage: piewf export <workflow-name> [--name <command>] [--output <path>] [--force] [--bundle]`, "", "Launcher options:", ...launcherHelpLines()].join("\n") + "\n"; }
+function bundleUsage(): string { return [`Usage: piewf bundle <workflow-name> [--name <command>] [--output <directory>] [--force]`, "", "The bundle contains a launcher, manifest, workflow payload, and external-runtime setup instructions.", "Repeat --role, --alias, --tool, --command, or --environment to declare recipient requirements.", "Use --extension, --skill, --resource, and --dependency to copy selected payload resources."].join("\n") + "\n"; }
 function parseInspectArgs(rawArgs: readonly string[]): { sessionId?: string; mode: InspectMode; failedOnly: boolean } {
   let sessionId: string | undefined;
   let mode: InspectMode = "tui";
@@ -290,7 +290,6 @@ async function selectedModel(services: WorkflowRuntime["services"]): Promise<{ p
   }
 }
 
-function shellQuote(value: string): string { return `'${value.replace(/'/g, `'\\''`)}'`; }
 function commandName(value: string): string { return value.trim() && !value.includes("/") && !value.includes("\\") ? value.trim() : ""; }
 
 function writeLauncher(destination: string, workflowName: string, force: boolean): void {
@@ -299,7 +298,18 @@ function writeLauncher(destination: string, workflowName: string, force: boolean
   const tempDir = mkdtempSync(join(parent, ".pi-extensible-workflows-"));
   const tempPath = join(tempDir, "launcher");
   try {
-    writeFileSync(tempPath, `#!/bin/sh\nexec node ${shellQuote(fileURLToPath(import.meta.url))} run ${shellQuote(workflowName)} "$@"\n`, { mode: 0o755 });
+    const source = `#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+let cli;
+try { cli = await import(import.meta.resolve("pi-extensible-workflows-cli")); } catch {}
+if (!cli) try { cli = await import(pathToFileURL(join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "npm", "node_modules", "pi-extensible-workflows-cli", "dist", "src", "cli.js")).href); } catch {}
+if (cli) process.exitCode = await cli.runCli(["run", ${JSON.stringify(workflowName)}, ...process.argv.slice(2)]);
+else { const result = spawnSync("piewf", ["run", ${JSON.stringify(workflowName)}, ...process.argv.slice(2)], { stdio: "inherit" }); if (result.error) { console.error("Could not resolve pi-extensible-workflows-cli; install it or put piewf on PATH."); process.exitCode = 1; } else process.exitCode = result.status ?? 1; }
+`;
+    writeFileSync(tempPath, source, { mode: 0o755 });
     chmodSync(tempPath, 0o755);
     if (force) renameSync(tempPath, destination);
     else {
@@ -311,7 +321,6 @@ function writeLauncher(destination: string, workflowName: string, force: boolean
     }
   } finally { rmSync(tempDir, { recursive: true, force: true }); }
 }
-
 
 function terminalProgressStyles(enabled: boolean): WorkflowProgressStyles {
   const style = (code: number) => enabled ? (text: string) => `\x1b[${String(code)}m${text}\x1b[0m` : (text: string) => text;
@@ -539,7 +548,7 @@ export async function runCli(args: readonly string[], options: CliOptions = {}, 
     return doctorExitCode(report);
   }
   if (args[0] === "doctor" && args[1] === "cleanup") {
-    if (args.slice(2).some((arg) => arg === "--help" || arg === "-h")) { write("Usage: pi-extensible-workflows doctor cleanup [--older-than-days <days>] [--yes]\n"); return 0; }
+    if (args.slice(2).some((arg) => arg === "--help" || arg === "-h")) { write("Usage: piewf doctor cleanup [--older-than-days <days>] [--yes]\n"); return 0; }
     try {
       const parsed = parseDoctorCleanupArgs(args.slice(2));
       const cleanupOptions: DoctorCleanupOptions = { ...parsed, ...(options.cwd !== undefined ? { cwd: options.cwd } : {}) };
@@ -571,7 +580,7 @@ export async function runCli(args: readonly string[], options: CliOptions = {}, 
       return args[0] === "run" ? await runWorkflowCli(args.slice(1), workflowOptions) : await exportWorkflowCli(args.slice(1), workflowOptions);
     } catch (error) { stderr(`Error: ${error instanceof Error ? error.message : String(error)}\n`); return 1; }
   }
-  write("Usage: pi-extensible-workflows doctor | inspect [session-id] [--json|--summary] [--failed] | transcript <session-file> | bundle <workflow-name> [--name <command>] [--output <path>] [--force] | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force] [--bundle]\n");
+  write("Usage: piewf doctor | inspect [session-id] [--json|--summary] [--failed] | transcript <session-file> | bundle <workflow-name> [--name <command>] [--output <path>] [--force] | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force] [--bundle]\n");
   return 1;
 }
 

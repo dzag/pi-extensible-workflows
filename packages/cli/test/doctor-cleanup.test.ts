@@ -4,8 +4,8 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createLaunchSnapshot, DEFAULT_SETTINGS, type RunState } from "../src/index.js";
-import { acquireSessionLease, RunStore, structuralPath } from "../src/persistence.js";
+import { createLaunchSnapshot, DEFAULT_SETTINGS, type RunState } from "pi-extensible-workflows";
+import { acquireSessionLease, RunStore, structuralPath } from "pi-extensible-workflows/persistence";
 import { doctorCleanup } from "../src/doctor-cleanup.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
