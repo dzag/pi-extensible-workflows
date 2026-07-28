@@ -21,6 +21,7 @@ const SETTLED_AGENT_STATES: ReadonlySet<import("./types.js").AgentState> = new S
 const INTERNAL_WORKFLOW_TOOLS: readonly string[] = ["workflow", "workflow_respond", "workflow_stop", "workflow_resume", "workflow_retry", "workflow_catalog"];
 const HARD_TERMINAL_RUN_STATES: ReadonlySet<string> = new Set(["completed", "failed", "stopped"]);
 const SHUTDOWN_TERMINAL_RUN_STATES: ReadonlySet<string> = new Set(["completed", "failed", "stopped", "budget_exhausted"]);
+const FAILURE_DELIVERY_STATES: ReadonlySet<RunState> = new Set(["failed", "stopped", "interrupted", "budget_exhausted"]);
 export interface WorkflowProgressStyles {
   accent(text: string): string;
   success(text: string): string;
@@ -1230,9 +1231,6 @@ function deliver(pi: ExtensionAPI, content: string): void {
   if (typeof pi.sendMessage !== "function") return;
   pi.sendMessage({ customType: "workflow", content, display: true }, { deliverAs: "followUp", triggerTurn: true });
 }
-function deliverFailure(pi: ExtensionAPI, diagnostic: WorkflowFailureDiagnostics): void {
-  deliver(pi, formatWorkflowFailureDelivery(diagnostic));
-}
 
 type WorkflowEventSink = { emit: (name: string, payload: unknown) => unknown };
 
@@ -1654,6 +1652,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
   };
   const pendingFailureDiagnostics = new Map<string, WorkflowFailureDiagnostics>();
   const foregroundDeliveries = new Map<string, { store: RunStore; inline: boolean; timer?: ReturnType<typeof setTimeout> }>();
+  const terminalDeliveryQueues = new WeakMap<RunStore, Promise<void>>();
   const liveActivities = new Map<string, Map<string, AgentActivity>>();
   const liveEventTimes = new Map<string, Map<string, number>>();
   const liveAgentSessions = new Map<string, import("./types.js").WorkflowAgentSession>();
@@ -1728,15 +1727,26 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     pendingFailureDiagnostics.delete(event.toolCallId);
     return { content: [{ type: "text" as const, text: serializeWorkflowFailureDiagnostics(diagnostic) }], details: diagnostic, isError: true };
   });
-  const deliverTerminal = async (store: RunStore, content: string): Promise<void> => {
-    let claimed: boolean | undefined;
-    await store.updateState((current) => {
-      if (current.delivery?.state === "delivered") return current;
-      if (!current.delivery) { claimed = true; return current; }
-      claimed = true;
-      return { ...current, delivery: { ...current.delivery, mode: "background", state: "delivered" } };
+  const deliverTerminal = (store: RunStore, content: string, failure = false): Promise<void> => {
+    const previous = terminalDeliveryQueues.get(store) ?? Promise.resolve();
+    const delivery = previous.then(async () => {
+      let claimed: boolean | undefined;
+      await store.updateState((current) => {
+        if (failure && !FAILURE_DELIVERY_STATES.has(current.state)) return current;
+        if (current.delivery?.state === "delivered") return current;
+        if (!current.delivery) { claimed = true; return current; }
+        claimed = true;
+        return { ...current, delivery: { ...current.delivery, mode: "background", state: "delivered" } };
+      });
+      if (claimed !== true) return;
+      if (failure && !FAILURE_DELIVERY_STATES.has((await store.load()).run.state)) {
+        await store.updateState((current) => !FAILURE_DELIVERY_STATES.has(current.state) && current.delivery?.state === "delivered" ? { ...current, delivery: { ...current.delivery, state: "pending" } } : current);
+        return;
+      }
+      deliver(pi, content);
     });
-    if (claimed === true) deliver(pi, content);
+    terminalDeliveryQueues.set(store, delivery.catch(() => undefined));
+    return delivery;
   };
   const scheduleForegroundDelivery = (toolCallId: string, send: () => Promise<void>): void => {
     const delivery = foregroundDeliveries.get(toolCallId);
@@ -1811,6 +1821,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const persisted = await persistRunState(store, metadata, (current) => {
       const nextRun = { ...current, state: next, ...budget.snapshot() };
       if (next === "running" || next === "completed") { delete nextRun.error; delete nextRun.failedAt; }
+      if (next === "running" && (previous === "paused" || previous === "interrupted" || previous === "budget_exhausted") && nextRun.delivery) nextRun.delivery = { ...nextRun.delivery, mode: "background", state: "pending" };
       return nextRun;
     });
     await eventPublisher.runState(store, metadata, previous, next, reason);
@@ -2188,7 +2199,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     try { variables = await resolveWorkflowVariables(runContext, controller, registry); }
     catch (error) {
       const typed = asWorkflowError(error);
-      if (!HARD_TERMINAL_RUN_STATES.has(run.lifecycle.state)) { await run.lifecycle.terminal("failed", typed.code).catch(() => undefined); const persisted = await persistRunState(run.store, run.metadata, (current) => persistedFailure({ ...current }, typed)); await eventPublisher.runFailed(run.store, run.metadata, typed, run.lifecycle.state === "interrupted" ? "interrupted" : "failed"); run.update?.(workflowToolUpdate(persisted)); if (!["stopped", "interrupted", "budget_exhausted"].includes(run.lifecycle.state)) await createWorkflowFailureDiagnostics(run.store, run.metadata, typed, persisted).then((diagnostic) => { deliverFailure(pi, diagnostic); }).catch(() => undefined); }
+      if (!HARD_TERMINAL_RUN_STATES.has(run.lifecycle.state)) { await run.lifecycle.terminal("failed", typed.code).catch(() => undefined); const persisted = await persistRunState(run.store, run.metadata, (current) => persistedFailure({ ...current }, typed)); await eventPublisher.runFailed(run.store, run.metadata, typed, run.lifecycle.state === "interrupted" ? "interrupted" : "failed"); run.update?.(workflowToolUpdate(persisted)); if (!["stopped", "interrupted", "budget_exhausted"].includes(run.lifecycle.state)) await createWorkflowFailureDiagnostics(run.store, run.metadata, typed, persisted).then((diagnostic) => deliverTerminal(run.store, formatWorkflowFailureDelivery(diagnostic), true)).catch(() => undefined); }
       await cleanupTerminalRun(run.store.runId);
       throw typed;
     }
@@ -2218,11 +2229,10 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     run.completion = completion;
     if (!foreground || !waitForCompletion) {
       void completion.then(async ({ value, resultPath }) => {
-        deliver(pi, completionDelivery(run.metadata.name, value, resultPath, await run.store.changedWorktrees()));
-      }, (error: unknown) => {
+        await deliverTerminal(run.store, completionDelivery(run.metadata.name, value, resultPath, await run.store.changedWorktrees()));
+      }, async (error: unknown) => {
         const diagnostic = failureDiagnosticsFrom(error);
-        if (diagnostic) deliverFailure(pi, diagnostic);
-        else deliver(pi, formatWorkflowFailureDeliveryFallback(run.metadata.name, run.store.runId, run.store.directory, error));
+        await deliverTerminal(run.store, diagnostic ? formatWorkflowFailureDelivery(diagnostic) : formatWorkflowFailureDeliveryFallback(run.metadata.name, run.store.runId, run.store.directory, error), true);
       });
       return undefined;
     }
@@ -2559,7 +2569,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         const diagnostic = failureDiagnosticsFrom(error);
         return diagnostic ? formatWorkflowFailureDelivery(diagnostic) : formatWorkflowFailureDeliveryFallback(checked.metadata.name, runId, store.directory, error);
       };
-      const queueForegroundDelivery = async (content: string): Promise<void> => {
+      const queueForegroundDelivery = async (content: string, failure = false): Promise<void> => {
         const delivery = foregroundDeliveries.get(toolCallId);
         if (!delivery) return;
         await store.updateState((current) => {
@@ -2570,21 +2580,21 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         scheduleForegroundDelivery(toolCallId, async () => {
           if (delivery.inline) return;
           pendingFailureDiagnostics.delete(toolCallId);
-          await deliverTerminal(store, content);
+          await deliverTerminal(store, content, failure);
         });
       };
       if (background) {
         void completion.then(async ({ value, resultPath }) => {
           await deliverTerminal(store, completionDelivery(checked.metadata.name, value, resultPath, await store.changedWorktrees()));
         }, async (error: unknown) => {
-          await deliverTerminal(store, deliverFailureContent(error));
+          await deliverTerminal(store, deliverFailureContent(error), true);
         });
         return { content: [{ type: "text" as const, text: JSON.stringify({ runId, state: "running" }) }], details: { runId, preview: `Started workflow ${runId}.` } };
       }
       void completion.then(async ({ value, resultPath }) => {
         await queueForegroundDelivery(completionDelivery(checked.metadata.name, value, resultPath, await store.changedWorktrees()));
       }, async (error: unknown) => {
-        await queueForegroundDelivery(deliverFailureContent(error));
+        await queueForegroundDelivery(deliverFailureContent(error), true);
       });
       const { value } = await completion;
       const run = (await store.load()).run;
