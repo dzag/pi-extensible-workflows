@@ -2044,7 +2044,7 @@ void test("navigator opens the workflow script in the configured external editor
   const editorPath = join(home, "fake-editor.sh");
   const editedPath = join(home, "edited-content");
   const openedPath = join(home, "opened-path");
-  writeFileSync(editorPath, "#!/bin/sh\ncat \"$3\" > \"$1\"\nprintf '%s' \"$3\" > \"$2\"\n", { encoding: "utf8", mode: 0o755 });
+  writeFileSync(editorPath, "#!/bin/sh\nprintf '%s' \"$3\" > \"$2\"\ncat \"$3\" > \"$1\"\n", { encoding: "utf8", mode: 0o755 });
   const previousVisual = process.env.VISUAL;
   const previousEditor = process.env.EDITOR;
   process.env.VISUAL = `${editorPath} ${editedPath} ${openedPath}`;
@@ -2067,7 +2067,7 @@ void test("navigator opens the workflow script in the configured external editor
         component.handleInput?.("tui.select.confirm");
         const deadline = Date.now() + 5_000;
         while (Date.now() < deadline) {
-          if (existsSync(editedPath) && readFileSync(editedPath, "utf8").includes("SCRIPT_START")) break;
+          if (starts === 1 && existsSync(editedPath) && readFileSync(editedPath, "utf8").includes("SCRIPT_START")) break;
           await new Promise((resolve) => setTimeout(resolve, 10));
         }
         assert.ok(existsSync(editedPath), "external editor was not invoked");
@@ -2116,7 +2116,7 @@ void test("navigator opens a persisted top-level agent prompt and result in the 
   const editorPath = join(home, "fake-editor.sh");
   const editedPath = join(home, "edited-content");
   const openedPath = join(home, "opened-path");
-  writeFileSync(editorPath, "#!/bin/sh\ncat \"$3\" > \"$1\"\nprintf '%s' \"$3\" > \"$2\"\n", { encoding: "utf8", mode: 0o755 });
+  writeFileSync(editorPath, "#!/bin/sh\nprintf '%s' \"$3\" > \"$2\"\ncat \"$3\" > \"$1\"\n", { encoding: "utf8", mode: 0o755 });
   const previousVisual = process.env.VISUAL;
   const previousEditor = process.env.EDITOR;
   process.env.VISUAL = `${editorPath} ${editedPath} ${openedPath}`;
@@ -2643,6 +2643,11 @@ void test("promotes detached foreground completion and failure to follow-up deli
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-detached-foreground-"));
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }>; details?: { runId: string } }> }> = [];
   const messages: Array<{ message: { content: string }; options: { deliverAs: string; triggerTurn: boolean } }> = [];
+  const waitForMessages = async (count: number) => {
+    const deadline = Date.now() + 5_000;
+    while (messages.length < count && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(messages.length, count);
+  };
   const pi = {
     registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {},
     getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"],
@@ -2653,14 +2658,13 @@ void test("promotes detached foreground completion and failure to follow-up deli
   assert.ok(execute);
   const ctx = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
   const success = await execute("detached-success", { name: "detached-success", script: `return {ok:true};`, foreground: true }, new AbortController().signal, undefined, ctx);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await waitForMessages(1);
   assert.match(messages[0]?.message.content ?? "", /^Workflow detached-success completed:/);
   assert.deepEqual(messages[0]?.options, { deliverAs: "followUp", triggerTurn: true });
   const successRun = await new RunStore(home, "session", success.details?.runId ?? "", home).load();
   assert.deepEqual(successRun.run.delivery, { mode: "background", state: "delivered", toolCallId: "detached-success" });
   await assert.rejects(execute("detached-failure", { name: "detached-failure", script: `throw new Error("detached failure");`, foreground: true }, new AbortController().signal, undefined, ctx));
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(messages.length, 2);
+  await waitForMessages(2);
   assert.match(messages[1]?.message.content ?? "", /^Workflow detached-failure failed/);
 });
 void test("suppresses a queued foreground failure after the run is resumed", async () => {
