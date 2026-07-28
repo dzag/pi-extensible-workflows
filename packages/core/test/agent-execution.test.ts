@@ -1348,8 +1348,8 @@ void test("filters disabled native extensions before factories and skills before
   const session = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-filter", resourcePolicy, extensionFactories: [() => {}] });
   const loaded = (session as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> }; getExtensions(): { extensions: Array<{ resolvedPath: string }> } } }).resourceLoader;
   const resourcePaths = (session as unknown as { herdrResourcePaths: { extensions: readonly string[]; skills: readonly string[] } }).herdrResourcePaths;
-  assert.deepEqual(resourcePaths.extensions, [resolve(allowedExtension)]);
-  assert.ok(resourcePaths.skills.includes(resolve(join(skillsDir, "kept-skill", "SKILL.md"))));
+  assert.deepEqual(resourcePaths.extensions, [realpathSync(allowedExtension)]);
+  assert.ok(resourcePaths.skills.includes(realpathSync(join(skillsDir, "kept-skill", "SKILL.md"))));
   assert.equal(resourcePaths.skills.some((path) => path.includes("disabled-skill")), false);
   assert.equal(existsSync(disabledMarker), false);
   assert.equal(existsSync(allowedMarker), true);
@@ -1360,7 +1360,7 @@ void test("filters disabled native extensions before factories and skills before
   assert.equal(skillNames.includes("disabled-skill"), false);
   assert.equal(skillNames.includes("project-disabled-skill"), false);
   assert.equal(skillNames.includes("project-kept-skill"), false);
-  assert.ok(loaded.getExtensions().extensions.every(({ resolvedPath }) => resolvedPath !== resolve(disabledExtension)));
+  assert.ok(loaded.getExtensions().extensions.every(({ resolvedPath }) => resolvedPath !== realpathSync(disabledExtension)));
   assert.match(session.systemPrompt ?? "", /kept-skill/);
   assert.doesNotMatch(session.systemPrompt ?? "", /disabled-skill/);
   const commands = (session as unknown as { _extensionRunner: { runtime: { getCommands(): Array<{ name: string }> } } })._extensionRunner.runtime.getCommands();
