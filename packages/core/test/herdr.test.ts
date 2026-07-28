@@ -142,10 +142,12 @@ void test("does not treat startup idle as a finished turn", async () => {
 
 void test("detects a running Herdr agent returning idle after a turn", async () => {
   let reports = 0;
+  const statuses: Array<{ state: string; activity: string | undefined }> = [];
   const runner = async (args: readonly string[]): Promise<string> => {
     if (args[0] === "pane") return JSON.stringify({ result: { process_info: { foreground_processes: [{ name: "pi", argv: ["pi"] }] } } });
     reports += 1;
-    return JSON.stringify({ result: { agent: { agent_status: reports === 1 ? "working" : "idle" } } });
+    return JSON.stringify({ result: { agent: { agent_status: reports === 1 ? "working" : "idle", ...(reports === 1 ? { current_tool: "read" } : {}) } } });
   };
-  assert.equal(await waitForHerdrPane("pane", runner, { intervalMs: 0 }), "idle");
+  assert.equal(await waitForHerdrPane("pane", runner, { intervalMs: 0, onStatus: (state, activity) => { statuses.push({ state, activity }); } }), "idle");
+  assert.deepEqual(statuses, [{ state: "working", activity: "read" }, { state: "idle", activity: undefined }]);
 });

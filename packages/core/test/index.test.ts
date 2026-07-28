@@ -1519,9 +1519,10 @@ void test("session-scoped navigator shows metadata and confirms terminal deletio
   const pi = { registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["read", "workflow"] };
   workflowExtension(pi as never, home, async (value) => { copied.push(value); });
   const actionRuns: Array<{ attempt: number; sessionId: string | undefined; live: boolean }> = [];
-  registerWorkflowExtension({ version: "1.0.0", headline: "Navigator actions", description: "Navigator action test", agentAttemptActions: { inspectLatest: { label: "Inspect latest attempt", visible: (context) => context.attempt.attempt === 2, run: (context) => { actionRuns.push({ attempt: context.attempt.attempt, sessionId: context.session?.sessionId, live: context.liveSession !== undefined }); } } } });
+  const workingMessages: Array<string | undefined> = [];
+  registerWorkflowExtension({ version: "1.0.0", headline: "Navigator actions", description: "Navigator action test", agentAttemptActions: { inspectLatest: { label: "Inspect latest attempt", visible: (context) => context.attempt.attempt === 2, run: (context) => { actionRuns.push({ attempt: context.attempt.attempt, sessionId: context.session?.sessionId, live: context.liveSession !== undefined }); context.ui.setWorkingMessage?.("navigator working"); } } } });
   let selectCall = 0;
-  const ctx = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "session-a" }, ui: { notify() {}, select: async (prompt: string, options: string[]) => { prompts.push(prompt); selections.push(options); selectCall += 1; if (selectCall === 1) return options.find((option) => option.includes("completed")); if (selectCall === 2) return "Agents..."; if (selectCall === 3) return options.find((option) => option.includes("#1")); if (selectCall === 4) return "Inspect latest attempt"; if (selectCall === 5) return "Back"; return prompt === "Workflows\n" ? "Close" : "Back"; }, confirm: async () => deleteConfirmed } };
+  const ctx = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "session-a" }, ui: { notify() {}, setWorkingMessage(message?: string) { workingMessages.push(message); }, select: async (prompt: string, options: string[]) => { prompts.push(prompt); selections.push(options); selectCall += 1; if (selectCall === 1) return options.find((option) => option.includes("completed")); if (selectCall === 2) return "Agents..."; if (selectCall === 3) return options.find((option) => option.includes("#1")); if (selectCall === 4) return "Inspect latest attempt"; if (selectCall === 5) return "Back"; return prompt === "Workflows\n" ? "Close" : "Back"; }, confirm: async () => deleteConfirmed } };
   const command = commands[0]?.handler;
   assert.ok(command);
   await command("", ctx as never);
@@ -1536,6 +1537,7 @@ void test("session-scoped navigator shows metadata and confirms terminal deletio
   assert.doesNotMatch(`${prompts.join("\n")}\n${selections.flat().join("\n")}`, /other|\/pi\/native-a/);
   assert.deepEqual(copied, []);
   assert.deepEqual(actionRuns, [{ attempt: 2, sessionId: "native-a", live: false }]);
+  assert.deepEqual(workingMessages, ["navigator working"]);
   assert.doesNotMatch(`${prompts.join("\n")}\n${selections.flat().join("\n")}`, /other/);
   await command("delete run-a", ctx as never);
   assert.equal(existsSync(store.directory), true);

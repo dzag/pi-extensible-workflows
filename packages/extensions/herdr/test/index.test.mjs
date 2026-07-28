@@ -47,7 +47,7 @@ void test("opens the active session after the handoff boundary and releases on p
       processReports += 1;
       return JSON.stringify({ result: { process_info: { foreground_processes: processReports === 2 ? [{ name: "node", argv: ["node", "/home/node/bin/pi"], cmdline: "node /home/node/bin/pi" }] : [] } } });
     }
-    if (args[0] === "agent") return JSON.stringify({ result: { agent: { agent_status: "working" } } });
+    if (args[0] === "agent") return JSON.stringify({ result: { agent: { agent_status: "working", current_tool: "read" } } });
     return "";
   };
   const extension = createHerdrExtension({ agentDir: mkdtempSync(join(tmpdir(), "herdr-extension-default-")), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" }, runner });
@@ -63,7 +63,7 @@ void test("opens the active session after the handoff boundary and releases on p
   assert.equal(calls.length, 0);
   handoff.observe({ type: "turn_end" });
   await promise;
-  assert.deepEqual(workingMessages, ["reviewer: working", "reviewer: idle", undefined]);
+  assert.deepEqual(workingMessages, ["reviewer: working", "reviewer: working (read)", "reviewer: idle", undefined]);
   const runCall = calls.find(([command, subcommand]) => command === "pane" && subcommand === "run");
   assert.equal(calls.filter(([command, subcommand]) => command === "pane" && subcommand === "run").length, 1);
   assert.ok(runCall);
