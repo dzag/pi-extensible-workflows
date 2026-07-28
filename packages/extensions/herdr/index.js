@@ -366,16 +366,20 @@ export function createHerdrExtension(options = {}) {
           const handoff = context.handoff;
           if (!session || !prepared || !handoff) return;
           const label = typeof context.agent.label === "string" && context.agent.label.trim() ? context.agent.label : typeof context.agent.name === "string" && context.agent.name.trim() ? context.agent.name : "workflow agent";
-          const setWorkingMessage = (state, activity) => context.ui.setWorkingMessage?.(state ? `${label}: ${state}${activity ? ` (${activity})` : ""}` : undefined);
+          const setWorkingMessage = (state) => context.ui.setWorkingMessage?.(state ? `${label}: ${state}` : undefined);
           await handoff.request(async () => {
             let opened;
             let suspended = false;
             let reportedWorking = false;
             let lastState = "working";
-            const reportStatus = (state, activity) => {
+            let displayedState;
+            const reportStatus = (state) => {
               lastState = state;
               if (state === "working") reportedWorking = true;
-              setWorkingMessage(state, activity);
+              if (displayedState !== state) {
+                displayedState = state;
+                setWorkingMessage(state);
+              }
             };
             try {
               if (session.suspendForHandoff) {
@@ -388,17 +392,23 @@ export function createHerdrExtension(options = {}) {
                 await session.abort?.();
                 suspended = true;
               }
-              setWorkingMessage("working");
-              reportedWorking = true;
+              if (displayedState === undefined || lastState === "idle") {
+                displayedState = "working";
+                setWorkingMessage("working");
+                reportedWorking = true;
+              }
               await opened.monitor;
             } finally {
               try {
-                if (suspended) await session.resumeFromHandoff?.();
+                if (reportedWorking) setWorkingMessage(lastState === "done" ? "completed" : "idle");
               } finally {
-                if (reportedWorking) {
-                  setWorkingMessage(lastState === "done" ? "completed" : "idle");
-                  await new Promise((resolve) => setTimeout(resolve, 50));
-                  setWorkingMessage();
+                try {
+                  if (suspended) await session.resumeFromHandoff?.();
+                } finally {
+                  if (reportedWorking) {
+                    await new Promise((resolve) => setTimeout(resolve, 50));
+                    setWorkingMessage();
+                  }
                 }
               }
             }
