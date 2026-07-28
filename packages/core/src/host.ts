@@ -1740,7 +1740,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       });
       if (claimed !== true) return;
       if (failure && !FAILURE_DELIVERY_STATES.has((await store.load()).run.state)) {
-        await store.updateState((current) => current.delivery?.state === "delivered" ? { ...current, delivery: { ...current.delivery, state: "pending" } } : current);
+        await store.updateState((current) => !FAILURE_DELIVERY_STATES.has(current.state) && current.delivery?.state === "delivered" ? { ...current, delivery: { ...current.delivery, state: "pending" } } : current);
         return;
       }
       deliver(pi, content);

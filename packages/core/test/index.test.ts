@@ -2707,6 +2707,40 @@ void test("suppresses a queued foreground failure after the run is resumed", asy
     RunStore.prototype.updateState = updateState;
   }
 });
+void test("does not undo a competing terminal failure delivery during stale suppression", async () => {
+  type Tool = { name: string; execute: (...args: unknown[]) => Promise<unknown> };
+  const tools: Tool[] = [];
+  const messages: string[] = [];
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-competing-failure-delivery-"));
+  workflowExtension({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  const workflow = tools.find(({ name }) => name === "workflow");
+  assert.ok(workflow);
+  const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
+  const load = Object.getOwnPropertyDescriptor(RunStore.prototype, "load")?.value as RunStore["load"];
+  let injected = false;
+  let markInjected!: () => void;
+  const injection = new Promise<void>((resolve) => { markInjected = resolve; });
+  RunStore.prototype.load = async function () {
+    const loaded = await load.call(this);
+    if (!injected && this.cwd === home && loaded.run.state === "failed" && loaded.run.delivery?.state === "delivered") {
+      injected = true;
+      markInjected();
+      await new RunStore(this.cwd, this.sessionId, this.runId, this.home).updateState((current) => ({ ...current, state: "failed", ...(current.delivery ? { delivery: { ...current.delivery, state: "delivered" } } : {}) }));
+      return { ...loaded, run: { ...loaded.run, state: "running" } };
+    }
+    return loaded;
+  };
+  try {
+    const result = await workflow.execute("competing-failure", { name: "competing-failure", script: `throw new Error("competing failure");` }, new AbortController().signal, undefined, context) as { details: { runId: string } };
+    await Promise.race([injection, new Promise((resolve) => setTimeout(resolve, 1000))]);
+    assert.equal(injected, true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(messages, []);
+    assert.equal((await new RunStore(home, "session", result.details.runId, home).load()).run.delivery?.state, "delivered");
+  } finally {
+    RunStore.prototype.load = load;
+  }
+});
 
 void test("delivers a later cold-resume failure after an earlier failure follow-up", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-resumed-failure-delivery-"));
