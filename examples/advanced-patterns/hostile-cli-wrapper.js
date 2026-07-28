@@ -3,11 +3,34 @@
  *
  * "Hostile CLI" is not a formal term: here it means any command-line tool that
  * is unsafe to consume programmatically because it behaves non-deterministically.
+ * It may work fine when a human runs it by hand, yet break an automated workflow
+ * because a subagent cannot trust its stdout or its exit code.
+ *
  * Typical traits:
  *   - hangs or waits on interactive prompts instead of exiting;
  *   - prints logos, deprecation warnings, or progress noise into stdout;
  *   - exits 0 on failure (or non-zero with an empty stdout), so the exit code lies;
  *   - emits human-formatted text where a workflow expects machine-readable JSON.
+ *
+ * Well-known real-world offenders:
+ *   - `apt-get install` hangs on the interactive `tzdata` prompt unless you set
+ *     DEBIAN_FRONTEND=noninteractive (same spirit as CI=true below);
+ *   - `npm install` mixes progress bars, `npm warn deprecated` and funding
+ *     messages into stdout, corrupting any structured read;
+ *   - `npm audit` exits non-zero when it finds vulnerabilities, breaking CI even
+ *     though the install itself succeeded (an exit code that "lies" the other way);
+ *   - `pip install` injects `WARNING: You are using pip version ...` into output;
+ *   - `git clone` / `git push` block waiting for credentials instead of failing;
+ *   - `docker pull` animates progress bars that pollute stdout.
+ *
+ * Cases seen while running massive cross-platform installs in Wizard-AI
+ * (https://github.com/darkrei08/Wizard-AI) via a `wz-ai os install` layer:
+ *   1. Hanging installs - an `apt` waiting on an interactive prompt froze an
+ *      entire batch of tool installs; the subagent stayed alive with no error.
+ *   2. JSON broken by warnings - parsing `pip`/`npm` output as JSON exploded
+ *      because the tool prepended a banner or a deprecation warning.
+ *   3. Lying exit codes - installs "succeeding" with exit 0 while silently
+ *      skipping half the packages; the agent marched on and crashed far away.
  *
  * This wrapper normalizes such tools into deterministic, structured JSON so they
  * can feed the deterministic workflows described in the project docs:
