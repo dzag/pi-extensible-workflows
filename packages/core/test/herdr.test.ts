@@ -142,10 +142,24 @@ void test("does not treat startup idle as a finished turn", async () => {
 
 void test("detects a running Herdr agent returning idle after a turn", async () => {
   let reports = 0;
+  const states: string[] = [];
   const runner = async (args: readonly string[]): Promise<string> => {
     if (args[0] === "pane") return JSON.stringify({ result: { process_info: { foreground_processes: [{ name: "pi", argv: ["pi"] }] } } });
     reports += 1;
     return JSON.stringify({ result: { agent: { agent_status: reports === 1 ? "working" : "idle" } } });
   };
-  assert.equal(await waitForHerdrPane("pane", runner, { intervalMs: 0 }), "idle");
+  assert.equal(await waitForHerdrPane("pane", runner, { intervalMs: 0, onStatus: (state) => { states.push(state); } }), "idle");
+  assert.deepEqual(states, ["working", "idle"]);
+});
+
+void test("does not let status notifications suppress idle handback", async () => {
+  const controller = new AbortController();
+  let reports = 0;
+  const runner = async (args: readonly string[]): Promise<string> => {
+    if (args[0] === "pane") return JSON.stringify({ result: { process_info: { foreground_processes: [{ name: "pi", argv: ["pi"] }] } } });
+    reports += 1;
+    if (reports === 2) controller.abort();
+    return JSON.stringify({ result: { agent: { agent_status: reports === 1 ? "working" : "idle" } } });
+  };
+  assert.equal(await waitForHerdrPane("pane", runner, { intervalMs: 0, signal: controller.signal, onStatus: () => { throw new Error("notification failed"); } }), "idle");
 });

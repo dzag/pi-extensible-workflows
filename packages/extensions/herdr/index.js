@@ -172,7 +172,7 @@ function createWorkflowWorkspaces(runner) {
   };
 }
 
-async function launchPane({ session, prepared, identity, run, attempt, runner, fullyInspectable, env, signal, prompt, workspaces, tuiIndex, tuiLabel }) {
+async function launchPane({ session, prepared, identity, run, attempt, runner, fullyInspectable, env, signal, prompt, workspaces, tuiIndex, tuiLabel, onStatus }) {
   const label = fullyInspectable && Number.isInteger(tuiIndex) && tuiIndex > 0 && typeof tuiLabel === "string" && tuiLabel.trim() ? `#${String(tuiIndex)} ${tuiLabel}` : fullyInspectable ? breadcrumbLabel(identity, attempt) : prepared.sessionLabel;
   const bridge = await createToolBridge(prepared);
   let inlineBridge;
@@ -199,7 +199,7 @@ async function launchPane({ session, prepared, identity, run, attempt, runner, f
       await closeRemote();
       throw error;
     }
-    const monitor = waitForHerdrPane(pane, runner, { signal }).then(async (reason) => {
+    const monitor = waitForHerdrPane(pane, runner, { signal, ...(onStatus ? { onStatus } : {}) }).then(async (reason) => {
       await closeRemote();
       await reporter.release();
       await bridge?.close();
@@ -365,23 +365,52 @@ export function createHerdrExtension(options = {}) {
           const prepared = context.prepared;
           const handoff = context.handoff;
           if (!session || !prepared || !handoff) return;
+          const label = typeof context.agent.label === "string" && context.agent.label.trim() ? context.agent.label : typeof context.agent.name === "string" && context.agent.name.trim() ? context.agent.name : "workflow agent";
+          const setWorkingMessage = (state) => context.ui.setWorkingMessage?.(state ? `${label}: ${state}` : undefined);
           await handoff.request(async () => {
             let opened;
             let suspended = false;
+            let reportedWorking = false;
+            let lastState = "working";
+            let displayedState;
+            const reportStatus = (state) => {
+              lastState = state;
+              if (state === "working") reportedWorking = true;
+              if (displayedState !== state) {
+                displayedState = state;
+                setWorkingMessage(state);
+              }
+            };
             try {
               if (session.suspendForHandoff) {
                 await session.suspendForHandoff();
                 suspended = true;
               }
-              opened = await launchPane({ session, prepared, identity: { structuralPath: context.agent.structuralPath ?? [], parentBreadcrumb: context.agent.parentBreadcrumb, callSite: context.agent.label ?? context.agent.name, occurrence: context.attempt.attempt }, attempt: context.attempt.attempt, runner, fullyInspectable: false, env, signal: context.signal, prompt: "Continue the current workflow task from this session." });
+              opened = await launchPane({ session, prepared, identity: { structuralPath: context.agent.structuralPath ?? [], parentBreadcrumb: context.agent.parentBreadcrumb, callSite: context.agent.label ?? context.agent.name, occurrence: context.attempt.attempt }, attempt: context.attempt.attempt, runner, fullyInspectable: false, env, signal: context.signal, prompt: "Continue the current workflow task from this session.", onStatus: reportStatus });
               handoff.takeover();
               if (!session.suspendForHandoff) {
                 await session.abort?.();
                 suspended = true;
               }
+              if (displayedState === undefined || lastState === "idle") {
+                displayedState = "working";
+                setWorkingMessage("working");
+                reportedWorking = true;
+              }
               await opened.monitor;
             } finally {
-              if (suspended) await session.resumeFromHandoff?.();
+              try {
+                if (reportedWorking) setWorkingMessage(lastState === "done" ? "completed" : "idle");
+              } finally {
+                try {
+                  if (suspended) await session.resumeFromHandoff?.();
+                } finally {
+                  if (reportedWorking) {
+                    await new Promise((resolve) => setTimeout(resolve, 50));
+                    setWorkingMessage();
+                  }
+                }
+              }
             }
           });
         },

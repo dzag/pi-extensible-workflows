@@ -2919,7 +2919,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             const liveCandidate = liveAgentSessions.get(`${dashboard.run.id}:${agent.id}`);
             const live = liveCandidate && attempt.session && liveCandidate.reference.transport === attempt.session.transport && liveCandidate.reference.sessionId === attempt.session.sessionId ? liveCandidate : undefined;
             const run = runs.get(dashboard.run.id);
-            const ui = { notify: (message: string, level: "info" | "warning" | "error" = "info") => { ctx.ui.notify(message, level); }, confirm: (title: string, message: string) => ctx.ui.confirm(title, message), select: (title: string, options: readonly string[]) => { return ctx.ui.select(title, [...options]); }, input: (title: string, placeholder?: string) => ctx.ui.input(title, placeholder) };
+            const ui = { notify: (message: string, level: "info" | "warning" | "error" = "info") => { ctx.ui.notify(message, level); }, confirm: (title: string, message: string) => ctx.ui.confirm(title, message), select: (title: string, options: readonly string[]) => { return ctx.ui.select(title, [...options]); }, input: (title: string, placeholder?: string) => ctx.ui.input(title, placeholder), setWorkingMessage: (message?: string) => { ctx.ui.setWorkingMessage(message); } };
             const attemptSnapshot = deepFreeze(structuredClone(attempt));
             const prepared = live ? liveAgentPrepared.get(`${dashboard.run.id}:${agent.id}`) : undefined;
             const handoff = live ? liveAgentHandoffs.get(`${dashboard.run.id}:${agent.id}`) : undefined;

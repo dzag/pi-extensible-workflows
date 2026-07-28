@@ -2,6 +2,8 @@ import { execFile } from "node:child_process";
 
 export type HerdrPaneAction = "live";
 export type HerdrAgentState = "idle" | "working" | "blocked" | "unknown";
+export type HerdrAgentStatus = HerdrAgentState | "done";
+export interface HerdrPaneStatus { state: HerdrAgentStatus }
 export interface HerdrPaneRequest { action: HerdrPaneAction; cwd: string; command: string; paneId?: string }
 export interface HerdrWorkspacePaneRequest { cwd: string; workspaceLabel?: string; workspaceId?: string; tabLabel: string; command: string }
 export interface HerdrWorkspacePane { workspaceId: string; tabId: string; paneId: string }
@@ -118,13 +120,15 @@ function hasPiProcess(value: unknown): boolean {
     return name === "pi" || Array.isArray(argv) && argv[0] === "pi" || typeof commandLine === "string" && commandLine.includes("/bin/pi");
   });
 }
-function herdrAgentStatus(value: unknown): string | undefined {
+function herdrAgentStatus(value: unknown): HerdrPaneStatus | undefined {
   const result = record(record(value)?.result);
   const agent = record(result?.agent);
-  return typeof agent?.agent_status === "string" ? agent.agent_status : undefined;
+  const rawState = agent?.agent_status;
+  if (typeof rawState !== "string") return undefined;
+  const state: HerdrAgentStatus = ["idle", "working", "blocked", "done"].includes(rawState) ? rawState as HerdrAgentStatus : "unknown";
+  return { state };
 }
-
-export async function waitForHerdrPane(paneId: string, runner: HerdrCommandRunner = herdrCommandRunner, options: { signal?: AbortSignal; intervalMs?: number; startupTimeoutMs?: number } = {}): Promise<"closed" | "exited" | "idle" | "aborted"> {
+export async function waitForHerdrPane(paneId: string, runner: HerdrCommandRunner = herdrCommandRunner, options: { signal?: AbortSignal; intervalMs?: number; startupTimeoutMs?: number; onStatus?: (state: HerdrAgentStatus) => void | Promise<void> } = {}): Promise<"closed" | "exited" | "idle" | "aborted"> {
   const intervalMs = options.intervalMs ?? 250;
   const startupTimeoutMs = options.startupTimeoutMs ?? 10000;
   const startedAt = Date.now();
@@ -143,8 +147,12 @@ export async function waitForHerdrPane(paneId: string, runner: HerdrCommandRunne
       if (!sawPi) { sawPi = true; }
       try {
         const status = herdrAgentStatus(json(await runner(["agent", "get", paneId])));
-        if (status === "working") sawWorking = true;
-        if (sawWorking && (status === "idle" || status === "done")) return "idle";
+        if (status) {
+          if (status.state === "working") sawWorking = true;
+          const shouldHandBack = sawWorking && (status.state === "idle" || status.state === "done");
+          try { await options.onStatus?.(status.state); } catch { /* Status notifications must not suppress pane handback. */ }
+          if (shouldHandBack) return "idle";
+        }
       } catch { /* The process monitor remains authoritative when no agent report is available. */ }
     }
     if (!piRunning && !sawPi && Date.now() - startedAt >= startupTimeoutMs) throw new Error("Herdr pane did not start Pi.");

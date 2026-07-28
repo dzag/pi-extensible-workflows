@@ -34,6 +34,7 @@ void test("opens the active session after the handoff boundary and releases on p
   const calls = [];
   let runCommand;
   let processReports = 0;
+  const workingMessages = [];
   const runner = async (args) => {
     calls.push([...args]);
     if (args[0] === "pane" && args[1] === "run") {
@@ -57,12 +58,13 @@ void test("opens the active session after the handoff boundary and releases on p
   const longSkillPaths = Array.from({ length: 24 }, (_, index) => `/agent/skills/${"x".repeat(70)}-${String(index)}/SKILL.md`);
   const session = { reference: { transport: "local", sessionId: "session", locator: { sessionFile: "/tmp/session.jsonl" } }, suspendForHandoff: async () => ownership.push("suspend"), abort: async () => ownership.push("abort"), resumeFromHandoff: async () => ownership.push("resume"), getHerdrResourcePaths: () => ({ extensions: ["/allowed-extension.mjs", ...longExtensionPaths], skills: ["/allowed-skill/SKILL.md", ...longSkillPaths] }) };
   const prepared = { cwd: "/repo", agentDir: "/agent", model: { provider: "openai", model: "gpt", thinking: "high" }, tools: ["read"], systemPrompt: "system", systemPromptAppend: "append", systemPromptPath: "/workflow/SYSTEM.md", extensionFactories: [function (pi) { pi.registerCommand("inline", { handler() {} }); }], additionalSkillPaths: ["/skill"], resourcePolicy: { projectTrusted: false, effective: { extensions: ["*"], skills: ["*"] } }, sessionLabel: "flow:review:attempt-1" };
-  const promise = extension.agentAttemptActions.openLiveSession.run({ liveSession: session, prepared, handoff, attempt: { attempt: 1 }, agent: { structuralPath: ["review"], parentBreadcrumb: "flow" }, run: {}, signal: new AbortController().signal, ui: {} });
+  const promise = extension.agentAttemptActions.openLiveSession.run({ liveSession: session, prepared, handoff, attempt: { attempt: 1 }, agent: { label: "reviewer", structuralPath: ["review"], parentBreadcrumb: "flow" }, run: {}, signal: new AbortController().signal, ui: { setWorkingMessage(message) { workingMessages.push(message); } } });
   await Promise.resolve();
   assert.equal(calls.length, 0);
   handoff.observe({ type: "turn_end" });
   await promise;
   const runCall = calls.find(([command, subcommand]) => command === "pane" && subcommand === "run");
+  assert.deepEqual(workingMessages, ["reviewer: working", "reviewer: idle", undefined]);
   assert.equal(calls.filter(([command, subcommand]) => command === "pane" && subcommand === "run").length, 1);
   assert.ok(runCall);
   assert.ok(runCall[3].length < 4096);
