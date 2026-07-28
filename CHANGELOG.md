@@ -1,6 +1,12 @@
 # Changelog
 ## Unreleased
 
+## [4.0.2] - 2026-07-28
+
+### Packaging
+
+- Added source repository metadata to `@piewf/herdr` so npm can verify its GitHub Actions provenance, and aligned all public packages at `4.0.2`.
+
 ## [4.0.1] - 2026-07-28
 
 ### New capabilities
@@ -24,7 +30,7 @@
 
 ### Packaging
 
-- Converted to npm workspaces and now publish `pi-extensible-workflows`, `@piewf/cli`, and `@piewf/herdr` from the release workflow ([bc37e7f](https://github.com/vekexasia/pi-extensible-workflows/commit/bc37e7f)).
+- Converted to npm workspaces and prepared `pi-extensible-workflows`, `@piewf/cli`, and `@piewf/herdr` for publication from the release workflow ([bc37e7f](https://github.com/vekexasia/pi-extensible-workflows/commit/bc37e7f)).
 
 ## [3.4.2] - 2026-07-27
 
@@ -161,6 +167,7 @@
 - Runtime acceptance suite: 24 tests passing.
 - Build, lint, documentation checks, and package dry-run passing.
 
+[4.0.2]: https://github.com/vekexasia/pi-extensible-workflows/compare/v4.0.1...v4.0.2
 [4.0.1]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.4.2...v4.0.1
 [3.4.2]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.4.1...v3.4.2
 [3.4.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.3.0...v3.4.0

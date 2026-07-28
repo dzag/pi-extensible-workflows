@@ -1,6 +1,6 @@
 {
   "name": "@piewf/herdr",
-  "version": "4.0.1",
+  "version": "4.0.2",
   "type": "module",
   "scripts": {
     "test": "node --test --test-timeout=10000 --test-force-exit test/index.test.mjs"
@@ -13,5 +13,10 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vekexasia/pi-extensible-workflows.git",
+    "directory": "packages/extensions/herdr"
   }
 }
