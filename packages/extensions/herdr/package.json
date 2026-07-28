@@ -1,7 +1,6 @@
 {
-  "name": "@piew/herdr",
-  "version": "1.0.0",
-  "private": true,
+  "name": "@piewf/herdr",
+  "version": "4.0.0",
   "type": "module",
   "scripts": {
     "test": "node --test --test-timeout=10000 --test-force-exit test/index.test.mjs"
@@ -11,5 +10,8 @@
   },
   "peerDependencies": {
     "pi-extensible-workflows": "*"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

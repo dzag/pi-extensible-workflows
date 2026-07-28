@@ -1,18 +1,31 @@
 # Changelog
 ## Unreleased
 
+## [4.0.0] - 2026-07-28
+
 ### New capabilities
 
-- Added `workflow_status({ runId })` summaries across current-project sessions and guarded retry/resume recovery with an optional `expectedState` ([#164](https://github.com/vekexasia/pi-extensible-workflows/issues/164)).
+- Added `workflow_status({ runId })` summaries and guarded retry/resume recovery with `expectedState` ([#164](https://github.com/vekexasia/pi-extensible-workflows/issues/164), [6aed1fe](https://github.com/vekexasia/pi-extensible-workflows/commit/6aed1fe), [4d783d3](https://github.com/vekexasia/pi-extensible-workflows/commit/4d783d3)).
+- Added workflow and per-agent elapsed-time displays ([#158](https://github.com/vekexasia/pi-extensible-workflows/issues/158), [d05d0ea](https://github.com/vekexasia/pi-extensible-workflows/commit/d05d0ea)).
+- Added the Herdr workflow extension with live handoff and fully inspectable agent workspaces ([372c3f6](https://github.com/vekexasia/pi-extensible-workflows/commit/372c3f6)).
+- Added hostile-CLI and dynamic-model-router examples ([#167](https://github.com/vekexasia/pi-extensible-workflows/pull/167)).
+
+### Fixes
+
+- Preserved completion and failure delivery across resume, cancellation, and terminal-state races ([#163](https://github.com/vekexasia/pi-extensible-workflows/issues/163), [44fc940](https://github.com/vekexasia/pi-extensible-workflows/commit/44fc940), [680e878](https://github.com/vekexasia/pi-extensible-workflows/commit/680e878), [b21ba55](https://github.com/vekexasia/pi-extensible-workflows/commit/b21ba55)).
+- Preserved foreground/background mode during TUI recovery ([#166](https://github.com/vekexasia/pi-extensible-workflows/issues/166), [22a8f9f](https://github.com/vekexasia/pi-extensible-workflows/commit/22a8f9f)).
+- Fixed macOS path aliases and Herdr pane lifecycle reporting ([#168](https://github.com/vekexasia/pi-extensible-workflows/pull/168), [5ad64ff](https://github.com/vekexasia/pi-extensible-workflows/commit/5ad64ff), [e9f1859](https://github.com/vekexasia/pi-extensible-workflows/commit/e9f1859)).
 
 ### Breaking changes
 
-- Removed extension variables. Use registered functions for reusable host-side capabilities and return values ([#155](https://github.com/vekexasia/pi-extensible-workflows/issues/155)).
-- Removed the exported Herdr pane `inspect`, `transcript`, and `fork` actions. Pane inspection was already non-functional after the CLI extraction, while attempt forking did work; `piewf inspect` and `piewf transcript` remain available as ordinary CLI commands.
+- Removed extension variables. Use registered functions for reusable host-side capabilities and return values ([#155](https://github.com/vekexasia/pi-extensible-workflows/issues/155), [9601654](https://github.com/vekexasia/pi-extensible-workflows/commit/9601654)).
+- Removed the Herdr pane `inspect`, `transcript`, and `fork` actions; use the CLI commands where applicable ([50d5791](https://github.com/vekexasia/pi-extensible-workflows/commit/50d5791)).
+- Moved `piewf` to `@piewf/cli`; the core package no longer ships that binary ([fa5c1bf](https://github.com/vekexasia/pi-extensible-workflows/commit/fa5c1bf)).
 
 ### Packaging
 
-- Reorganized the repository as an npm-workspaces monorepo while keeping `pi-extensible-workflows` as the published core package.
+- Converted to npm workspaces and now publish `pi-extensible-workflows`, `@piewf/cli`, and `@piewf/herdr` from the release workflow ([bc37e7f](https://github.com/vekexasia/pi-extensible-workflows/commit/bc37e7f)).
+
 ## [3.4.2] - 2026-07-27
 
 ### Recovery and navigation
@@ -148,6 +161,7 @@
 - Runtime acceptance suite: 24 tests passing.
 - Build, lint, documentation checks, and package dry-run passing.
 
+[4.0.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.4.2...v4.0.0
 [3.4.2]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.4.1...v3.4.2
 [3.4.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.3.0...v3.4.0
 [3.2.0]: https://github.com/vekexasia/pi-extensible-workflows/compare/v3.1.0...v3.2.0

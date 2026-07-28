@@ -1,6 +1,6 @@
 {
-  "name": "@piew/cli",
-  "version": "3.4.2",
+  "name": "@piewf/cli",
+  "version": "4.0.0",
   "description": "CLI for pi-extensible-workflows",
   "homepage": "https://vekexasia.github.io/pi-extensible-workflows/",
   "repository": {
@@ -45,7 +45,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "pi-extensible-workflows": "3.4.2"
+    "pi-extensible-workflows": "4.0.0"
   },
   "publishConfig": {
     "access": "public"

@@ -30,7 +30,7 @@ test("the repository keeps the public package in the core workspace", () => {
     "./registry": "./dist/src/registry.js"
   });
   assert.equal(core.bin, undefined);
-  assert.equal(cli.name, "@piew/cli");
+  assert.equal(cli.name, "@piewf/cli");
   assert.equal(cli.version, root.version);
   assert.equal(cli.bin.piewf, "./dist/src/cli.js");
   assert.equal(cli.publishConfig.access, "public");

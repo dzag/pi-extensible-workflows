@@ -38,7 +38,7 @@
       <p class="lead">This page describes the package contract from the host tool boundary through the sandboxed workflow worker and its durable run store.</p>
       <section id="installation">
         <h2>Installation and trust</h2>
-        <p>Use Node.js 22.19 or newer. pi-extensible-workflows is a trusted Pi extension: installing the core package gives the extension the same filesystem and process access as Pi. Install @piew/cli separately when you need the piewf command. Only install these packages from a source you trust, and open and trust the project in Pi before running <code>piewf doctor</code>.</p>
+        <p>Use Node.js 22.19 or newer. pi-extensible-workflows is a trusted Pi extension: installing the core package gives the extension the same filesystem and process access as Pi. Install @piewf/cli separately when you need the piewf command. Only install these packages from a source you trust, and open and trust the project in Pi before running <code>piewf doctor</code>.</p>
         <p>For source installation and local development, clone the repository and change into its directory first:</p>
         <pre><code class="language-shell"><span class="tok-command">git</span> clone https://github.com/vekexasia/pi-extensible-workflows.git
 <span class="tok-command">cd</span> pi-extensible-workflows
@@ -47,7 +47,7 @@
 <span class="tok-command">pi</span> install "$PWD/packages/core"</code></pre>
         <p>For a one-session trial without changing Pi settings:</p>
         <pre><code class="language-shell"><span class="tok-command">pi</span> --no-extensions --extension "$PWD/packages/core/src/index.ts"</code></pre>
-        <p>The package declares Pi AI, Pi coding agent, and TypeBox as peer dependencies. The repository development setup currently pins the Pi packages to 0.80.9. The repository is an npm-workspaces monorepo: <code>packages/core</code> is the public <code>pi-extensible-workflows</code> package and <code>packages/cli</code> publishes the <code>@piew/cli</code> CLI. Satellite packages use the <code>@piew</code> scope while the core package keeps its established unscoped name; <code>packages/extensions/*</code> holds repo-local extension packages such as the private <code>@piew/herdr</code>. The private root orchestrates checks.</p>
+        <p>The package declares Pi AI, Pi coding agent, and TypeBox as peer dependencies. The repository development setup currently pins the Pi packages to 0.80.9. The repository is an npm-workspaces monorepo: <code>packages/core</code> is the public <code>pi-extensible-workflows</code> package and <code>packages/cli</code> publishes the <code>@piewf/cli</code> CLI. Satellite packages use the <code>@piew</code> scope while the core package keeps its established unscoped name; <code>packages/extensions/*</code> holds repo-local extension packages such as the private <code>@piewf/herdr</code>. The private root orchestrates checks.</p>
       </section>
       <section id="settings">
         <h2>Global and project settings</h2>
