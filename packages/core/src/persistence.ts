@@ -139,7 +139,7 @@ export async function acquireSessionLease(cwd: string, sessionId: string, home =
   const path = join(directory, SESSION_OWNER_FILE);
   for (;;) {
     const token = randomUUID();
-    const owner: SessionOwner = { pid: process.pid, token, startedAt: Date.now() };
+    const owner: SessionOwner = { pid: process.pid, token, startedAt: process.platform === "linux" ? (await stat(`/proc/${String(process.pid)}`)).ctimeMs : Date.now() };
     try {
       const handle = await open(path, "wx", 0o600);
       try { await handle.writeFile(`${JSON.stringify(owner)}\n`, "utf8"); } finally { await handle.close(); }
