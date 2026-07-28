@@ -4,6 +4,8 @@ import { homedir, tmpdir } from "node:os";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import {
+  WORKFLOW_RUN_COMPLETED_EVENT,
+  WORKFLOW_RUN_STATE_CHANGED_EVENT,
   createHerdrAgentReporter,
   herdrAvailable,
   herdrCommandRunner,
@@ -147,54 +149,74 @@ function sessionCommand(session, prepared, prompt, bridges, files) {
 
 function paneId(value) { return typeof value === "string" ? value : value.paneId; }
 
-async function launchPane({ session, prepared, identity, attempt, runner, fullyInspectable, env, signal, prompt }) {
-  const label = fullyInspectable ? breadcrumbLabel(identity, attempt) : prepared.sessionLabel;
+function createWorkflowWorkspaces(runner) {
+  const workspaces = new Map();
+  return {
+    async open(run, request) {
+      const existing = workspaces.get(run.runId);
+      if (existing) return openHerdrLivePane({ ...request, workspaceId: await existing }, runner);
+      const opening = openHerdrLivePane({ ...request, workspaceLabel: `workflow ${run.workflow.name}` }, runner);
+      const workspace = opening.then((pane) => {
+        if (typeof pane === "string") throw new Error("Herdr did not create a workspace pane.");
+        return pane.workspaceId;
+      });
+      workspaces.set(run.runId, workspace);
+      try { return await opening; } catch (error) { workspaces.delete(run.runId); throw error; }
+    },
+    async close(runId) {
+      const workspace = workspaces.get(runId);
+      workspaces.delete(runId);
+      if (workspace) await workspace.then((id) => runner(["workspace", "close", id])).catch(() => undefined);
+    },
+    async closeAll() { await Promise.all([...workspaces.keys()].map((runId) => this.close(runId))); },
+  };
+}
+
+async function launchPane({ session, prepared, identity, run, attempt, runner, fullyInspectable, env, signal, prompt, workspaces, tuiIndex, tuiLabel }) {
+  const label = fullyInspectable && Number.isInteger(tuiIndex) && tuiIndex > 0 && typeof tuiLabel === "string" && tuiLabel.trim() ? `#${String(tuiIndex)} ${tuiLabel}` : fullyInspectable ? breadcrumbLabel(identity, attempt) : prepared.sessionLabel;
   const bridge = await createToolBridge(prepared);
   let inlineBridge;
   let commandFiles;
   let pane;
-  let workspace;
   try {
     inlineBridge = createInlineExtensionBridge(prepared);
     commandFiles = createCommandFiles(prepared, prompt);
     const bridges = [bridge, inlineBridge].filter(Boolean);
     const command = commandFiles.command(sessionCommand(session, prepared, prompt, bridges, commandFiles));
     const opened = fullyInspectable
-      ? await openHerdrLivePane({ cwd: prepared.cwd, workspaceLabel: label, tabLabel: label, command }, runner)
+      ? await workspaces.open(run, { cwd: prepared.cwd, tabLabel: label, command })
       : await openHerdrLivePane({ action: "live", cwd: prepared.cwd, command, paneId: env?.HERDR_PANE_ID }, runner);
     pane = paneId(opened);
-    workspace = typeof opened === "object" && opened !== null && typeof opened.workspaceId === "string" ? opened.workspaceId : undefined;
+    const closeRemote = async () => {
+      await runner(fullyInspectable && typeof opened !== "string" ? ["tab", "close", opened.tabId] : ["pane", "close", pane]).catch(() => undefined);
+    };
     const reporter = createHerdrAgentReporter(pane, label, runner);
     const reference = session.reference;
     const sessionRef = { sessionId: reference.sessionId, ...(sessionPath(reference) ? { sessionPath: sessionPath(reference) } : {}) };
     try {
       await reporter.reportSession(sessionRef, "workflow-agent");
     } catch (error) {
-      await runner(["pane", "close", pane]).catch(() => undefined);
-      if (workspace) await runner(["workspace", "close", workspace]).catch(() => undefined);
+      await closeRemote();
       throw error;
     }
     const monitor = waitForHerdrPane(pane, runner, { signal }).then(async (reason) => {
-      await runner(["pane", "close", pane]).catch(() => undefined);
-      if (workspace) await runner(["workspace", "close", workspace]).catch(() => undefined);
+      await closeRemote();
       await reporter.release();
       await bridge?.close();
       await inlineBridge?.close();
       await commandFiles?.close();
       return reason;
     }).catch(async (error) => {
-      await runner(["pane", "close", pane]).catch(() => undefined);
-      if (workspace) await runner(["workspace", "close", workspace]).catch(() => undefined);
+      await closeRemote();
       await reporter.release().catch(() => undefined);
       await bridge?.close();
       await inlineBridge?.close();
       await commandFiles?.close();
       throw error;
     });
-    return { pane, workspace, monitor, reporter, close: async () => { await bridge?.close(); await inlineBridge?.close(); await commandFiles?.close(); } };
+    return { pane, monitor, reporter, closeRemote, close: async () => { await bridge?.close(); await inlineBridge?.close(); await commandFiles?.close(); } };
   } catch (error) {
-    if (pane) await runner(["pane", "close", pane]).catch(() => undefined);
-    if (workspace) await runner(["workspace", "close", workspace]).catch(() => undefined);
+    if (pane && !fullyInspectable) await runner(["pane", "close", pane]).catch(() => undefined);
     await bridge?.close();
     await inlineBridge?.close();
     await commandFiles?.close();
@@ -202,7 +224,7 @@ async function launchPane({ session, prepared, identity, attempt, runner, fullyI
   }
 }
 
-function herdrTransport(agent, context, runner, fullyInspectable, env) {
+function herdrTransport(agent, context, runner, fullyInspectable, env, workspaces) {
   const local = agent.transport;
   return {
     id: "herdr",
@@ -212,7 +234,7 @@ function herdrTransport(agent, context, runner, fullyInspectable, env) {
       try {
         await session.suspendForHandoff?.();
         if (!session.suspendForHandoff) await session.abort?.();
-        opened = await launchPane({ session, prepared, identity: context.identity, attempt: sessionContext.attempt, runner, fullyInspectable, env, signal: sessionContext.signal, prompt: prepared.initialPrompt });
+        opened = await launchPane({ session, prepared, identity: context.identity, run: context.run, attempt: sessionContext.attempt, runner, fullyInspectable, env, signal: sessionContext.signal, prompt: prepared.initialPrompt, workspaces, tuiIndex: context.tuiIndex, tuiLabel: context.tuiLabel });
       } catch (error) {
         await session.dispose();
         throw error;
@@ -224,7 +246,7 @@ function herdrTransport(agent, context, runner, fullyInspectable, env) {
         reference: { ...session.reference, transport: "herdr" },
         async prompt(text) {
           if (disposed) throw new Error("Herdr workflow session is disposed");
-          const current = active ?? await launchPane({ session, prepared, identity: context.identity, attempt: sessionContext.attempt, runner, fullyInspectable, env, signal: sessionContext.signal, prompt: text });
+          const current = active ?? await launchPane({ session, prepared, identity: context.identity, run: context.run, attempt: sessionContext.attempt, runner, fullyInspectable, env, signal: sessionContext.signal, prompt: text, workspaces, tuiIndex: context.tuiIndex, tuiLabel: context.tuiLabel });
           active = current;
           try {
             await current.monitor;
@@ -246,8 +268,7 @@ function herdrTransport(agent, context, runner, fullyInspectable, env) {
           if (disposed) return;
           disposed = true;
           if (active) {
-            await runner(["pane", "close", active.pane]).catch(() => undefined);
-            if (active.workspace) await runner(["workspace", "close", active.workspace]).catch(() => undefined);
+            await active.closeRemote?.();
             await active.close?.();
           }
           await session.dispose();
@@ -299,7 +320,6 @@ function registerLifecycleHooks(pi, runner, env) {
     publishState();
   });
   pi.on("session_start", async (event, ctx) => {
-    if (ctx?.hasUI !== true) return;
     rootSession = true;
     refresh(ctx);
     await reporter.reportSession(sessionRef, event?.reason);
@@ -315,8 +335,14 @@ function registerLifecycleHooks(pi, runner, env) {
     publishState();
     await stateReport;
   });
-  pi.on("turn_end", async () => { if (!rootSession) return; agentActive = true; publishState(); await stateReport; });
-  pi.on("agent_settled", async (_event, ctx) => { if (!rootSession || ctx?.isIdle?.() !== true) return; agentActive = false; publishState(); await stateReport; });
+  pi.on("turn_end", async (event) => {
+    if (!rootSession) return;
+    const toolCalls = Array.isArray(event?.message?.content) && event.message.content.filter((part) => part && typeof part === "object" && part.type === "toolCall");
+    agentActive = Boolean(toolCalls?.length) && !toolCalls.some((part) => part.name === "workflow_result");
+    publishState();
+    await stateReport;
+  });
+  pi.on("agent_settled", async () => { if (!rootSession) return; agentActive = false; publishState(); await stateReport; });
   pi.on("agent_end", async (_event, ctx) => { if (!rootSession || ctx?.isIdle?.() !== true) return; agentActive = false; publishState(); await stateReport; });
   pi.on("session_shutdown", (event) => event?.reason === "quit" ? reporter.release() : undefined);
 }
@@ -324,6 +350,7 @@ function registerLifecycleHooks(pi, runner, env) {
 export function createHerdrExtension(options = {}) {
   const env = options.env ?? process.env;
   const runner = options.runner ?? herdrCommandRunner;
+  const workspaces = options.workspaces ?? createWorkflowWorkspaces(runner);
   const fullyInspectable = isFullyInspectableMode(options.agentDir);
   return {
     version: "1.0.0",
@@ -364,7 +391,7 @@ export function createHerdrExtension(options = {}) {
       fullyInspectable: {
         setup(agent, context) {
           if (!fullyInspectable || !herdrAvailable(env)) return;
-          agent.transport = herdrTransport(agent, context, runner, true, env);
+          agent.transport = herdrTransport(agent, context, runner, true, env, workspaces);
         },
       },
     },
@@ -378,7 +405,19 @@ export function registerHerdrExtension(options = {}) {
   return true;
 }
 
-export default function extension(pi) {
-  const options = { env: process.env };
-  if (registerHerdrExtension(options)) registerLifecycleHooks(pi, options.runner ?? herdrCommandRunner, options.env);
+function registerWorkspaceLifecycle(pi, workspaces) {
+  if (typeof pi?.events?.on !== "function") return;
+  pi.events.on(WORKFLOW_RUN_COMPLETED_EVENT, (event) => workspaces.close(event?.runId));
+  pi.events.on(WORKFLOW_RUN_STATE_CHANGED_EVENT, (event) => ["failed", "stopped", "interrupted", "budget_exhausted"].includes(event?.state) ? workspaces.close(event.runId) : undefined);
+  pi.on("session_shutdown", () => workspaces.closeAll());
+}
+
+export default function extension(pi, overrides = {}) {
+  const runner = overrides.runner ?? herdrCommandRunner;
+  const workspaces = overrides.workspaces ?? createWorkflowWorkspaces(runner);
+  const options = { env: overrides.env ?? process.env, runner, workspaces };
+  if (registerHerdrExtension(options)) {
+    registerLifecycleHooks(pi, runner, options.env);
+    registerWorkspaceLifecycle(pi, workspaces);
+  }
 }

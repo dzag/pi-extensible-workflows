@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 export type HerdrPaneAction = "live";
 export type HerdrAgentState = "idle" | "working" | "blocked" | "unknown";
 export interface HerdrPaneRequest { action: HerdrPaneAction; cwd: string; command: string; paneId?: string }
-export interface HerdrWorkspacePaneRequest { cwd: string; workspaceLabel: string; tabLabel: string; command: string }
+export interface HerdrWorkspacePaneRequest { cwd: string; workspaceLabel?: string; workspaceId?: string; tabLabel: string; command: string }
 export interface HerdrWorkspacePane { workspaceId: string; tabId: string; paneId: string }
 export type HerdrCommandRunner = (args: readonly string[]) => Promise<string>;
 
@@ -78,23 +78,30 @@ function resourceId(value: unknown, resource: string, field: string): string {
 }
 
 export async function openHerdrWorkspacePane(request: HerdrWorkspacePaneRequest, runner: HerdrCommandRunner = herdrCommandRunner): Promise<HerdrWorkspacePane> {
-  if (!request.cwd || !request.workspaceLabel || !request.tabLabel || !request.command) throw new Error("Herdr workspace pane is missing required data.");
-  const created = json(await runner(["workspace", "create", "--cwd", request.cwd, "--label", request.workspaceLabel, "--no-focus"]));
-  const workspaceId = resourceId(created, "workspace", "workspace_id");
-  const tabId = resourceId(created, "tab", "tab_id");
-  const paneId = resourceId(created, "root_pane", "pane_id");
+  if (!request.cwd || !request.tabLabel || !request.command || !request.workspaceId && !request.workspaceLabel) throw new Error("Herdr workspace pane is missing required data.");
+  const created = json(await runner(request.workspaceId
+    ? ["tab", "create", "--workspace", request.workspaceId, "--cwd", request.cwd, "--label", request.tabLabel, "--no-focus"]
+    : ["workspace", "create", "--cwd", request.cwd, "--label", request.workspaceLabel ?? "", "--no-focus"]));
+  const workspaceId = request.workspaceId ?? resourceId(created, "workspace", "workspace_id");
+  let tabId = resourceId(created, "tab", "tab_id");
+  let paneId = resourceId(created, "root_pane", "pane_id");
   try {
-    await runner(["tab", "rename", tabId, request.tabLabel]);
+    if (!request.workspaceId) {
+      await runner(["tab", "rename", tabId, request.workspaceLabel ?? ""]);
+      const tab = json(await runner(["tab", "create", "--workspace", workspaceId, "--cwd", request.cwd, "--label", request.tabLabel, "--no-focus"]));
+      tabId = resourceId(tab, "tab", "tab_id");
+      paneId = resourceId(tab, "root_pane", "pane_id");
+    }
     await runner(["pane", "run", paneId, commandFor({ action: "live", cwd: request.cwd, command: request.command })]);
     return { workspaceId, tabId, paneId };
   } catch (error) {
-    await runner(["workspace", "close", workspaceId]).catch(() => undefined);
+    await runner(request.workspaceId ? ["tab", "close", tabId] : ["workspace", "close", workspaceId]).catch(() => undefined);
     throw error;
   }
 }
 
 export async function openHerdrLivePane(request: HerdrPaneRequest | HerdrWorkspacePaneRequest, runner: HerdrCommandRunner = herdrCommandRunner): Promise<string | HerdrWorkspacePane> {
-  if ("workspaceLabel" in request) return openHerdrWorkspacePane(request, runner);
+  if ("workspaceLabel" in request || "workspaceId" in request) return openHerdrWorkspacePane(request, runner);
   return openHerdrPane({ ...request, action: "live" }, runner);
 }
 

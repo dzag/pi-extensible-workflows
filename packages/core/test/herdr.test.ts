@@ -79,20 +79,22 @@ void test("creates a dedicated labeled workspace and reports ordered agent lifec
   const runner = async (args: readonly string[]): Promise<string> => {
     calls.push([...args]);
     if (args[0] === "workspace") return JSON.stringify({ result: { workspace: { workspace_id: "workspace-1" }, tab: { tab_id: "tab-1" }, root_pane: { pane_id: "pane-1" } } });
+    if (args[0] === "tab" && args[1] === "create") return JSON.stringify({ result: { tab: { tab_id: "tab-2" }, root_pane: { pane_id: "pane-2" } } });
     if (args[0] === "pane" && args[1] === "process-info") return JSON.stringify({ result: { process_info: { foreground_processes: [] } } });
     return "";
   };
   const pane = await openHerdrWorkspacePane({ cwd: "/repo", workspaceLabel: "flow > review #1", tabLabel: "flow > review #1", command: "pi --session /tmp/session.jsonl" }, runner);
-  assert.deepEqual(pane, { workspaceId: "workspace-1", tabId: "tab-1", paneId: "pane-1" });
+  assert.deepEqual(pane, { workspaceId: "workspace-1", tabId: "tab-2", paneId: "pane-2" });
   const reporter = createHerdrAgentReporter(pane.paneId, "review", runner);
   await reporter.reportSession({ sessionPath: "/tmp/session.jsonl" }, "workflow-agent");
   await reporter.reportState("working", undefined, { sessionPath: "/tmp/session.jsonl" });
   await reporter.release();
   await reporter.release();
-  assert.deepEqual(calls.slice(0, 3), [
+  assert.deepEqual(calls.slice(0, 4), [
     ["workspace", "create", "--cwd", "/repo", "--label", "flow > review #1", "--no-focus"],
     ["tab", "rename", "tab-1", "flow > review #1"],
-    ["pane", "run", "pane-1", "cd '/repo' && pi --session /tmp/session.jsonl"],
+    ["tab", "create", "--workspace", "workspace-1", "--cwd", "/repo", "--label", "flow > review #1", "--no-focus"],
+    ["pane", "run", "pane-2", "cd '/repo' && pi --session /tmp/session.jsonl"],
   ]);
   const reportCalls = calls.filter(([command, subcommand]) => command === "pane" && ["report-agent-session", "report-agent", "release-agent"].includes(subcommand ?? ""));
   assert.equal(reportCalls.length, 3);

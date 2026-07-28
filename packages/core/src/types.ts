@@ -161,10 +161,10 @@ export interface PreparedAgentSession {
   readonly additionalSkillPaths?: readonly string[];
   readonly resourcePolicy?: Readonly<AgentResourcePolicy>;
 }
-export interface AgentTransportContext { readonly run: Readonly<WorkflowRunContext>; readonly identity: Readonly<AgentIdentity>; readonly attempt: number; readonly signal: AbortSignal }
+export interface AgentTransportContext { readonly run: Readonly<WorkflowRunContext>; readonly identity: Readonly<AgentIdentity>; readonly attempt: number; readonly signal: AbortSignal; readonly tuiIndex?: number; readonly tuiLabel?: string }
 export interface AgentTransport { readonly id: string; createSession(prepared: Readonly<PreparedAgentSession>, context: Readonly<AgentTransportContext>): Promise<WorkflowAgentSession> }
 export interface AgentSetup { prompt: string; options: AgentOptions; sessionInput: SessionInput; prepared: Readonly<PreparedAgentSession>; transport: AgentTransport }
-export interface AgentSetupContext { readonly run: Readonly<WorkflowRunContext>; readonly identity: Readonly<AgentIdentity>; readonly attempt: number; readonly signal: AbortSignal }
+export interface AgentSetupContext { readonly run: Readonly<WorkflowRunContext>; readonly identity: Readonly<AgentIdentity>; readonly attempt: number; readonly signal: AbortSignal; readonly tuiIndex?: number; readonly tuiLabel?: string }
 export interface AgentSetupHook { priority?: number; setup: (agent: AgentSetup, context: Readonly<AgentSetupContext>) => void | Promise<void> }
 export interface RegisteredAgentSetupHook { name: string; priority: number; setup: AgentSetupHook["setup"] }
 export interface WorkflowExtensionMetadata { version: string; headline: string; description: string }

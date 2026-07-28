@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { breadcrumbLabel, createHerdrExtension, isFullyInspectableMode } from "../index.js";
+import extension, { breadcrumbLabel, createHerdrExtension, isFullyInspectableMode } from "../index.js";
 import { createLiveSessionHandoff } from "pi-extensible-workflows";
 
 void test("uses the global extension setting and complete breadcrumb labels", () => {
@@ -17,7 +17,7 @@ void test("uses the global extension setting and complete breadcrumb labels", ()
 });
 
 void test("registers only the live-session action when enabled", () => {
-  const extension = createHerdrExtension({ env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" } });
+  const extension = createHerdrExtension({ agentDir: mkdtempSync(join(tmpdir(), "herdr-extension-default-")), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" } });
   assert.deepEqual(Object.values(extension.agentAttemptActions ?? {}).map(({ label }) => label), ["Open live session in Herdr pane"]);
   const context = { liveSession: {}, prepared: {}, handoff: {}, attempt: {}, agent: {}, run: {}, signal: new AbortController().signal, ui: {} };
   assert.equal(extension.agentAttemptActions.openLiveSession.visible(context), true);
@@ -49,7 +49,7 @@ void test("opens the active session after the handoff boundary and releases on p
     if (args[0] === "agent") return JSON.stringify({ result: { agent: { agent_status: "working" } } });
     return "";
   };
-  const extension = createHerdrExtension({ env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" }, runner });
+  const extension = createHerdrExtension({ agentDir: mkdtempSync(join(tmpdir(), "herdr-extension-default-")), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" }, runner });
   const handoff = createLiveSessionHandoff();
   handoff.observe({ type: "turn_started" });
   const ownership = [];
@@ -85,8 +85,27 @@ void test("opens the active session after the handoff boundary and releases on p
   assert.ok(runCommand.length > 4096);
   assert.deepEqual(ownership, ["suspend", "resume"]);
 });
+void test("reports terminal turns as idle", async () => {
+  const handlers = new Map();
+  const calls = [];
+  extension({
+    on(name, handler) { handlers.set(name, handler); },
+    events: { on(name, handler) { handlers.set(name, handler); } },
+  }, {
+    env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane", PI_EXTENSIBLE_WORKFLOWS_HERDR_OWNER: "1" },
+    runner: async (args) => { calls.push([...args]); return ""; },
+  });
+  const context = { hasUI: true, isIdle: () => false, sessionManager: { getSessionId: () => "session", getSessionFile: () => "/tmp/session.jsonl" } };
+  await handlers.get("session_start")({ reason: "workflow-agent" }, context);
+  await handlers.get("turn_end")({ message: { content: [{ type: "text", text: "done" }] } }, context);
+  await handlers.get("agent_start")({}, context);
+  await handlers.get("turn_end")({ message: { content: [{ type: "toolCall", name: "workflow_result" }] } }, context);
+  await handlers.get("agent_start")({}, context);
+  await handlers.get("agent_settled")({}, context);
+  assert.deepEqual(calls.filter(([command, subcommand]) => command === "pane" && subcommand === "report-agent").map((args) => args[args.indexOf("--state") + 1]), ["working", "idle", "working", "idle", "working", "idle"]);
+});
 
-void test("routes fully inspectable agents to distinct labeled workspaces", async () => {
+void test("routes fully inspectable agents into one labeled workflow workspace", async () => {
   const root = mkdtempSync(join(tmpdir(), "herdr-extension-full-"));
   const agentDir = join(root, "agent");
   mkdirSync(agentDir, { recursive: true });
@@ -94,7 +113,7 @@ void test("routes fully inspectable agents to distinct labeled workspaces", asyn
   writeFileSync(join(agentDir, "pi-extensible-workflows", "settings.json"), JSON.stringify({ extensions: { herdr: { enableFullyInspectableMode: true } } }));
   const calls = [];
   let runCommand;
-  let closed = false;
+  let agentReports = 0;
   const runner = async (args) => {
     calls.push([...args]);
     if (args[0] === "pane" && args[1] === "run") {
@@ -102,11 +121,9 @@ void test("routes fully inspectable agents to distinct labeled workspaces", asyn
       runCommand = script ? readFileSync(script[1], "utf8") : args[3];
     }
     if (args[0] === "workspace") return JSON.stringify({ result: { workspace: { workspace_id: "workspace" }, tab: { tab_id: "tab" }, root_pane: { pane_id: "pane" } } });
-    if (args[0] === "pane" && args[1] === "process-info") {
-      if (closed) throw new Error("closed");
-      return JSON.stringify({ result: { process_info: { foreground_processes: [] } } });
-    }
-    if (args[0] === "pane" && args[1] === "close") closed = true;
+    if (args[0] === "tab" && args[1] === "create") return JSON.stringify({ result: { tab: { tab_id: "tab-2" }, root_pane: { pane_id: "pane-2" } } });
+    if (args[0] === "pane" && args[1] === "process-info") return JSON.stringify({ result: { process_info: { foreground_processes: [{ name: "pi", argv: ["pi"] }] } } });
+    if (args[0] === "agent" && args[1] === "get") return JSON.stringify({ result: { agent: { agent_status: agentReports++ % 2 === 0 ? "working" : "idle" } } });
     return "";
   };
   const extension = createHerdrExtension({ agentDir, env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "parent" }, runner });
@@ -114,13 +131,21 @@ void test("routes fully inspectable agents to distinct labeled workspaces", asyn
   let received;
   const agent = { transport: { id: "local", async createSession(value) { received = value; return { reference: { transport: "local", sessionId: "session" }, getState: () => ({ model: value.model, tools: value.tools }), getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), subscribe: () => () => {}, prompt: async () => ({}), steer: async () => {}, abort: async () => {}, dispose: async () => {} }; } } };
   const identity = { structuralPath: ["review"], parentBreadcrumb: "flow", callSite: "function:agent/work", occurrence: 1 };
-  extension.agentSetupHooks.fullyInspectable.setup(agent, { identity, signal: new AbortController().signal });
+  extension.agentSetupHooks.fullyInspectable.setup(agent, { identity, run: { runId: "run", workflow: { name: "flow" } }, signal: new AbortController().signal, tuiIndex: 1, tuiLabel: "reviewer" });
   const session = await agent.transport.createSession(prepared, { identity, attempt: 1 });
   assert.equal(received, prepared);
   assert.equal(session.reference.transport, "herdr");
-  assert.deepEqual(calls[0], ["workspace", "create", "--cwd", "/repo", "--label", "review > flow > function:agent/work #1", "--no-focus"]);
+  await session.prompt("continue");
+  const secondSession = await agent.transport.createSession(prepared, { identity, attempt: 2 });
+  assert.deepEqual(calls[0], ["workspace", "create", "--cwd", "/repo", "--label", "workflow flow", "--no-focus"]);
+  assert.deepEqual(calls.filter(([command, subcommand]) => command === "tab" && subcommand === "create"), [
+    ["tab", "create", "--workspace", "workspace", "--cwd", "/repo", "--label", "#1 reviewer", "--no-focus"],
+    ["tab", "create", "--workspace", "workspace", "--cwd", "/repo", "--label", "#1 reviewer", "--no-focus"],
+  ]);
+  await secondSession.prompt("continue");
   await session.dispose();
-  assert.ok(calls.some(([command, subcommand]) => command === "workspace" && subcommand === "close"));
+  await secondSession.dispose();
+  assert.equal(calls.filter(([command, subcommand]) => command === "tab" && subcommand === "close").length, 2);
   const runCall = calls.find(([command, subcommand]) => command === "pane" && subcommand === "run");
   assert.ok(runCall);
   assert.ok(runCommand.includes("--system-prompt '/repo/.pi/pi-extensible-workflows/SYSTEM.md'"));

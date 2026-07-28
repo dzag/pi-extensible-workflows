@@ -39,6 +39,8 @@ export type AgentProviderRecovery = "retry" | "abort" | { model: string };
 export interface AgentExecutionOptions {
   label: string;
   workflowName: string;
+  tuiIndex?: number;
+  tuiLabel?: string;
   phase?: string;
   parent?: string;
   model?: string;
@@ -322,10 +324,10 @@ function isChildAgentToolParams(value: unknown): value is ChildAgentToolParams &
   if (value.timeoutMs !== undefined && (value.timeoutMs !== null && (typeof value.timeoutMs !== "number" || !Number.isInteger(value.timeoutMs) || value.timeoutMs < 1))) return false;
   return true;
 }
-function fallbackSetupContext(root: AgentExecutionRoot, options: AgentExecutionOptions, signal: AbortSignal): { run: Readonly<WorkflowRunContext>; identity: Readonly<AgentIdentity> } {
+function fallbackSetupContext(root: AgentExecutionRoot, options: AgentExecutionOptions, signal: AbortSignal): { run: Readonly<WorkflowRunContext>; identity: Readonly<AgentIdentity>; tuiIndex?: number; tuiLabel?: string } {
   const identity = options.agentIdentity ?? { structuralPath: [], callSite: options.label, occurrence: 1 };
   const run = root.runContext ?? Object.freeze({ cwd: root.cwd, sessionId: "", runId: "", workflow: Object.freeze({ name: options.workflowName }), args: null, signal });
-  return { run, identity: Object.freeze({ ...identity, structuralPath: Object.freeze([...identity.structuralPath]) }) };
+  return { run, identity: Object.freeze({ ...identity, structuralPath: Object.freeze([...identity.structuralPath]) }), ...(options.tuiIndex === undefined ? {} : { tuiIndex: options.tuiIndex }), ...(options.tuiLabel === undefined ? {} : { tuiLabel: options.tuiLabel }) };
 }
 function resourcePolicySummary(policy: AgentResourcePolicy): NonNullable<AgentSetupSummary["disabledAgentResources"]> {
   return { skills: [...policy.effective.skills], extensions: [...policy.effective.extensions], excludedSkills: [...(policy.excludedSkills ?? [])], excludedExtensions: [...(policy.excludedExtensions ?? [])], unmatchedSkills: [...policy.unmatchedSkills], unmatchedExtensions: [...policy.unmatchedExtensions] };
@@ -362,7 +364,7 @@ async function prepareAgentSetup(root: AgentExecutionRoot, transport: AgentTrans
   const sessionInput: SessionInput = { cwd, model: { ...resolved.model }, tools: [...resolved.tools], sessionLabel: `${options.workflowName}:${options.label}:attempt-${String(attempt)}`, ...(root.agentDir ? { agentDir: root.agentDir } : {}), ...(root.additionalSkillPaths?.length ? { additionalSkillPaths: [...root.additionalSkillPaths] } : {}), ...(customTools.length ? { customTools: [...customTools] } : {}), ...(resultTool ? { resultTool } : {}), ...(resolved.systemPrompt !== undefined ? { systemPrompt: resolved.systemPrompt } : {}), systemPromptAppend: resolved.systemPromptAppend, ...(resourcePolicy ? { resourcePolicy } : {}), options: structuredClone(baselineOptions) };
   const setup = { prompt: task, options: sessionInput.options ?? {}, sessionInput, prepared: preparedAgentSession(sessionInput, task), transport };
   const base = fallbackSetupContext(root, options, setupSignal);
-  const context = Object.freeze({ run: base.run, identity: base.identity, attempt, signal: setupSignal });
+  const context = Object.freeze({ run: base.run, identity: base.identity, attempt, signal: setupSignal, ...(base.tuiIndex === undefined ? {} : { tuiIndex: base.tuiIndex }), ...(base.tuiLabel === undefined ? {} : { tuiLabel: base.tuiLabel }) });
   const hookNames: string[] = [];
   for (const hook of [...(root.agentSetupHooks ?? [])].sort((left, right) => left.priority - right.priority || (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))) {
     if (setupSignal.aborted) return { setup, summary: agentSetupSummary(setup, hookNames), failure: { error: new WorkflowError("CANCELLED", "Agent cancelled") } };
@@ -512,7 +514,7 @@ export class WorkflowAgentExecutor {
         const transportSignal = attemptSignal;
         await options.onAttempt?.({ attempt, transport: setup.transport.id, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, setup: setupSummary });
         const transportBase = fallbackSetupContext(this.root, options, transportSignal);
-        const createdSession = await setup.transport.createSession(setup.prepared, Object.freeze({ run: transportBase.run, identity: transportBase.identity, attempt, signal: transportSignal }));
+        const createdSession = await setup.transport.createSession(setup.prepared, Object.freeze({ run: transportBase.run, identity: transportBase.identity, attempt, signal: transportSignal, ...(transportBase.tuiIndex === undefined ? {} : { tuiIndex: transportBase.tuiIndex }), ...(transportBase.tuiLabel === undefined ? {} : { tuiLabel: transportBase.tuiLabel }) }));
         if (createdSession.reference.transport !== setup.transport.id) {
           await createdSession.dispose();
           throw new WorkflowError("INTERNAL_ERROR", `Agent transport ${setup.transport.id} created a session for ${createdSession.reference.transport}`);
@@ -710,6 +712,7 @@ export type ScheduledAgentResult =
 export interface ScheduledAgentInput {
   id: string;
   runId: string;
+  tuiIndex: number;
   parentId?: string;
   prompt: string;
   options: Readonly<ScheduledAgentOptions>;
@@ -739,7 +742,7 @@ type ScheduledNode = {
   steer?: (message: string) => void | Promise<void>;
 };
 
-type ScheduledRun = { limit: number; beforeLaunch?: () => void; logical: number; active: number; queue: Array<{ node?: ScheduledNode; start: () => void }> };
+type ScheduledRun = { limit: number; beforeLaunch?: () => void; logical: number; active: number; nextIndex: number; queue: Array<{ node?: ScheduledNode; start: () => void }> };
 export type OwnershipRecord = { id: string; parentId?: string; prompt?: string; label: string; state: ScheduledNode["state"]; options: Readonly<ScheduledAgentOptions> };
 type OwnershipWriter = (runId: string, ownership: readonly OwnershipRecord[]) => void | Promise<void>;
 
@@ -759,7 +762,7 @@ export class FairAgentScheduler {
   addRun(runId: string, limit = 8, beforeLaunch?: () => void): void {
     if (this.#runs.has(runId)) throw new WorkflowError("DUPLICATE_NAME", `Scheduler run already exists: ${runId}`);
     if (!Number.isInteger(limit) || limit < 1 || limit > this.sessionLimit) throw new WorkflowError("INVALID_SETTINGS", "Invalid run concurrency");
-    this.#runs.set(runId, { limit, ...(beforeLaunch ? { beforeLaunch } : {}), logical: 0, active: 0, queue: [] });
+    this.#runs.set(runId, { limit, ...(beforeLaunch ? { beforeLaunch } : {}), logical: 0, active: 0, nextIndex: 0, queue: [] });
     this.#runOrder.push(runId);
   }
   updateRunLimit(runId: string, limit: number): void {
@@ -777,6 +780,7 @@ export class FairAgentScheduler {
     if (parentId && (!parent || parent.runId !== runId)) throw new WorkflowError("UNKNOWN_AGENT_TYPE", "Parent agent is not owned by this run");
     const effective = this.#inherit(parent, options);
     const id = `${runId}:${String(++this.#nextId)}`;
+    const tuiIndex = ++run.nextIndex;
     let resolveResult: (result: ScheduledAgentResult) => void = () => undefined;
     const promise = new Promise<ScheduledAgentResult>((resolve) => { resolveResult = resolve; });
     let resolveCompletion: () => void = () => undefined;
@@ -787,7 +791,7 @@ export class FairAgentScheduler {
       node.state = "running";
       this.#persist(runId);
       try {
-        const value = await this.runner({ id, runId, ...(parentId ? { parentId } : {}), prompt, options: effective, signal: node.controller.signal, setSteer: (handler) => { node.steer = handler; } });
+        const value = await this.runner({ id, runId, tuiIndex, ...(parentId ? { parentId } : {}), prompt, options: effective, signal: node.controller.signal, setSteer: (handler) => { node.steer = handler; } });
         this.#settle(node, { id, ok: true, value });
       } catch (error) {
         const typed = error instanceof WorkflowError ? error : new WorkflowError("AGENT_FAILED", error instanceof Error ? error.message : String(error));
