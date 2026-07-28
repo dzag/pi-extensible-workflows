@@ -117,6 +117,7 @@ export interface WorkflowAgentSession {
   readonly reference: WorkflowAgentSessionReference;
   getState(): Readonly<WorkflowAgentSessionState>;
   getSessionStats(): WorkflowAgentSessionStats;
+  getLastAssistant(): WorkflowAgentMessage | undefined;
   subscribe(listener: (event: WorkflowAgentSessionEvent) => void): () => void;
   subscribeAsync?(listener: (event: WorkflowAgentSessionEvent) => void | Promise<void>): () => void;
   prompt(text: string): Promise<WorkflowAgentTurnResult>;

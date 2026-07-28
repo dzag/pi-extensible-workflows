@@ -55,7 +55,7 @@ void test("opens the active session after the handoff boundary and releases on p
   const ownership = [];
   const longExtensionPaths = Array.from({ length: 34 }, (_, index) => `/agent/extensions/${"x".repeat(70)}-${String(index)}.mjs`);
   const longSkillPaths = Array.from({ length: 24 }, (_, index) => `/agent/skills/${"x".repeat(70)}-${String(index)}/SKILL.md`);
-  const session = { reference: { transport: "local", sessionId: "session", locator: { sessionFile: "/tmp/session.jsonl" } }, suspendForHandoff: async () => ownership.push("suspend"), abort: async () => ownership.push("abort"), resumeFromHandoff: async () => ownership.push("resume"), getHerdrResourcePaths: () => ({ extensions: ["/allowed-extension.mjs", ...longExtensionPaths], skills: ["/allowed-skill/SKILL.md", ...longSkillPaths] }) };
+  const session = { reference: { transport: "local", sessionId: "session", locator: { sessionFile: "/tmp/session.jsonl" } }, suspendForHandoff: async () => ownership.push("suspend"), abort: async () => ownership.push("abort"), resumeFromHandoff: async () => ownership.push("resume"), getLastAssistant: () => ({ role: "assistant", content: [{ type: "toolCall", name: "read" }] }), getHerdrResourcePaths: () => ({ extensions: ["/allowed-extension.mjs", ...longExtensionPaths], skills: ["/allowed-skill/SKILL.md", ...longSkillPaths] }) };
   const prepared = { cwd: "/repo", agentDir: "/agent", model: { provider: "openai", model: "gpt", thinking: "high" }, tools: ["read"], systemPrompt: "system", systemPromptAppend: "append", systemPromptPath: "/workflow/SYSTEM.md", extensionFactories: [function (pi) { pi.registerCommand("inline", { handler() {} }); }], additionalSkillPaths: ["/skill"], resourcePolicy: { projectTrusted: false, effective: { extensions: ["*"], skills: ["*"] } }, sessionLabel: "flow:review:attempt-1" };
   const promise = extension.agentAttemptActions.openLiveSession.run({ liveSession: session, prepared, handoff, attempt: { attempt: 1 }, agent: { structuralPath: ["review"], parentBreadcrumb: "flow" }, run: {}, signal: new AbortController().signal, ui: {} });
   await Promise.resolve();
@@ -78,12 +78,27 @@ void test("opens the active session after the handoff boundary and releases on p
   assert.match(runCommand, /--no-extensions/);
   assert.match(runCommand, /--no-skills/);
   assert.match(runCommand, /--no-approve/);
-  assert.ok(runCommand.includes("@'/tmp/pi-herdr-prompt-"));
+  assert.ok(runCommand.includes("'Continue the current workflow task from this session.'"));
+  assert.doesNotMatch(runCommand, /@'\/tmp\/pi-herdr-prompt-/);
   assert.match(runCommand, /--extension '.*pi-herdr-extensions-/);
   assert.ok(calls.some(([command, subcommand]) => command === "pane" && subcommand === "release-agent"));
   assert.equal(handoff.state, "completed");
   assert.ok(runCommand.length > 4096);
   assert.deepEqual(ownership, ["suspend", "resume"]);
+});
+void test("does not open a pane after a terminal assistant response", async () => {
+  const calls = [];
+  const ownership = [];
+  const runner = async (args) => { calls.push([...args]); return ""; };
+  const extension = createHerdrExtension({ agentDir: mkdtempSync(join(tmpdir(), "herdr-extension-terminal-")), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" }, runner });
+  const handoff = createLiveSessionHandoff();
+  handoff.observe({ type: "turn_started" });
+  const session = { reference: { transport: "local", sessionId: "session" }, getLastAssistant: () => ({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "completed report" }] }), suspendForHandoff: async () => ownership.push("suspend"), resumeFromHandoff: async () => ownership.push("resume") };
+  const opening = extension.agentAttemptActions.openLiveSession.run({ liveSession: session, prepared: {}, handoff, attempt: { attempt: 1 }, agent: {}, run: {}, signal: new AbortController().signal, ui: {} });
+  handoff.observe({ type: "turn_end" });
+  await opening;
+  assert.equal(calls.some(([command, subcommand]) => command === "pane" && subcommand === "run"), false);
+  assert.deepEqual(ownership, []);
 });
 void test("reports terminal turns as idle", async () => {
   const handlers = new Map();
