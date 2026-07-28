@@ -10,6 +10,16 @@ import { createLocalPiSession } from "../src/agent-execution.js";
 import { listRunIds, RunStore } from "../src/persistence.js";
 import type { SessionInput } from "../src/agent-execution.js";
 function sessionStats(cost = 0.25) { return { tokens: { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, total: 14 }, cost }; }
+async function waitForRunState(store: RunStore, state: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  let current: string | undefined;
+  while (Date.now() < deadline) {
+    current = (await store.load()).run.state;
+    if (current === state) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`Timed out waiting for run state ${state}; last observed state was ${current ?? "unknown"}`);
+}
 let acceptanceFunctionCalls = 0;
 const acceptanceExtension: WorkflowExtension = {
   version: "1.0.0", headline: "Acceptance", description: "Acceptance globals",
@@ -113,7 +123,7 @@ void test("cold resume persists effective role, fallback, nested, retry, and exp
   assert.ok(start && command);
   await start({}, ctx);
   await command("resume run-a", ctx);
-  for (let attempt = 0; attempt < 1000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+  await waitForRunState(store, "completed");
   const loaded = await store.load();
   assert.equal(loaded.run.state, "completed");
   assert.deepEqual(loaded.snapshot.roles?.reviewer?.disabledAgentResources, role.disabledAgentResources);
@@ -262,7 +272,7 @@ void test("cold resume replays completed agents by hidden structural identity", 
   assert.ok(start && command);
   await start({}, ctx);
   await command("resume run-a", ctx);
-  for (let attempt = 0; attempt < 1000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+  await waitForRunState(store, "completed");
   assert.equal((await store.load()).run.state, "completed");
   assert.deepEqual(await store.replay(replayPath), { path: replayPath, value: "replayed" });
 });
@@ -284,12 +294,12 @@ void test("cold recovery delivers a persisted checkpoint only once before replay
   await start({}, ctx);
   assert.match(messages[0] ?? "", /Ship\?/);
   await command("resume run-a", ctx);
-  for (let attempt = 0; attempt < 100 && (await store.load()).run.state !== "awaiting_input"; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+  await waitForRunState(store, "awaiting_input");
   assert.equal(messages.length, 1);
   const respond = tools.find(({ name }) => name === "workflow_respond");
   assert.ok(respond);
   assert.equal((await respond.execute(undefined as never, { runId: "run-a", name: "ship", approved: true } as never)).details.accepted, true);
-  for (let attempt = 0; attempt < 100 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+  await waitForRunState(store, "completed");
   assert.equal((await store.load()).run.state, "completed");
   assert.equal((await store.load()).run.error, undefined);
   assert.deepEqual(await store.replay("checkpoint/ship"), { path: "checkpoint/ship", value: true });
@@ -313,7 +323,7 @@ void test("production restart recovery and graceful shutdown persist durable com
   await shutdown();
   assert.equal((await store.load()).run.state, "interrupted");
   await command("resume run-a", ctx);
-  for (let attempt = 0; attempt < 100 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  await waitForRunState(store, "completed");
   assert.equal((await store.load()).run.state, "completed");
   assert.equal(JSON.parse(readFileSync(join(store.directory, "result.json"), "utf8")), null);
 });
@@ -390,7 +400,7 @@ void test("a real paused run survives shutdown, replays completed shell work, an
   await command(`pause ${runId}`, context);
   assert.equal((await store.load()).run.state, "pausing");
   releasePrompt();
-  for (let attempt = 0; attempt < 1_000 && (await store.load()).run.state !== "paused"; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+  await waitForRunState(store, "paused");
   const paused = await store.load();
   assert.equal(paused.run.state, "paused");
   assert.equal(paused.run.agents[0]?.state, "completed");
@@ -407,7 +417,7 @@ void test("a real paused run survives shutdown, replays completed shell work, an
   assert.ok(start && resumeCommand);
   await start({}, context);
   await resumeCommand(`resume ${runId}`, context);
-  for (let attempt = 0; attempt < 1_000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+  await waitForRunState(store, "completed");
   assert.equal((await store.load()).run.state, "completed");
   assert.equal(readFileSync(marker, "utf8"), "xy");
   assert.equal(secondSessions, 0);
@@ -719,7 +729,7 @@ void test("shared worktree scopes persist one owner across production agents and
   const started = await workflow.execute("id", { name: "shared-worktree", script }, new AbortController().signal, undefined, { cwd, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } });
   const runId = started.details.runId;
   const store = new RunStore(cwd, "session", runId, home);
-  for (let attempt = 0; attempt < 1000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+  await waitForRunState(store, "completed");
   const loaded = await store.load();
   assert.equal(loaded.run.state, "completed", JSON.stringify(loaded.run.error));
   const worktrees = await store.worktrees();
@@ -779,7 +789,7 @@ void test("restart recovers every persisted nonterminal run state", async () => 
     await command(`resume run-${String(index)}`, ctx);
   }
   for (const [index, store] of stores.entries()) {
-    for (let attempt = 0; attempt < 1000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+    await waitForRunState(store, "completed");
     assert.equal((await store.load()).run.state, "completed");
     assert.equal(JSON.parse(readFileSync(join(store.directory, "result.json"), "utf8")), `run-${String(index)}`);
   }
@@ -863,7 +873,7 @@ void test("workflow_retry replays a journaled shell mutation while completing in
   const childRunId = retried.details.runId;
   assert.ok(childRunId && retried.details.parentRunId === parentRunId);
   const child = new RunStore(home, "session", childRunId, home);
-  for (let attempt = 0; attempt < 1000 && (await child.load()).run.state !== "completed"; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+  await waitForRunState(child, "completed");
   assert.equal((await child.load()).run.state, "completed", JSON.stringify((await child.load()).run.error));
   assert.equal(readFileSync(marker, "utf8"), "x");
   assert.equal(sessions, 2);
