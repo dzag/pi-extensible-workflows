@@ -1,8 +1,17 @@
 /**
  * Hostile CLI Wrapper Pattern
- * 
- * Safely wrap unpredictable CLI tools (that hang, print messy stdout, or exit(0) on failure)
- * into deterministic, structured JSON for pi-extensible-workflows.
+ *
+ * "Hostile CLI" is not a formal term: here it means any command-line tool that
+ * is unsafe to consume programmatically because it behaves non-deterministically.
+ * Typical traits:
+ *   - hangs or waits on interactive prompts instead of exiting;
+ *   - prints logos, deprecation warnings, or progress noise into stdout;
+ *   - exits 0 on failure (or non-zero with an empty stdout), so the exit code lies;
+ *   - emits human-formatted text where a workflow expects machine-readable JSON.
+ *
+ * This wrapper normalizes such tools into deterministic, structured JSON so they
+ * can feed the deterministic workflows described in the project docs:
+ * https://vekexasia.github.io/pi-extensible-workflows/
  */
 const { spawnSync } = require('child_process');
 
