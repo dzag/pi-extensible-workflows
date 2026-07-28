@@ -1,6 +1,6 @@
 {
   "name": "pi-extensible-workflows-workspace",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "private": true,
   "description": "Workspace orchestrator for pi-extensible-workflows",
   "type": "module",
