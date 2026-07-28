@@ -21,7 +21,7 @@
     "test:template": "node --test --test-timeout=10000 --test-force-exit packages/core/examples/workflow-extension-template/extension.test.mjs",
     "acceptance": "npm run acceptance --workspace=packages/core",
     "docs:check": "node scripts/check-docs.mjs",
-    "check": "npm run lint && npm test && npm run docs:check",
+    "check": "npm run build && npm run lint && npm test && npm run docs:check",
     "evals": "npm run evals --workspace=packages/core",
     "evals:ambient": "npm run evals:ambient --workspace=packages/core",
     "pack:core": "npm pack --workspace=packages/core --dry-run",
