@@ -1,6 +1,6 @@
 {
   "name": "@piewf/herdr",
-  "version": "4.0.2",
+  "version": "4.0.3",
   "type": "module",
   "scripts": {
     "test": "node --test --test-timeout=10000 --test-force-exit test/index.test.mjs"

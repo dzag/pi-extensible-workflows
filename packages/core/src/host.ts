@@ -757,6 +757,7 @@ function themeWorkflowProgressStyles(theme: Theme): WorkflowProgressStyles {
   };
 }
 type WorkflowProgressRefreshState = { runId: string; inputRun: PersistedRun; run: PersistedRun; lastRefreshAt: number; runtimeStartedAt: number; runtimeBaseMs: number; refresh?: Promise<void> };
+type WorkflowProgressRenderState = { workflowSpinner?: ReturnType<typeof setInterval>; workflowProgress?: WorkflowProgressRefreshState; workflowProgressComponent?: ReturnType<typeof workflowProgressBlock> };
 function workflowProgressBlock(run: PersistedRun, theme: Theme, progress?: WorkflowProgressRefreshState, refresh?: () => Promise<PersistedRun | undefined>, invalidate?: () => void) {
   const styles = themeWorkflowProgressStyles(theme);
   const currentRun = () => {
@@ -2628,7 +2629,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const details = result.details;
       if (isWorkflowFailureDiagnostics(details)) return textBlock(formatWorkflowFailureDiagnostics(details));
       const runDetails = details as { run?: PersistedRun; value?: JsonValue; preview?: string } | undefined;
-      const state = context.state as { workflowSpinner?: ReturnType<typeof setInterval>; workflowProgress?: WorkflowProgressRefreshState };
+      const state = context.state as WorkflowProgressRenderState;
       if (runDetails?.run && isPartial && runDetails.run.state === "running" && !state.workflowSpinner) {
         state.workflowSpinner = setInterval(context.invalidate, 80);
         state.workflowSpinner.unref();
@@ -2642,6 +2643,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         if (!isPartial || !progress || progress.runId !== incoming.id) {
           progress = undefined;
           delete state.workflowProgress;
+          delete state.workflowProgressComponent;
           if (isPartial) {
             progress = { runId: incoming.id, inputRun: incoming, run: incoming, lastRefreshAt: 0, runtimeStartedAt: Date.now(), runtimeBaseMs: incoming.usage?.durationMs ?? 0 };
             state.workflowProgress = progress;
@@ -2654,12 +2656,17 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           progress.inputRun = incoming;
           progress.run = incoming;
         }
-        return workflowProgressBlock(progress?.run ?? incoming, theme, progress, async () => {
-          const active = runs.get(incoming.id);
-          const store = active?.store ?? new RunStore(incoming.cwd, incoming.sessionId, incoming.id, home);
-          const loaded = await store.load();
-          return withLiveActivities(loaded.run);
-        }, () => { if (state.workflowProgress === progress) context.invalidate(); });
+        if (!state.workflowProgressComponent) {
+          const requestRender = context.invalidate;
+          const currentProgress = progress;
+          state.workflowProgressComponent = workflowProgressBlock(currentProgress?.run ?? incoming, theme, currentProgress, async () => {
+            const active = runs.get(incoming.id);
+            const store = active?.store ?? new RunStore(incoming.cwd, incoming.sessionId, incoming.id, home);
+            const loaded = await store.load();
+            return withLiveActivities(loaded.run);
+          }, () => { if (state.workflowProgress === currentProgress) requestRender(); });
+        }
+        return state.workflowProgressComponent;
       }
       const content = result.content[0];
       return textBlock(isPartial ? "Workflow starting..." : runDetails?.preview ?? (content?.type === "text" ? content.text : "Workflow finished"));
