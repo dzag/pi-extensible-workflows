@@ -27,6 +27,7 @@ void test("uses a transport-neutral session and persists its final reference sha
         reference: { transport: "test", sessionId: "external-1" },
         getState: () => ({ model: prepared.model, tools: prepared.tools }),
         getSessionStats: sessionStats,
+        getLastAssistant: () => undefined,
         subscribe(listener: (event: import("../src/types.js").WorkflowAgentSessionEvent) => void) { listener({ type: "state_changed", state: { model: prepared.model, tools: prepared.tools } }); return () => undefined; },
         async prompt() { events.push("prompt"); return { assistant: { role: "assistant", content: [{ type: "text", text: "transport result" }] } }; },
         async steer() {},
@@ -123,6 +124,7 @@ void test("reruns setup hooks and reselects the transport for ordinary retries",
         reference: { transport: id, sessionId: id },
         getState: () => ({ model: prepared.model, tools: prepared.tools }),
         getSessionStats: sessionStats,
+        getLastAssistant: () => undefined,
         subscribe() { return () => undefined; },
         async prompt() { if (fail) throw new Error("retry"); return { assistant: { role: "assistant", content: [{ type: "text", text: "done" }] } }; },
         async steer() {},
@@ -169,6 +171,7 @@ void test("rejects a session whose reference transport differs from the selected
         reference: { transport: "wrong", sessionId: "mismatch" },
         getState: () => ({ model: prepared.model, tools: prepared.tools }),
         getSessionStats: sessionStats,
+        getLastAssistant: () => undefined,
         subscribe() { return () => undefined; },
         async prompt() { return { assistant: { role: "assistant", content: [{ type: "text", text: "unused" }] } }; },
         async steer() {},
@@ -192,6 +195,7 @@ void test("rejects transport-reported tools outside the prepared capability ceil
         reference: { transport: "widened", sessionId: "widened-session" },
         getState: () => ({ model: prepared.model, tools: ["read", "write"] }),
         getSessionStats: sessionStats,
+        getLastAssistant: () => undefined,
         subscribe() { return () => undefined; },
         async prompt() { prompted = true; return { assistant: { role: "assistant", content: [{ type: "text", text: "unexpected" }] } }; },
         async steer() {},
@@ -256,6 +260,7 @@ void test("prepares the resolved workflow system prompt path for external transp
       return {
         reference: { transport: "capture", sessionId: "system-prompt-path" },
         getState: () => ({ model: value.model, tools: value.tools }),
+        getLastAssistant: () => undefined,
         getSessionStats: sessionStats,
         subscribe: () => () => {},
         async prompt() { return { assistant: assistant("done") }; },
@@ -639,6 +644,34 @@ void test("keeps an accepted structured result when same-session continuation ab
   assert.equal(sessions, 1);
   assert.equal(prompts, 2);
   assert.equal(disposals, 1);
+});
+void test("does not overwrite a terminal result with a post-handoff assistant", async () => {
+  const completed = { ...assistant("original report"), stopReason: "stop" };
+  const messages: Array<{ role: string; content: unknown; stopReason?: string; usage?: typeof usage }> = [completed];
+  let listener: ((event: AgentSessionEvent) => void) | undefined;
+  let triggerHandoff: (() => void) | undefined;
+  let handoffPromise: Promise<void> | undefined;
+  let prompts = 0;
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({
+    transport: "local", session: { transport: "local", sessionId: "handoff-defense", locator: { sessionFile: "/sessions/handoff-defense.jsonl" } }, messages, getSessionStats: sessionStats,
+    subscribe(next) { listener = next; return () => { listener = undefined; }; },
+    async prompt() {
+      prompts += 1;
+      listener?.({ type: "turn_started" } as unknown as AgentSessionEvent);
+      triggerHandoff?.();
+      listener?.({ type: "message_end", message: completed } as AgentSessionEvent);
+      listener?.({ type: "turn_end", message: completed } as AgentSessionEvent);
+      await handoffPromise;
+    },
+    dispose() {},
+  })));
+  const result = await executor.execute("work", { label: "worker", workflowName: "flow", onAttempt: (attempt) => {
+    if (!attempt.handoff || !attempt.liveSession) return;
+    const handoff = attempt.handoff;
+    triggerHandoff = () => { handoffPromise = handoff.request(async () => { handoff.takeover(); messages[0] = assistant("replacement report"); }); };
+  } });
+  assert.equal(result.value, "original report");
+  assert.equal(prompts, 1);
 });
 
 void test("retries in fresh persisted sessions and reports terminal attempt history", async () => {

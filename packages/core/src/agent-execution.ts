@@ -105,6 +105,7 @@ function hasToolCall(message: unknown): boolean {
 }
 
 function latestAssistantHasToolCall(message: WorkflowAgentMessage | undefined): boolean { return hasToolCall(message); }
+function isTerminalAssistant(message: WorkflowAgentMessage | undefined): boolean { return Boolean(message) && message?.stopReason !== "aborted" && !hasToolCall(message); }
 
 type TerminalProviderError = { provider: string; model: string; error: string };
 function throwIfTerminalAssistantError(session: WorkflowAgentSession, message: WorkflowAgentMessage | undefined): void {
@@ -535,29 +536,35 @@ export class WorkflowAgentExecutor {
         if (setup.sessionInput.resourcePolicy) setupSummary = { ...setupSummary, disabledAgentResources: resourcePolicySummary(setup.sessionInput.resourcePolicy) };
         const activeSession = session;
         let lastAssistant: WorkflowAgentMessage | undefined;
+        let handoffBoundaryAssistant: WorkflowAgentMessage | undefined;
         const acceptAssistant = (candidate: WorkflowAgentMessage | undefined) => {
           if (isEmptyAbortedAssistant(candidate)) {
-            const previous = (activeSession as WorkflowAgentSession & { getLastAssistant?: () => WorkflowAgentMessage | undefined }).getLastAssistant?.();
+            const previous = activeSession.getLastAssistant();
             if (previous && !isEmptyAbortedAssistant(previous)) lastAssistant = previous;
           } else if (candidate) lastAssistant = candidate;
         };
-        const recoverTerminal = () => recoverTerminalProviderError(activeSession, options.label, options.providerErrorRecovery, async () => { try { acceptAssistant((await promptWithProviderPause(activeSession, providerContinuationPrompt, remaining(options.timeoutMs, started), attemptSignal, this.root.providerPause)).assistant); } catch (error) { acceptAssistant((activeSession as WorkflowAgentSession & { getLastAssistant?: () => WorkflowAgentMessage | undefined }).getLastAssistant?.() ?? lastAssistant); if (!hasSchemaResult()) throw error; } }, () => lastAssistant);
+        const recoverTerminal = () => recoverTerminalProviderError(activeSession, options.label, options.providerErrorRecovery, async () => { try { acceptAssistant((await promptWithProviderPause(activeSession, providerContinuationPrompt, remaining(options.timeoutMs, started), attemptSignal, this.root.providerPause)).assistant); } catch (error) { acceptAssistant(activeSession.getLastAssistant() ?? lastAssistant); if (!hasSchemaResult()) throw error; } }, () => lastAssistant);
         const promptAndRecover = async (prompt: string): Promise<void> => {
           let promptFailed = false;
           let promptError: unknown;
-          try { acceptAssistant((await promptWithProviderPause(activeSession, prompt, remaining(options.timeoutMs, started), attemptSignal, this.root.providerPause)).assistant); } catch (error) { acceptAssistant((activeSession as WorkflowAgentSession & { getLastAssistant?: () => WorkflowAgentMessage | undefined }).getLastAssistant?.() ?? lastAssistant); promptFailed = true; promptError = error; }
+          try { acceptAssistant((await promptWithProviderPause(activeSession, prompt, remaining(options.timeoutMs, started), attemptSignal, this.root.providerPause)).assistant); } catch (error) { acceptAssistant(activeSession.getLastAssistant() ?? lastAssistant); promptFailed = true; promptError = error; }
           const recovered = await recoverTerminal();
+          const preHandoffAssistant = handoffBoundaryAssistant;
+          handoffBoundaryAssistant = undefined;
           await handoff?.waitForResume();
-          const resumed = (activeSession as WorkflowAgentSession & { getLastAssistant?: () => WorkflowAgentMessage | undefined }).getLastAssistant?.();
-          acceptAssistant(resumed);
+          const resumed = activeSession.getLastAssistant();
+          const preservePreHandoffResult = Boolean(handoff?.transferred && isTerminalAssistant(preHandoffAssistant));
+          if (preservePreHandoffResult) lastAssistant = preHandoffAssistant;
+          else acceptAssistant(resumed);
           let handoffError: unknown;
-          if (handoff?.transferred && !hasSchemaResult() && (!resumed || resumed.stopReason === "aborted" || latestAssistantHasToolCall(resumed))) {
+          if (handoff?.transferred && !preservePreHandoffResult && !hasSchemaResult() && (!resumed || resumed.stopReason === "aborted" || latestAssistantHasToolCall(resumed))) {
             try { acceptAssistant((await promptWithProviderPause(activeSession, handoffContinuationPrompt, remaining(options.timeoutMs, started), attemptSignal, this.root.providerPause)).assistant); } catch (error) { handoffError = error; }
           }
           if (handoffError && !hasSchemaResult()) throw handoffError instanceof Error ? handoffError : new Error(typeof handoffError === "string" ? handoffError : "Herdr handoff continuation failed");
           if (promptFailed && !hasSchemaResult() && !recovered) throw promptError;
         };
         const handleSessionEvent = async (event: WorkflowAgentSessionEvent) => {
+          if (event.type === "turn_end" || event.type === "turnEnded") handoffBoundaryAssistant = event.message?.role === "assistant" ? event.message : activeSession.getLastAssistant() ?? lastAssistant;
           handoff?.observe(event);
           if (event.type === "turn_end" || event.type === "turnEnded") await handoff?.waitForTakeover();
           lastEventAt = Date.now();

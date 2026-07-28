@@ -41,7 +41,9 @@ export function breadcrumbLabel(identity, attempt = 1) {
 }
 
 function quote(value) { return `'${String(value).replace(/'/g, `'\\''`)}'`; }
-function createCommandFiles(prepared, prompt) {
+function hasToolCall(message) { return Array.isArray(message?.content) && message.content.some((part) => part && typeof part === "object" && part.type === "toolCall"); }
+function needsContinuation(message) { return !message || message.stopReason === "aborted" || hasToolCall(message); }
+function createCommandFiles(prepared, prompt, directPrompt) {
   const paths = [];
   const create = (kind, value) => {
     const path = join(tmpdir(), `pi-herdr-${kind}-${String(process.pid)}-${randomBytes(6).toString("hex")}.txt`);
@@ -52,7 +54,7 @@ function createCommandFiles(prepared, prompt) {
   const files = {
     systemPrompt: prepared.systemPrompt === undefined ? undefined : create("system-prompt", prepared.systemPrompt),
     appendPrompt: prepared.systemPromptAppend ? create("append-prompt", prepared.systemPromptAppend) : undefined,
-    prompt: prompt === undefined ? undefined : create("prompt", prompt),
+    prompt: prompt === undefined || directPrompt ? undefined : create("prompt", prompt),
   };
   return { ...files, command(value) { return `sh ${quote(create("command", `${value}\n`))}`; }, async close() { for (const path of paths) { try { unlinkSync(path); } catch { /* Cleanup is best effort after the child exits. */ } } } };
 }
@@ -127,7 +129,7 @@ async function createToolBridge(prepared) {
   } };
 }
 
-function sessionCommand(session, prepared, prompt, bridges, files) {
+function sessionCommand(session, prepared, prompt, bridges, files, directPrompt) {
   const source = sessionPath(session.reference);
   const sessionArg = source ? `--session ${quote(source)}` : `--session-id ${quote(session.reference.sessionId)}`;
   const model = `${prepared.model.provider}/${prepared.model.model}${prepared.model.thinking ? `:${prepared.model.thinking}` : ""}`;
@@ -143,7 +145,7 @@ function sessionCommand(session, prepared, prompt, bridges, files) {
   const extensions = prepared.resourcePolicy ? ` --no-extensions${allowedExtensions.map((path) => ` --extension ${quote(path)}`).join("")}${bridgeExtensions}` : bridgeExtensions;
   const trust = prepared.resourcePolicy?.projectTrusted === false ? " --no-approve" : prepared.resourcePolicy?.projectTrusted === true ? " --approve" : "";
   const environment = [prepared.agentDir ? `PI_CODING_AGENT_DIR=${quote(prepared.agentDir)}` : "", "PI_EXTENSIBLE_WORKFLOWS_HERDR_OWNER=1"].filter(Boolean).join(" ");
-  const message = prompt === undefined ? "" : ` @${quote(files.prompt)}`;
+  const message = prompt === undefined ? "" : directPrompt ? ` ${quote(prompt)}` : ` @${quote(files.prompt)}`;
   return `${environment} pi ${sessionArg} --model ${quote(model)}${tools}${systemPrompt}${appendPrompt}${skills}${extensions}${trust}${message}`;
 }
 
@@ -172,7 +174,7 @@ function createWorkflowWorkspaces(runner) {
   };
 }
 
-async function launchPane({ session, prepared, identity, run, attempt, runner, fullyInspectable, env, signal, prompt, workspaces, tuiIndex, tuiLabel, onStatus }) {
+async function launchPane({ session, prepared, identity, run, attempt, runner, fullyInspectable, env, signal, prompt, workspaces, tuiIndex, tuiLabel, directPrompt = false, onStatus }) {
   const label = fullyInspectable && Number.isInteger(tuiIndex) && tuiIndex > 0 && typeof tuiLabel === "string" && tuiLabel.trim() ? `#${String(tuiIndex)} ${tuiLabel}` : fullyInspectable ? breadcrumbLabel(identity, attempt) : prepared.sessionLabel;
   const bridge = await createToolBridge(prepared);
   let inlineBridge;
@@ -180,9 +182,9 @@ async function launchPane({ session, prepared, identity, run, attempt, runner, f
   let pane;
   try {
     inlineBridge = createInlineExtensionBridge(prepared);
-    commandFiles = createCommandFiles(prepared, prompt);
+    commandFiles = createCommandFiles(prepared, prompt, directPrompt);
     const bridges = [bridge, inlineBridge].filter(Boolean);
-    const command = commandFiles.command(sessionCommand(session, prepared, prompt, bridges, commandFiles));
+    const command = commandFiles.command(sessionCommand(session, prepared, prompt, bridges, commandFiles, directPrompt));
     const opened = fullyInspectable
       ? await workspaces.open(run, { cwd: prepared.cwd, tabLabel: label, command })
       : await openHerdrLivePane({ action: "live", cwd: prepared.cwd, command, paneId: env?.HERDR_PANE_ID }, runner);
@@ -256,7 +258,7 @@ function herdrTransport(agent, context, runner, fullyInspectable, env, workspace
           }
           let assistant = session.getLastAssistant?.();
           const resultSubmitted = prepared.resultTool && Array.isArray(assistant?.content) && assistant.content.some((part) => part && typeof part === "object" && part.type === "toolCall" && part.name === prepared.resultTool.name);
-          const incomplete = !assistant || assistant.stopReason === "aborted" || Array.isArray(assistant.content) && assistant.content.some((part) => part && typeof part === "object" && part.type === "toolCall");
+          const incomplete = needsContinuation(assistant);
           if (!resultSubmitted && incomplete) {
             await session.prompt("Continue the task from the current session state.");
             assistant = session.getLastAssistant?.();
@@ -368,6 +370,7 @@ export function createHerdrExtension(options = {}) {
           const label = typeof context.agent.label === "string" && context.agent.label.trim() ? context.agent.label : typeof context.agent.name === "string" && context.agent.name.trim() ? context.agent.name : "workflow agent";
           const setWorkingMessage = (state) => context.ui.setWorkingMessage?.(state ? `${label}: ${state}` : undefined);
           await handoff.request(async () => {
+            if (!needsContinuation(session.getLastAssistant?.())) return;
             let opened;
             let suspended = false;
             let reportedWorking = false;
@@ -386,7 +389,7 @@ export function createHerdrExtension(options = {}) {
                 await session.suspendForHandoff();
                 suspended = true;
               }
-              opened = await launchPane({ session, prepared, identity: { structuralPath: context.agent.structuralPath ?? [], parentBreadcrumb: context.agent.parentBreadcrumb, callSite: context.agent.label ?? context.agent.name, occurrence: context.attempt.attempt }, attempt: context.attempt.attempt, runner, fullyInspectable: false, env, signal: context.signal, prompt: "Continue the current workflow task from this session.", onStatus: reportStatus });
+              opened = await launchPane({ session, prepared, identity: { structuralPath: context.agent.structuralPath ?? [], parentBreadcrumb: context.agent.parentBreadcrumb, callSite: context.agent.label ?? context.agent.name, occurrence: context.attempt.attempt }, attempt: context.attempt.attempt, runner, fullyInspectable: false, env, signal: context.signal, prompt: "Continue the current workflow task from this session.", directPrompt: true, onStatus: reportStatus });
               handoff.takeover();
               if (!session.suspendForHandoff) {
                 await session.abort?.();
