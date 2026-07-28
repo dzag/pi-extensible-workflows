@@ -365,9 +365,12 @@ export function createHerdrExtension(options = {}) {
           const prepared = context.prepared;
           const handoff = context.handoff;
           if (!session || !prepared || !handoff) return;
+          const label = typeof context.agent.label === "string" && context.agent.label.trim() ? context.agent.label : typeof context.agent.name === "string" && context.agent.name.trim() ? context.agent.name : "workflow agent";
+          const setWorkingMessage = (state) => context.ui.setWorkingMessage?.(state ? `${label}: ${state}` : undefined);
           await handoff.request(async () => {
             let opened;
             let suspended = false;
+            let reportedWorking = false;
             try {
               if (session.suspendForHandoff) {
                 await session.suspendForHandoff();
@@ -379,9 +382,16 @@ export function createHerdrExtension(options = {}) {
                 await session.abort?.();
                 suspended = true;
               }
+              setWorkingMessage("working");
+              reportedWorking = true;
               await opened.monitor;
             } finally {
-              if (suspended) await session.resumeFromHandoff?.();
+              if (reportedWorking) setWorkingMessage("idle");
+              try {
+                if (suspended) await session.resumeFromHandoff?.();
+              } finally {
+                if (reportedWorking) setWorkingMessage();
+              }
             }
           });
         },
