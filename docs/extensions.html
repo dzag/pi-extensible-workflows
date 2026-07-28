@@ -25,7 +25,6 @@
       <a href="#start-here">Start here</a>
       <a href="#registration">Registration contract</a>
       <a href="#functions">Registered functions</a>
-      <a href="#variables">Run-scoped variables</a>
       <a href="#hooks">Agent setup hooks</a>
       <a href="#model-aliases">Dynamic model aliases</a>
       <a href="#resources">Other resources</a>
@@ -36,7 +35,7 @@
     <article class="prose">
       <p class="eyebrow">Extension author path</p>
       <h1>Build trusted workflow extensions</h1>
-      <p class="lead">Use this page to register reusable workflow functions, run-scoped variables, dynamic model aliases, and trusted per-agent setup hooks. It is the canonical authoring reference for the shipped extension API.</p>
+      <p class="lead">Use this page to register reusable workflow functions, dynamic model aliases, and trusted per-agent setup hooks. It is the canonical authoring reference for the shipped extension API.</p>
       <section id="start-here">
         <h2>Start here</h2>
         <p>A workflow extension is trusted TypeScript or JavaScript loaded by Pi. Use one when a workflow capability should be named, discoverable, schema-validated, and reusable across launches. Put the file in a Pi extension location such as <code>~/.pi/agent/extensions/review-loop.ts</code>, then load it through Pi. The package import is <code>pi-extensible-workflows</code>.</p>
@@ -63,7 +62,7 @@
       </section>
       <section id="registration">
         <h2>Registration contract</h2>
-        <p><code>WorkflowExtension</code> is the only top-level registration object. Its own keys are strict, and at least one of <code>functions</code>, <code>variables</code>, <code>modelAliases</code>, <code>agentSetupHooks</code>, or <code>agentAttemptActions</code> must contain an entry. The accepted fields are:</p>
+        <p><code>WorkflowExtension</code> is the only top-level registration object. Its own keys are strict, and at least one of <code>functions</code>, <code>modelAliases</code>, <code>agentSetupHooks</code>, or <code>agentAttemptActions</code> must contain an entry. The accepted fields are:</p>
         <div class="table-wrap"><table>
           <thead><tr><th>Field</th><th>Type</th><th>Contract</th></tr></thead>
           <tbody>
@@ -71,14 +70,13 @@
             <tr><td><code>headline</code></td><td>string</td><td>Required non-empty short label shown in trusted catalog details.</td></tr>
             <tr><td><code>description</code></td><td>string</td><td>Required non-empty extension description. Keep it safe for catalog metadata.</td></tr>
             <tr><td><code>functions</code></td><td>record of <code>WorkflowFunction</code></td><td>Optional named reusable functions. Names must be identifier-shaped and globally unique.</td></tr>
-            <tr><td><code>variables</code></td><td>record of <code>WorkflowVariable</code></td><td>Optional named launch-scoped globals. Names share the function namespace.</td></tr>
             <tr><td><code>modelAliases</code></td><td>record of <code>WorkflowModelAlias</code></td><td>Optional named dynamic model resolvers. Alias names are case-sensitive and must match <code>[A-Za-z][A-Za-z0-9_-]*</code>; names are unique across extensions.</td></tr>
             <tr><td><code>agentSetupHooks</code></td><td>record of <code>AgentSetupHook</code></td><td>Optional trusted hooks. Hook names must be identifiers and unique across extensions.</td></tr>
             <tr><td><code>agentAttemptActions</code></td><td>record of <code>AgentAttemptAction</code></td><td>Optional collision-checked actions for the selected agent's latest attempt in <code>/workflow</code>. Visibility is synchronous; the live session is supplied only while that attempt is active.</td></tr>
             <tr><td><code>roleDirectories</code></td><td>array of absolute paths or <code>file:</code> URLs</td><td>Optional packaged role directories. They are scanned as extension defaults; standard global and trusted project roles override matching names, while duplicate extension role names are rejected.</td></tr>
           </tbody>
         </table></div>
-        <p>Unknown top-level keys are rejected. The removed <code>workflows</code> format is not accepted. Function and variable names cannot be reserved globals such as <code>agent</code>, <code>args</code>, <code>JSON</code>, <code>extensions</code>, or <code>workflow_catalog</code>, and names beginning with <code>__pi_extensible_workflows_</code> are rejected. A function-variable collision in one extension or across extensions is a <code>GLOBAL_COLLISION</code>; duplicate hook or model-alias names are <code>DUPLICATE_NAME</code> errors.</p>
+        <p>Unknown top-level keys are rejected. The removed <code>workflows</code> and <code>variables</code> formats are not accepted. Function names cannot be reserved globals such as <code>agent</code>, <code>args</code>, <code>JSON</code>, <code>extensions</code>, or <code>workflow_catalog</code>, and names beginning with <code>__pi_extensible_workflows_</code> are rejected. Duplicate function names across extensions are <code>GLOBAL_COLLISION</code>; duplicate hook or model-alias names are <code>DUPLICATE_NAME</code> errors.</p>
         <p>Register from the default Pi extension factory. The package begins a fresh loading registry for a new session-loading cycle, freezes registration during <code>session_start</code>, and resets it during shutdown. Calling <code>registerWorkflowExtension()</code> after the freeze fails with <code>REGISTRY_FROZEN</code>. This lifecycle is why module-top-level registration is not the supported pattern.</p>
       </section>
       <section id="functions">
@@ -179,31 +177,6 @@
 <span class="tok-punctuation">}</span><span class="tok-punctuation">;</span>
 <span class="tok-keyword">export</span> <span class="tok-keyword">default</span> <span class="tok-keyword">function</span> extension<span class="tok-punctuation">()</span> <span class="tok-punctuation">{</span> <span class="tok-function">registerWorkflowExtension</span><span class="tok-punctuation">(</span>compositionExtension<span class="tok-punctuation">)</span><span class="tok-punctuation">;</span> <span class="tok-punctuation">}</span></code></pre>
       </section>
-      <section id="variables">
-        <h2>Run-scoped variables</h2>
-        <p>A <code>WorkflowVariable</code> has exactly <code>description</code>, <code>schema</code>, and <code>resolve(run)</code>. The resolver receives a read-only <code>WorkflowRunContext</code>, may return a JSON value or promise, and must satisfy its schema. Resolvers are evaluated concurrently before workflow execution starts. If one fails, the run fails and the shared cancellation signal aborts the other resolvers.</p>
-        <p>Values are recomputed for a cold resume rather than read from the function journal. They are not persisted as catalog metadata. Once injected into a sandbox, a variable is deeply frozen and exposed as a read-only global. It is available to inline scripts and registered-function launch scripts through the workflow global scope, not as a property on <code>WorkflowFunctionContext</code>.</p>
-        <h3>Complete resolver and use as a workflow global</h3>
-        <pre><code class="language-typescript"><span class="tok-keyword">import</span> <span class="tok-punctuation">{</span> registerWorkflowExtension<span class="tok-punctuation">,</span> <span class="tok-keyword">type</span> WorkflowExtension <span class="tok-punctuation">}</span> <span class="tok-keyword">from</span> <span class="tok-string">"pi-extensible-workflows"</span><span class="tok-punctuation">;</span>
-<span class="tok-keyword">const</span> runLabelExtension<span class="tok-punctuation">:</span> WorkflowExtension <span class="tok-punctuation">=</span> <span class="tok-punctuation">{</span>
-  <span class="tok-property">version</span><span class="tok-punctuation">:</span> <span class="tok-string">"1.0.0"</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">headline</span><span class="tok-punctuation">:</span> <span class="tok-string">"Run labels"</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">description</span><span class="tok-punctuation">:</span> <span class="tok-string">"Provides the current run label."</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">variables</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
-    <span class="tok-property">runLabel</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
-      <span class="tok-property">description</span><span class="tok-punctuation">:</span> <span class="tok-string">"The workflow name and durable run ID."</span><span class="tok-punctuation">,</span>
-      <span class="tok-property">schema</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span> <span class="tok-keyword">type</span><span class="tok-punctuation">:</span> <span class="tok-string">"string"</span> <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
-      <span class="tok-function">resolve</span><span class="tok-punctuation">(</span>run<span class="tok-punctuation">)</span> <span class="tok-punctuation">{</span>
-        <span class="tok-keyword">if</span> <span class="tok-punctuation">(</span>run<span class="tok-punctuation">.</span>signal<span class="tok-punctuation">.</span>aborted<span class="tok-punctuation">)</span> <span class="tok-keyword">throw</span> <span class="tok-keyword">new</span> <span class="tok-function">Error</span><span class="tok-punctuation">(</span><span class="tok-string">"Run cancelled"</span><span class="tok-punctuation">)</span><span class="tok-punctuation">;</span>
-        <span class="tok-keyword">return</span> run<span class="tok-punctuation">.</span>workflow<span class="tok-punctuation">.</span>name <span class="tok-punctuation">+</span> <span class="tok-string">":"</span> <span class="tok-punctuation">+</span> run<span class="tok-punctuation">.</span>runId<span class="tok-punctuation">;</span>
-      <span class="tok-punctuation">}</span>
-    <span class="tok-punctuation">}</span>
-  <span class="tok-punctuation">}</span>
-<span class="tok-punctuation">}</span><span class="tok-punctuation">;</span>
-<span class="tok-keyword">export</span> <span class="tok-keyword">default</span> <span class="tok-keyword">function</span> extension<span class="tok-punctuation">()</span> <span class="tok-punctuation">{</span> <span class="tok-function">registerWorkflowExtension</span><span class="tok-punctuation">(</span>runLabelExtension<span class="tok-punctuation">)</span><span class="tok-punctuation">;</span> <span class="tok-punctuation">}</span></code></pre>
-        <pre><code class="language-javascript"><span class="tok-keyword">return</span> <span class="tok-punctuation">{</span> <span class="tok-property">label</span><span class="tok-punctuation">:</span> runLabel <span class="tok-punctuation">}</span><span class="tok-punctuation">;</span></code></pre>
-        <p>For a launch named <code>reviewTask</code>, a resolver can return a value such as <code>reviewTask:550e8400-e29b-41d4-a716-446655440000</code>. Do not use resolver values as secrets or as a replacement for durable journal state.</p>
-      </section>
       <section id="model-aliases">
         <h2>Dynamic model aliases</h2>
         <p><code>modelAliases</code> registers trusted host resolvers for model names. A <code>WorkflowModelAlias</code> has one <code>resolve(context)</code> function, which may be synchronous or asynchronous and returns a target string in the normal <code>provider/model[:thinking]</code> syntax or another alias. The read-only context contains <code>cwd</code>, <code>projectTrusted</code>, the selected <code>rootModel</code>, <code>knownModels</code>, <code>availableModels</code>, and a launch or resume <code>AbortSignal</code>.</p>
@@ -272,7 +245,7 @@
       </section>
       <section id="resources">
         <h2>Other extension-provided resources</h2>
-        <p>The shipped <code>WorkflowExtension</code> has six capability fields: functions, variables, dynamic model aliases, agent setup hooks, latest-attempt actions, and packaged role directories. Role directories use absolute filesystem paths or <code>file:</code> URLs and provide default role files; standard global and trusted project roles override matching names.</p>
+        <p>The shipped <code>WorkflowExtension</code> has five capability fields: functions, dynamic model aliases, agent setup hooks, latest-attempt actions, and packaged role directories. Role directories use absolute filesystem paths or <code>file:</code> URLs and provide default role files; standard global and trusted project roles override matching names.</p>
         <p>Do not document proposed or lower-level resources as extension capabilities. A role may restrict workflow-agent skills and extension sources through its <code>disabledAgentResources</code> frontmatter, but that is role policy, not a <code>WorkflowExtension</code> field.</p>
       </section>
       <section id="catalog">
@@ -282,13 +255,13 @@
         <div class="table-wrap"><table>
           <thead><tr><th>API</th><th>Result</th></tr></thead>
           <tbody>
-            <tr><td><code>workflowCatalog()</code></td><td>Full trusted catalog of function, variable, and alias metadata, including extension provenance and schemas. Trusted callers can inspect effective static targets; dynamic resolver targets are not executed by catalog discovery.</td></tr>
-            <tr><td><code>workflowCatalogIndex()</code></td><td>Compact metadata: function names, descriptions, input schemas, variable names, descriptions, schemas, and static or dynamic alias names with kind and provenance.</td></tr>
-            <tr><td><code>workflowCatalogDetail(name)</code></td><td>One full function, variable, or alias definition. Missing names return a <code>NOT_FOUND</code> result object instead of throwing a workflow error.</td></tr>
+            <tr><td><code>workflowCatalog()</code></td><td>Full trusted catalog of function and alias metadata, including extension provenance and schemas. Trusted callers can inspect effective static targets; dynamic resolver targets are not executed by catalog discovery.</td></tr>
+            <tr><td><code>workflowCatalogIndex()</code></td><td>Compact metadata: function names, descriptions, input schemas, and static or dynamic alias names with kind and provenance.</td></tr>
+            <tr><td><code>workflowCatalogDetail(name)</code></td><td>One full function or alias definition. Missing names return a <code>NOT_FOUND</code> result object instead of throwing a workflow error.</td></tr>
             <tr><td><code>registeredWorkflowFunctions()</code></td><td>Trusted host access to registered function implementations keyed by name. This is not agent-facing metadata and must not be exposed to untrusted code.</td></tr>
           </tbody>
         </table></div>
-        <p>The <code>workflow_catalog</code> tool returns the compact index by default. Pass <code>{ "name": "reviewTask" }</code> to request one full detail entry. Agents receive names, descriptions, schemas, and alias provenance, never implementations, source, resolver values, or opaque setup data. The tool is registered only when the active registry has functions, variables, aliases, or effective settings.</p>
+        <p>The <code>workflow_catalog</code> tool returns the compact index by default. Pass <code>{ "name": "reviewTask" }</code> to request one full detail entry. Agents receive names, descriptions, schemas, and alias provenance, never implementations, source, resolver values, or opaque setup data. The tool is registered only when the active registry has functions, aliases, or effective settings.</p>
         <h3>Trusted host discovery</h3>
         <pre><code class="language-typescript"><span class="tok-keyword">import</span> <span class="tok-punctuation">{</span> workflowCatalog<span class="tok-punctuation">,</span> workflowCatalogIndex<span class="tok-punctuation">,</span> workflowCatalogDetail<span class="tok-punctuation">,</span> registeredWorkflowFunctions <span class="tok-punctuation">}</span> <span class="tok-keyword">from</span> <span class="tok-string">"pi-extensible-workflows"</span><span class="tok-punctuation">;</span>
 <span class="tok-keyword">const</span> index <span class="tok-punctuation">=</span> <span class="tok-function">workflowCatalogIndex</span><span class="tok-punctuation">()</span><span class="tok-punctuation">;</span>
@@ -296,7 +269,7 @@
 <span class="tok-keyword">const</span> detail <span class="tok-punctuation">=</span> <span class="tok-function">workflowCatalogDetail</span><span class="tok-punctuation">(</span><span class="tok-string">"reviewTask"</span><span class="tok-punctuation">)</span><span class="tok-punctuation">;</span>
 <span class="tok-keyword">const</span> implementations <span class="tok-punctuation">=</span> <span class="tok-function">registeredWorkflowFunctions</span><span class="tok-punctuation">()</span><span class="tok-punctuation">;</span>
 <span class="tok-keyword">if</span> <span class="tok-string">("error"</span> <span class="tok-keyword">in</span> detail<span class="tok-punctuation">)</span> <span class="tok-function">console</span><span class="tok-punctuation">.</span><span class="tok-function">warn</span><span class="tok-punctuation">(</span>detail<span class="tok-punctuation">.</span>error<span class="tok-punctuation">.</span>message<span class="tok-punctuation">)</span><span class="tok-punctuation">;</span>
-<span class="tok-keyword">else</span> <span class="tok-function">console</span><span class="tok-punctuation">.</span><span class="tok-function">log</span><span class="tok-punctuation">(</span>index<span class="tok-punctuation">.</span>functions<span class="tok-punctuation">,</span> fullCatalog<span class="tok-punctuation">.</span>variables<span class="tok-punctuation">,</span> implementations<span class="tok-punctuation">)</span><span class="tok-punctuation">;</span></code></pre>
+<span class="tok-keyword">else</span> <span class="tok-function">console</span><span class="tok-punctuation">.</span><span class="tok-function">log</span><span class="tok-punctuation">(</span>index<span class="tok-punctuation">.</span>functions<span class="tok-punctuation">,</span> implementations<span class="tok-punctuation">)</span><span class="tok-punctuation">;</span></code></pre>
       </section>
       <section id="errors">
         <h2>Validation, errors, and troubleshooting</h2>
@@ -305,12 +278,12 @@
           <tbody>
             <tr><td><code>INVALID_METADATA</code></td><td>Missing or empty extension metadata, unknown keys, malformed capability records, invalid function fields, or an obsolete <code>workflows</code> field. Keep contracts exact.</td></tr>
             <tr><td><code>INVALID_SCHEMA</code></td><td>A schema is not a plain JSON-compatible schema object. Use JSON values only and provide a recognized schema shape.</td></tr>
-            <tr><td><code>GLOBAL_COLLISION</code></td><td>A function or variable name is reserved or already registered. Rename it; functions and variables share one namespace.</td></tr>
+            <tr><td><code>GLOBAL_COLLISION</code></td><td>A function name is reserved or already registered. Rename it.</td></tr>
             <tr><td><code>DUPLICATE_NAME</code></td><td>An agent setup hook or model alias name is already registered. Choose a globally unique name.</td></tr>
             <tr><td><code>UNKNOWN_MODEL</code>, <code>CONFIG_ERROR</code></td><td>A model alias target is invalid, cyclic, unavailable, or its resolver failed. The error identifies the alias and registering extension; fix the resolver or inventory-dependent target.</td></tr>
             <tr><td><code>REGISTRY_FROZEN</code></td><td>Registration ran after <code>session_start</code>. Move registration into the extension factory.</td></tr>
             <tr><td><code>MISSING_WORKFLOW</code></td><td>A launch or <code>context.invoke()</code> names a function that is not in the active registry, or uses a qualified name.</td></tr>
-            <tr><td><code>RESULT_INVALID</code></td><td>Function input or output, variable output, or a replayed value does not satisfy its schema. Check the schema and return a JSON value.</td></tr>
+            <tr><td><code>RESULT_INVALID</code></td><td>Function input or output, or a replayed value does not satisfy its schema. Check the schema and return a JSON value.</td></tr>
             <tr><td><code>AGENT_FAILED</code>, <code>AGENT_TIMEOUT</code>, <code>SHELL_FAILED</code>, <code>WORKTREE_FAILED</code></td><td>A context operation failed. Bound side effects, honor cancellation, and use stable named worktree scopes.</td></tr>
             <tr><td><code>AGENT_RESULT_COLLECTED</code></td><td>A direct nested-agent result was already delivered and collected. Nested results are one-shot; do not retry a successful <code>get_subagent_result</code> call.</td></tr>
             <tr><td><code>CANCELLED</code></td><td>The workflow, alias resolver, or setup signal was aborted. Propagate the signal and stop resolver or hook work promptly.</td></tr>
@@ -318,16 +291,15 @@
             <tr><td>Catalog <code>NOT_FOUND</code></td><td><code>workflowCatalogDetail(name)</code> and <code>workflow_catalog</code> return <code>{ error: { code: "NOT_FOUND", ... } }</code>. It is a discovery result, not a thrown workflow error.</td></tr>
           </tbody>
         </table></div>
-        <p>Host failures are <code>WorkflowError</code> values with stable codes. A thrown ordinary error from a variable resolver becomes an <code>INTERNAL_ERROR</code> tagged with the variable name; a thrown hook error stops that agent setup. Inspect the run artifacts and catalog after correcting registration, schema, trust, or resume state.</p>
+        <p>Host failures are <code>WorkflowError</code> values with stable codes. A thrown hook error stops that agent setup. Inspect the run artifacts and catalog after correcting registration, schema, trust, or resume state.</p>
       </section>
       <section id="best-practices">
         <h2>Best practices</h2>
         <ul>
           <li>Choose stable, descriptive, identifier-shaped names and never rely on collisions or load order.</li>
           <li>Use strict object input and output schemas, with required fields and <code>additionalProperties: false</code> where appropriate.</li>
-          <li>Keep inputs, variables, outputs, schemas, options, and metadata JSON-compatible. Never place secrets in descriptions, schemas, catalog data, logs, or lifecycle payloads.</li>
+          <li>Keep inputs, outputs, schemas, options, and metadata JSON-compatible. Never place secrets in descriptions, schemas, catalog data, logs, or lifecycle payloads.</li>
           <li>Assume a function can replay. Prefer verification and bounded side effects; make external mutations idempotent when possible.</li>
-          <li>Make variable resolvers bounded, concurrent-safe, and cancellation-aware. Return only the declared JSON value.</li>
           <li>Keep setup hooks minimal and explicit. Treat them as a trusted policy override, and check opt-in options before mutating an agent.</li>
           <li>Use <code>context.invoke()</code> for registered-function composition instead of importing another registered implementation.</li>
           <li>Document only shipped author APIs. Keep role-file format and lifecycle-event details on the developer page, and link to those canonical references instead of copying their contracts.</li>

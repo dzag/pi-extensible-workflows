@@ -91,7 +91,7 @@
           <li><code>workflow_retry</code> creates a linked child for an explicitly failed run, replays its completed journal operations, and preserves its launch mode unless overridden.</li>
           <li><code>workflow_respond</code> approves or rejects a pending checkpoint or budget decision.</li>
           <li><code>workflow_stop</code> stops an active workflow run by ID.</li>
-          <li><code>workflow_catalog</code> lists registered functions, variables, and model aliases; it is registered only when the active registry has one of these entries.</li>
+          <li><code>workflow_catalog</code> lists registered functions and model aliases; it is registered only when the active registry has one of these entries.</li>
           <li><code>/workflow</code> lists and controls runs in the current Pi session.</li>
         </ul>
         <h3><code>workflow</code> parameters</h3>
@@ -193,7 +193,7 @@
       </section>
       <section id="extensions">
         <h2>Extensions, reusable functions, and roles</h2>
-        <p>Trusted Pi extensions can register reusable workflow functions, run-scoped variables, and per-agent setup hooks. The complete field-level authoring contract, validation rules, replay semantics, and copy-pasteable examples now live on the dedicated <a href="extensions.html">Extensions page</a>.</p>
+        <p>Trusted Pi extensions can register reusable workflow functions and per-agent setup hooks. The complete field-level authoring contract, validation rules, replay semantics, and copy-pasteable examples now live on the dedicated <a href="extensions.html">Extensions page</a>.</p>
         <p>This anchor remains for compatibility with existing links. Keep role-file format documentation on this page and use the <a href="extensions.html#resources">extension resources section</a> for the boundary between author-facing extension APIs, roles, and settings-backed model aliases.</p>
         <h3 id="roles">Role files</h3>
         <p>Global roles live under <code>&lt;agentDir&gt;/pi-extensible-workflows/roles/&lt;name&gt;.md</code>, defaulting to <code>~/.pi/agent/pi-extensible-workflows/roles/&lt;name&gt;.md</code>; set <code>PI_CODING_AGENT_DIR</code> to change it. Trusted project roles live under <code>&lt;cwd&gt;/.pi/pi-extensible-workflows/roles/&lt;name&gt;.md</code>. A workflow extension can provide packaged defaults with <code>roleDirectories</code>, using absolute filesystem paths or <code>file:</code> URLs such as <code>new URL("./roles", import.meta.url)</code>; global and trusted project roles override extension roles with the same name. Each registered extension directory must exist and be a directory, and duplicate role names across extension directories are rejected rather than resolved by load order.

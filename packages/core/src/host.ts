@@ -5,7 +5,6 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type, type Api, type Model } from "@earendil-works/pi-ai";
-import { Value } from "typebox/value";
 import { copyToClipboard, getAgentDir, ModelSelectorComponent, SettingsManager, truncateToVisualLines, type ExtensionAPI, type ExtensionUIContext, type ModelRuntime, type Theme } from "@earendil-works/pi-coding-agent";
 import { FairAgentScheduler, WorkflowAgentExecutor, localAgentTransport, type AgentActivity, type AgentAttempt, type AgentDefinition, type AgentProgress, type AgentProviderFailure, type AgentProviderRecovery } from "./agent-execution.js";
 import { acquireSessionLease, listPersistedSessionIds, listRunIds, RunStore, SessionLease, structuralPath as operationPath } from "./persistence.js";
@@ -16,7 +15,7 @@ import { launchScriptForSnapshot, loadAgentDefinitions, preflight, resolveAgentR
 import { beginWorkflowExtensionLoading, loadingRegistry, resetWorkflowRegistry, type WorkflowRegistryApi } from "./registry.js";
 import { agentIdentityPath, agentWorktree, encoded, executeShellCommand, persistActiveAgentAttempt, persistAgentAttempts, readShellResult, runWorkflow, shellIdentityPath } from "./execution.js";
 import { openWorkflowArtifact, workflowPromptArtifact, workflowResultArtifact, workflowScriptArtifact, type WorkflowArtifact } from "./workflow-artifacts.js";
-import { ERROR_CODES, LAUNCH_SNAPSHOT_IDENTITY_VERSION, WORKFLOW_AGENT_STALL_THRESHOLD_MS, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentAttemptActionContext, type AgentAttemptSummary, type AgentOptions, type AgentRecord, type AgentResourcePolicy, type AgentTransport, type BudgetApprovalRequest, type BudgetEvent, type JsonValue, type LaunchSnapshot, type ModelSpec, type RunState, type ShellIdentity, type ShellOptions, type ShellResult, type WorkflowBridge, type WorkflowCatalogFunction, type WorkflowCatalogIndex, type WorkflowCatalogVariable, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowFailureAgent, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowExecution, type WorkflowMetadata, type WorkflowModelAliasResolverContext, type WorkflowRetryProvenance, type WorkflowRunContext, type WorkflowSettings, type WorkflowSettingsResolution, type WorkflowSiblingAgent, type WorkflowWorktreeReference } from "./types.js";
+import { ERROR_CODES, LAUNCH_SNAPSHOT_IDENTITY_VERSION, WORKFLOW_AGENT_STALL_THRESHOLD_MS, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentAttemptActionContext, type AgentAttemptSummary, type AgentOptions, type AgentRecord, type AgentResourcePolicy, type AgentTransport, type BudgetApprovalRequest, type BudgetEvent, type JsonValue, type LaunchSnapshot, type ModelSpec, type RunState, type ShellIdentity, type ShellOptions, type ShellResult, type WorkflowBridge, type WorkflowCatalogFunction, type WorkflowCatalogIndex, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowFailureAgent, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowExecution, type WorkflowMetadata, type WorkflowModelAliasResolverContext, type WorkflowRetryProvenance, type WorkflowRunContext, type WorkflowSettings, type WorkflowSettingsResolution, type WorkflowSiblingAgent, type WorkflowWorktreeReference } from "./types.js";
 const SETTLED_AGENT_STATES: ReadonlySet<import("./types.js").AgentState> = new Set(["completed", "failed", "cancelled"]);
 const INTERNAL_WORKFLOW_TOOLS: readonly string[] = ["workflow", "workflow_respond", "workflow_stop", "workflow_status", "workflow_resume", "workflow_retry", "workflow_catalog"];
 const HARD_TERMINAL_RUN_STATES: ReadonlySet<string> = new Set(["completed", "failed", "stopped"]);
@@ -678,15 +677,11 @@ function catalogResultValue(result: CatalogToolResult): unknown {
 }
 
 function isCatalogIndex(value: unknown): value is WorkflowCatalogIndex {
-  return object(value) && Array.isArray(value.functions) && Array.isArray(value.variables);
+  return object(value) && Array.isArray(value.functions);
 }
 
 function isCatalogFunction(value: unknown): value is WorkflowCatalogFunction {
   return object(value) && typeof value.name === "string" && typeof value.description === "string" && object(value.input) && object(value.output);
-}
-
-function isCatalogVariable(value: unknown): value is WorkflowCatalogVariable {
-  return object(value) && typeof value.name === "string" && typeof value.description === "string" && object(value.schema);
 }
 
 function isCatalogError(value: unknown): value is { error: { message: string } } {
@@ -710,9 +705,6 @@ function formatCatalogIndex(catalog: WorkflowCatalogIndex, theme: Theme): string
     catalogSectionTitle("Functions", catalog.functions.length, theme),
     ...catalogIndexEntries(catalog.functions, theme),
     "",
-    catalogSectionTitle("Variables", catalog.variables.length, theme),
-    ...catalogIndexEntries(catalog.variables, theme),
-    "",
     catalogSectionTitle("Model aliases", aliases.length, theme),
     ...aliasLines,
   ].join("\n");
@@ -723,19 +715,17 @@ function catalogSchemaLines(schema: unknown, theme: Theme): string[] {
   return json.split("\n").map((line) => `  ${theme.fg("toolOutput", line)}`);
 }
 
-function formatCatalogDetail(value: WorkflowCatalogFunction | WorkflowCatalogVariable | import("./types.js").WorkflowCatalogModelAlias, expanded: boolean, theme: Theme): string {
+function formatCatalogDetail(value: WorkflowCatalogFunction | import("./types.js").WorkflowCatalogModelAlias, expanded: boolean, theme: Theme): string {
   if ("kind" in value) return [theme.fg("accent", theme.bold("Model alias")), `  ${theme.fg("accent", value.name)}  ${theme.fg("toolOutput", `${value.kind} · ${value.provenance}`)}`].join("\n");
-  const kind = "input" in value ? "Function" : "Variable";
+  const kind = "Function";
   if (!expanded) return [theme.fg("accent", theme.bold(kind)), `  ${theme.fg("accent", value.name)}  ${theme.fg("toolOutput", catalogText(value.description))}`, `  ${theme.fg("muted", "version")}: ${theme.fg("toolOutput", value.version)}  ${theme.fg("muted", "headline")}: ${theme.fg("toolOutput", catalogText(value.headline))}`].join("\n");
-  const lines = [theme.fg("accent", theme.bold(`${kind}: ${value.name}`)), `${theme.fg("muted", "description")}: ${theme.fg("toolOutput", value.description)}`, "", theme.fg("accent", theme.bold("Extension")), `  ${theme.fg("muted", "version")}: ${theme.fg("toolOutput", value.version)}`, `  ${theme.fg("muted", "headline")}: ${theme.fg("toolOutput", value.headline)}`, `  ${theme.fg("muted", "description")}: ${theme.fg("toolOutput", value.extensionDescription)}`, "", theme.fg("accent", theme.bold("Schema"))];
-  if ("input" in value) lines.push(theme.fg("muted", "Input schema"), ...catalogSchemaLines(value.input, theme), "", theme.fg("muted", "Output schema"), ...catalogSchemaLines(value.output, theme));
-  else lines.push(theme.fg("muted", "Variable schema"), ...catalogSchemaLines(value.schema, theme));
+  const lines = [theme.fg("accent", theme.bold(`${kind}: ${value.name}`)), `${theme.fg("muted", "description")}: ${theme.fg("toolOutput", value.description)}`, "", theme.fg("accent", theme.bold("Extension")), `  ${theme.fg("muted", "version")}: ${theme.fg("toolOutput", value.version)}`, `  ${theme.fg("muted", "headline")}: ${theme.fg("toolOutput", catalogText(value.headline))}`, `  ${theme.fg("muted", "description")}: ${theme.fg("toolOutput", value.extensionDescription)}`, "", theme.fg("accent", theme.bold("Schema")), theme.fg("muted", "Input schema"), ...catalogSchemaLines(value.input, theme), "", theme.fg("muted", "Output schema"), ...catalogSchemaLines(value.output, theme)];
   return lines.join("\n");
 }
 
 function formatWorkflowCatalog(value: unknown, expanded: boolean, theme: Theme): string {
   if (isCatalogIndex(value)) return formatCatalogIndex(value, theme);
-  if (isCatalogFunction(value) || isCatalogVariable(value)) return formatCatalogDetail(value, expanded, theme);
+  if (isCatalogFunction(value)) return formatCatalogDetail(value, expanded, theme);
   if (object(value) && typeof value.name === "string" && (value.kind === "static" || value.kind === "dynamic")) return formatCatalogDetail(value as unknown as import("./types.js").WorkflowCatalogModelAlias, expanded, theme);
   if (isCatalogError(value)) return theme.fg("error", value.error.message);
   return theme.fg("error", "The workflow catalog returned an invalid result.");
@@ -1361,24 +1351,6 @@ function workflowRunContext(cwd: string, sessionId: string, runId: string, workf
   return Object.freeze({ cwd, sessionId, runId, workflow: deepFreeze(structuredClone(workflow)), args: deepFreeze(structuredClone(args)), signal });
 }
 
-async function resolveWorkflowVariables(run: Readonly<WorkflowRunContext>, controller: AbortController, registry: WorkflowRegistryApi): Promise<Readonly<Record<string, JsonValue>>> {
-  let first: WorkflowError | undefined;
-  const tasks = registry.variables().map(async ({ name, variable }) => {
-    try {
-      const result: unknown = await variable.resolve(run);
-      if (!jsonValue(result) || !Value.Check(variable.schema, result)) fail("RESULT_INVALID", `Invalid output from ${name}`);
-      return [name, deepFreeze(structuredClone(result))] as const;
-    } catch (error) {
-      const typed = errorCode(error) ? new WorkflowError(errorCode(error) as WorkflowErrorCode, `${name}: ${errorText(error)}`) : new WorkflowError("INTERNAL_ERROR", `${name}: ${errorText(error)}`);
-      if (!first) { first = typed; controller.abort(); }
-      throw typed;
-    }
-  });
-  await Promise.allSettled(tasks);
-  if (first) throw first;
-  return Object.freeze(Object.fromEntries((await Promise.all(tasks)).map(([name, value]) => [name, value])));
-}
-
 async function hostParallel(rawOperation: unknown, rawTasks: unknown): Promise<JsonValue> {
   if (typeof rawOperation !== "string" || !rawOperation.trim()) fail("INVALID_METADATA", "parallel requires a stable explicit name");
   const tasks = namedRecord(rawTasks, "parallel tasks");
@@ -1436,7 +1408,7 @@ function nextNamedOccurrence(counters: Map<string, number>, label: string): stri
   return count === 1 ? label : `${label}#${String(count)}`;
 }
 
-function withWorkflowFunctions(bridge: WorkflowBridge, store: RunStore, runContext: Readonly<WorkflowRunContext>, variables: Readonly<Record<string, JsonValue>>, registry: WorkflowRegistryApi): WorkflowBridge {
+function withWorkflowFunctions(bridge: WorkflowBridge, store: RunStore, runContext: Readonly<WorkflowRunContext>, registry: WorkflowRegistryApi): WorkflowBridge {
   const functionAgentOccurrences = new Map<string, number>();
   const functionShellOccurrences = new Map<string, number>();
   const functionInvokeOccurrences = new Map<string, number>();
@@ -1493,7 +1465,7 @@ function withWorkflowFunctions(bridge: WorkflowBridge, store: RunStore, runConte
     if (!replayed) await store.complete(path, stored ?? result);
     return result;
   };
-  return { ...bridge, functions: registry.globals(), variables, function: invokeFunction };
+  return { ...bridge, functions: registry.globals(), function: invokeFunction };
 }
 
 function projectTrusted(ctx: unknown): boolean {
@@ -2108,12 +2080,12 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const catalog = registry.catalog({ cwd, projectTrusted: trustedProject, globalSettingsPath: workflowSettingsPath(extensionAgentDir) });
     const hasAliases = Object.keys(catalog.modelAliases ?? {}).length > 0 || Boolean(catalog.modelAliasEntries?.length);
     const hasSettings = catalog.settings !== undefined && [catalog.settings.globalSettingsPath, catalog.settings.projectSettingsPath].some((path) => existsSync(path));
-    if (!catalog.functions.length && !catalog.variables.length && !hasAliases && !hasSettings) return;
+    if (!catalog.functions.length && !hasAliases && !hasSettings) return;
     pi.registerTool({
       name: "workflow_catalog",
       label: "Workflow Catalog",
-      description: "List reusable workflow functions, variables, and model aliases; pass `name` to load one entry in full",
-      parameters: Type.Object({ name: Type.Optional(Type.String({ description: "Registered function, variable, or model alias name for full detail" })) }, { additionalProperties: false }),
+      description: "List reusable workflow functions and model aliases; pass `name` to load one entry in full",
+      parameters: Type.Object({ name: Type.Optional(Type.String({ description: "Registered function or model alias name for full detail" })) }, { additionalProperties: false }),
       async execute(_id, params = {}) {
         const context = { cwd, projectTrusted: trustedProject, globalSettingsPath: workflowSettingsPath(extensionAgentDir) };
         const result = params.name === undefined ? registry.catalogIndex(context) : registry.catalogDetail(params.name, context);
@@ -2247,17 +2219,9 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     if (drift.length) await run.store.appendEvent({ type: "warning", message: `Model alias mappings changed on resume: ${drift.join("; ")}` });
     const runContext = workflowRunContext(run.store.cwd, run.store.sessionId, run.store.runId, loaded.snapshot.metadata, loaded.snapshot.args, controller.signal);
     run.executor.setRunContext(runContext);
-    let variables: Readonly<Record<string, JsonValue>>;
-    try { variables = await resolveWorkflowVariables(runContext, controller, registry); }
-    catch (error) {
-      const typed = asWorkflowError(error);
-      if (!HARD_TERMINAL_RUN_STATES.has(run.lifecycle.state)) { await run.lifecycle.terminal("failed", typed.code).catch(() => undefined); const persisted = await persistRunState(run.store, run.metadata, (current) => persistedFailure({ ...current }, typed)); await eventPublisher.runFailed(run.store, run.metadata, typed, run.lifecycle.state === "interrupted" ? "interrupted" : "failed"); run.update?.(workflowToolUpdate(persisted)); if (!["stopped", "interrupted", "budget_exhausted"].includes(run.lifecycle.state)) await createWorkflowFailureDiagnostics(run.store, run.metadata, typed, persisted).then((diagnostic) => deliverTerminal(run.store, formatWorkflowFailureDelivery(diagnostic), true)).catch(() => undefined); }
-      await cleanupTerminalRun(run.store.runId);
-      throw typed;
-    }
     await scheduler.cancelRun(run.store.runId);
     await run.lifecycle.resume();
-    const execution = runWorkflow(script, loaded.snapshot.args, withWorkflowFunctions({ shell: (command, options, signal, identity) => shellForRun(run.store, run.metadata, run.lifecycle, command, options, signal, identity), agent: workflowAgentHandler(run.store, run.metadata, run.lifecycle, run.executor, run.store.cwd, run.store.runId), worktree: async (owner) => resolveWorktree(run.store, run.metadata, owner), checkpoint: checkpointBridge(run.store.runId, run.store, run.metadata, foreground, hasUI ? ui : undefined), phase: phaseBridge(run.store, run.metadata, run.lifecycle), log: logBridge(run.lifecycle, run.metadata.name) }, run.store, runContext, variables, registry), controller.signal);
+    const execution = runWorkflow(script, loaded.snapshot.args, withWorkflowFunctions({ shell: (command, options, signal, identity) => shellForRun(run.store, run.metadata, run.lifecycle, command, options, signal, identity), agent: workflowAgentHandler(run.store, run.metadata, run.lifecycle, run.executor, run.store.cwd, run.store.runId), worktree: async (owner) => resolveWorktree(run.store, run.metadata, owner), checkpoint: checkpointBridge(run.store.runId, run.store, run.metadata, foreground, hasUI ? ui : undefined), phase: phaseBridge(run.store, run.metadata, run.lifecycle), log: logBridge(run.lifecycle, run.metadata.name) }, run.store, runContext, registry), controller.signal);
     run.execution = execution;
     const completion = execution.result.then(async (value) => {
       await scheduler.flush();
@@ -2562,7 +2526,6 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const args = (params.args ?? null) as JsonValue;
       encoded(args);
       const runContext = workflowRunContext(ctx.cwd, ctx.sessionManager.getSessionId(), runId, checked.metadata, args, runController.signal);
-      const variables = await resolveWorkflowVariables(runContext, runController, registry);
       const store = new RunStore(ctx.cwd, ctx.sessionManager.getSessionId(), runId, home);
       const parentRunId = params.parentRunId;
       if (parentRunId !== undefined) await store.validateParentRun(parentRunId);
@@ -2596,7 +2559,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       runs.set(runId, { executor, store, metadata: checked.metadata, model: rootModel, lifecycle, budget: budgetRuntime, abortController: runController, projectTrusted: () => projectTrusted(ctx), checkpointResolvers: new Map(), ...(providerErrorRecovery ? { providerErrorRecovery } : {}), ...(params.foreground && onUpdate ? { update: onUpdate } : {}) });
       if (params.foreground && onUpdate) onUpdate(workflowToolUpdate((await store.load()).run));
       scheduler.addRun(runId, settings.concurrency, () => runs.get(runId)?.budget.checkAgentLaunch());
-      const execution = runWorkflow(script, args, withWorkflowFunctions({ shell: (command, options, signal, identity) => shellForRun(store, checked.metadata, lifecycle, command, options, signal, identity), agent: workflowAgentHandler(store, checked.metadata, lifecycle, executor, ctx.cwd, runId, captureFunctionRole), worktree: async (owner) => resolveWorktree(store, checked.metadata, owner), checkpoint: checkpointBridge(runId, store, checked.metadata, Boolean(params.foreground), params.foreground && ctx.hasUI ? ctx.ui : undefined, headless), phase: phaseBridge(store, checked.metadata, lifecycle), log: logBridge(lifecycle, checked.metadata.name) }, store, runContext, variables, registry), runController.signal);
+      const execution = runWorkflow(script, args, withWorkflowFunctions({ shell: (command, options, signal, identity) => shellForRun(store, checked.metadata, lifecycle, command, options, signal, identity), agent: workflowAgentHandler(store, checked.metadata, lifecycle, executor, ctx.cwd, runId, captureFunctionRole), worktree: async (owner) => resolveWorktree(store, checked.metadata, owner), checkpoint: checkpointBridge(runId, store, checked.metadata, Boolean(params.foreground), params.foreground && ctx.hasUI ? ctx.ui : undefined, headless), phase: phaseBridge(store, checked.metadata, lifecycle), log: logBridge(lifecycle, checked.metadata.name) }, store, runContext, registry), runController.signal);
       (runs.get(runId) as NonNullable<ReturnType<typeof runs.get>>).execution = execution;
       await eventPublisher.runStarted(store, checked.metadata);
       const finish = execution.result.then(async (value) => {
