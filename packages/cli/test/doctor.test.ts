@@ -39,6 +39,14 @@ async function withHome<T>(home: string, action: () => Promise<T>): Promise<T> {
   try { return await action(); }
   finally { if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous; }
 }
+async function withHomeAndCwd<T>(home: string, cwd: string, action: () => Promise<T>): Promise<T> {
+  const previousHome = process.env.HOME;
+  const previousCwd = process.cwd();
+  process.env.HOME = home;
+  process.chdir(cwd);
+  try { return await action(); }
+  finally { process.chdir(previousCwd); if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; }
+}
 
 const cliExtension: WorkflowExtension = {
   version: "1.0.0",
@@ -81,6 +89,42 @@ void test("doctor reports malformed settings and Pi discovery rejection diagnost
   assert.match(discovery.message, /discovery exploded/);
   assert.match(discovery.hint ?? "", /rerun doctor/);
   assert.equal(doctorExitCode(report), 1);
+});
+void test("doctor discovers Pi through local auth, models, and trust fixtures", async () => {
+  const paths = fixture();
+  writeFileSync(join(paths.cwd, ".pi", "settings.json"), "{}");
+  writeFileSync(join(paths.agentDir, "auth.json"), JSON.stringify({ fixture: { type: "api_key", key: "local-fixture" } }));
+  writeFileSync(join(paths.agentDir, "models.json"), JSON.stringify({ providers: { fixture: { baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "fixture", models: [{ id: "fixture-model", name: "Fixture model", input: ["text"], contextWindow: 1_024, maxTokens: 128 }] } } }));
+  writeFileSync(join(paths.agentDir, "trust.json"), JSON.stringify({ [realpathSync(paths.cwd)]: true }));
+  writeFileSync(join(paths.cwd, ".pi", "pi-extensible-workflows", "roles", "local.md"), "---\nmodel: fixture/fixture-model\n---\nLocal role");
+  const before = readdirSync(paths.root, { recursive: true }).map(String).sort();
+  const report = await withHomeAndCwd(paths.root, paths.cwd, () => doctor(paths));
+  const after = readdirSync(paths.root, { recursive: true }).map(String).sort();
+  assert.deepEqual(after, before);
+  assert.deepEqual(report.trust, { required: true, trusted: true, source: "saved Pi trust decision" });
+  assert.deepEqual(report.roles.map(({ name, scope, active }) => ({ name, scope, active })), [{ name: "local", scope: "project", active: true }]);
+  assert.equal(report.diagnostics.some(({ code }) => code === "PI_DISCOVERY" || code.startsWith("MODEL_")), false);
+  assert.equal(doctorExitCode(report), 0);
+});
+
+void test("doctor reports malformed auth and trust discovery diagnostics", async () => {
+  const cases = [
+    ["auth.json", "{\n", /Expected property name/],
+    ["trust.json", "[]", /trust\.json must be an object/],
+  ] as const;
+  for (const [file, contents, message] of cases) {
+    const paths = fixture();
+    writeFileSync(join(paths.cwd, ".pi", "settings.json"), "{}");
+    writeFileSync(join(paths.agentDir, "auth.json"), JSON.stringify({ fixture: { type: "api_key", key: "local-fixture" } }));
+    writeFileSync(join(paths.agentDir, "models.json"), JSON.stringify({ providers: { fixture: { baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "fixture", models: [{ id: "fixture-model" }] } } }));
+    writeFileSync(join(paths.agentDir, "trust.json"), JSON.stringify({ [realpathSync(paths.cwd)]: true }));
+    writeFileSync(join(paths.agentDir, file), contents);
+    const report = await withHomeAndCwd(paths.root, paths.cwd, () => doctor(paths));
+    const discovery = report.diagnostics.find(({ code }) => code === "PI_DISCOVERY");
+    assert.ok(discovery, file);
+    assert.match(discovery.message, message, file);
+    assert.equal(doctorExitCode(report), 1, file);
+  }
 });
 
 void test("doctor reports role errors, warnings, overrides, and extension failures", async () => {
