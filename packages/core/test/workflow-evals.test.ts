@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { inspectWorkflowScript, validateWorkflowLaunch, WorkflowError } from "../src/index.js";
 import evalCaptureExtension from "../src/eval-capture-extension.js";
-import { assertEvalScriptSafe, captureEvalCase, captureValidationReports, evalExpectationErrors, extractCapturedWorkflows, extractParentOracle, extractParentToolCalls, findSessionFile, formatEvalSummary, INITIAL_WORKFLOW_EVAL_CASES, loadWorkflowEvalCases, matchesJsonResult, matchesJsonSchema, matchesOutputSchema, parseSemanticJudge, recoverySelectionErrors, replayExpectationErrors, replayWorkflowScript, resolveWorkflowSkillPath, selectStaticCandidate, staticExpectationResults, runIsolatedProcess, runWorkflowEvals, type ParentOracle } from "../src/workflow-evals.js";
+import { assertEvalScriptSafe, captureEvalCase, captureValidationReports, evalExpectationErrors, extractCapturedWorkflows, extractParentOracle, extractParentToolCalls, findSessionFile, formatEvalSummary, INITIAL_WORKFLOW_EVAL_CASES, loadWorkflowEvalCases, matchesJsonResult, matchesJsonSchema, matchesOutputSchema, parseSemanticJudge, recoverySelectionErrors, replayExpectationErrors, replayWorkflowScript, resolveWorkflowSkillPath, selectStaticCandidate, staticExpectationResults, runIsolatedProcess, runWorkflowEvals, validateWorkflowEvalCases, type ParentOracle } from "../src/workflow-evals.js";
 
 const schema = { type: "object", properties: { answer: { type: "number" }, label: { type: "string" } }, required: ["answer", "label"], additionalProperties: false };
 void test("defines the cheap initial evaluation matrix", () => {
@@ -419,4 +419,48 @@ void test("uses the effective remaining spend ceiling for untrusted case fallbac
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+void test("validates the complete eval contract and rejects shape and range errors", () => {
+  const valid = {
+    id: "complete", prompt: "Run every check", timeoutMs: 1000, maxCost: 0.5, expectedWorkflowCalls: 2,
+    expectations: {
+      firstSignificantAction: { kind: "tool", name: "workflow" }, firstTool: "workflow",
+      firstBatchToolSequence: { startsWith: ["workflow"] }, parentToolSequence: { equals: ["workflow", "read"] },
+      workflowCallCount: { min: 1, max: 2 }, requiredOperations: ["agent", "parallel"], forbiddenOperations: ["shell"],
+      requiredRoles: ["reviewer"], minimumAgentCalls: 2, requireOutputSchema: { type: "object", requiredKeys: ["answer"], propertyTypes: { answer: "number" }, minCount: 1 },
+      expectedResults: [{ workflowIndex: 0, match: { type: "object", properties: { answer: { type: "number", nonEmpty: true } } } }],
+      agentPolicies: [{ callIndex: 0, role: "reviewer", model: "fake/model", forbidOptions: ["retries"], tools: { mode: "exact", values: ["read"] } }],
+      requiredAgentOrder: [{ role: "reviewer", execution: "sequential" }],
+      requiredAgentStructures: [{ execution: "parallel", operation: "parallel", agents: [{ role: "reviewer", promptIncludes: "review" }] }],
+      requiredDataFlow: [{ binding: "review", toAgentIndex: 1 }],
+    },
+    semanticCriteria: [{ id: "quality", description: "The answer is useful" }],
+  };
+  assert.deepEqual(validateWorkflowEvalCases([valid], "complete"), [valid]);
+  const failures: readonly [string, unknown][] = [
+    ["timeoutMs", { ...valid, timeoutMs: 0 }], ["maxCost", { ...valid, maxCost: 0 }],
+    ["expectations.firstSignificantAction.name", { ...valid, expectations: { ...valid.expectations, firstSignificantAction: { kind: "text", name: "invalid" } } }],
+    ["expectations.workflowCallCount", { ...valid, expectations: { ...valid.expectations, workflowCallCount: { min: 2, max: 1 } } }],
+    ["expectations.requireOutputSchema", { ...valid, expectations: { ...valid.expectations, requireOutputSchema: { type: "object", count: 1, minCount: 2 } } }],
+    ["expectations.expectedResults[0]", { ...valid, expectations: { ...valid.expectations, expectedResults: [{}] } }],
+    ["expectations.requiredAgentStructures[0].agents", { ...valid, expectations: { ...valid.expectations, requiredAgentStructures: [{ execution: "parallel", agents: [] }] } }],
+    ["expectations.agentPolicies[0].callIndex", { ...valid, expectations: { ...valid.expectations, agentPolicies: [{ ...valid.expectations.agentPolicies[0], callIndex: -1 }] } }],
+  ];
+  for (const [field, value] of failures) assert.throws(() => validateWorkflowEvalCases([value], "complete"), (error: unknown) => error instanceof Error && error.message.includes(`field ${field}`));
+});
+void test("keeps isolated child missing-output, invalid-JSON, and failure results stable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-workflow-eval-child-paths-"));
+  try {
+    const cases = [
+      ["missing", "process.exit(0);", { exitCode: 0, error: undefined }],
+      ["invalid-json", "import { readFileSync, writeFileSync } from 'node:fs'; const input = JSON.parse(readFileSync(process.argv[2], 'utf8')); writeFileSync(input.outputPath, '{not-json');", { exitCode: 0, error: /Invalid child JSON/ }],
+      ["failure", "process.exit(7);", { exitCode: 7, error: undefined }],
+    ] as const;
+    for (const [name, script, expected] of cases) {
+      const childPath = join(root, `${name}.mjs`); writeFileSync(childPath, script);
+      const result = await runIsolatedProcess({ case: name }, { childPath });
+      assert.equal(result.value, undefined); assert.equal(result.timedOut, false); assert.equal(result.exitCode, expected.exitCode);
+      if (expected.error instanceof RegExp) assert.match(result.error ?? "", expected.error); else assert.equal(result.error, expected.error);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

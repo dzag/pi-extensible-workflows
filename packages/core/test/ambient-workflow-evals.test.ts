@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -105,4 +105,39 @@ appendFileSync(join(process.cwd(), "src/score.js"), "\\n// edited only in this w
     assert.equal(existsSync(repository.root), false);
     assert.equal(paths.every((path) => !existsSync(path)), true);
   }
+});
+void test("ambient evals fail early for missing config and filter cases before execution", async () => {
+  const missingConfig = [
+    [{ PI_WORKFLOW_EVAL_AMBIENT: "0", PI_WORKFLOW_EVAL_PROVIDER: "", PI_WORKFLOW_EVAL_MODEL: "" }, /PI_WORKFLOW_EVAL_AMBIENT=1/],
+    [{ PI_WORKFLOW_EVAL_AMBIENT: "1", PI_WORKFLOW_EVAL_PROVIDER: "", PI_WORKFLOW_EVAL_MODEL: "" }, /Set --provider and --model/],
+  ] as const;
+  for (const [environment, message] of missingConfig) await assert.rejects(runAmbientWorkflowEvals({ environment }), message);
+  const root = mkdtempSync(join(tmpdir(), "pi-workflow-ambient-filter-"));
+  const artifactsDir = join(root, "artifacts"); const fakePi = join(root, "fake-pi.mjs");
+  writeFileSync(fakePi, "#!/usr/bin/env node\nprocess.exit(0);\n"); chmodSync(fakePi, 0o755);
+  try {
+    const result = await runAmbientWorkflowEvals({ cases: [{ id: "first", prompt: "one", timeoutMs: 1000, maxCost: 1 }, { id: "second", prompt: "two", timeoutMs: 1000, maxCost: 1 }], caseIds: ["second"], provider: "fake", model: "model", piCommand: fakePi, artifactsDir, environment: { PI_WORKFLOW_EVAL_AMBIENT: "1" } });
+    assert.deepEqual(result.cases.map(({ id }) => id), ["second"]);
+    assert.equal(existsSync(join(artifactsDir, "second.json")), true);
+    const item = result.cases[0]; assert.ok(item);
+    assert.equal(item.manifest.cleanup.worktreeRemoved, true);
+    assert.equal(item.manifest.cleanup.fixtureRepoRemoved, true);
+    assert.equal(item.manifest.cleanup.tempRootRemoved, true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+void test("ambient Pi budget aborts and malformed capture still cleans every fixture", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-workflow-ambient-edge-"));
+  const budgetPi = join(root, "budget-pi.mjs");
+  writeFileSync(budgetPi, "#!/usr/bin/env node\nconsole.log(JSON.stringify({ type: 'message_end', message: { usage: { cost: { total: 2 } } } })); setInterval(() => {}, 1000);\n"); chmodSync(budgetPi, 0o755);
+  try {
+    const budget = await runAmbientPiProcess({ worktree: root, sessionDir: join(root, "budget-session"), prompt: "wait", provider: "fake", model: "model", piCommand: budgetPi, timeoutMs: 2000, maxCost: 1 });
+    assert.equal(budget.budgetExceeded, true); assert.equal(budget.timedOut, false); assert.equal(budget.processGroupTerminated, true);
+    const malformedPi = join(root, "malformed-pi.mjs");
+    writeFileSync(malformedPi, `#!/usr/bin/env node\nimport { mkdirSync, writeFileSync } from "node:fs"; import { join } from "node:path"; const args = process.argv.slice(2); const value = name => args[args.indexOf(name) + 1]; const dir = value("--session-dir"); const id = value("--session-id"); mkdirSync(dir, { recursive: true }); const rows = [{ type: "session", version: 3, id }, { type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "workflow", arguments: { name: "bad-capture" } }] } }, { type: "message", message: { role: "toolResult", toolName: "workflow", content: [{ type: "text", text: "not capture metadata" }], details: { realWorkflowAgentsLaunched: 1 }, isError: false } }]; writeFileSync(join(dir, "parent.jsonl"), rows.map(JSON.stringify).join("\\n") + "\\n");\n`); chmodSync(malformedPi, 0o755);
+    const artifactsDir = join(root, "artifacts");
+    const result = await runAmbientWorkflowEvals({ cases: [{ id: "malformed", prompt: "capture", timeoutMs: 1000, maxCost: 1 }], provider: "fake", model: "model", piCommand: malformedPi, artifactsDir, environment: { PI_WORKFLOW_EVAL_AMBIENT: "1" } });
+    const item = result.cases[0]; assert.ok(item); assert.equal(item.status, "failed"); assert.equal(item.manifest.cleanup.captureIdentityVerified, false);
+    assert.equal(item.manifest.cleanup.worktreeRemoved, true); assert.equal(item.manifest.cleanup.fixtureRepoRemoved, true); assert.equal(item.manifest.cleanup.tempRootRemoved, true);
+    assert.equal(existsSync(join(artifactsDir, "malformed.json")), true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

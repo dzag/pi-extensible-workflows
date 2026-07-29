@@ -38,22 +38,22 @@ test("discovers the copied directory as a trusted Pi extension", async () => {
   assert.ok(registration);
   assert.match(readFileSync(join(registration.path, "reviewer.md"), "utf8"), /Packaged reviewer role/);
 
-  const resolved = await loadingRegistry().resolveModelAliases({
-    cwd: process.cwd(),
-    projectTrusted: true,
-    rootModel: { provider: "example", model: "root" },
-    knownModels: new Set(["example/root", "example/available"]),
-    availableModels: new Set(["example/available"]),
-    signal: new AbortController().signal,
-  });
-  assert.deepEqual(resolved, { "template-model": "example/available" });
+  for (const [name, availableModels, expected] of [["root-model", ["example/root"], "example/root"], ["available-fallback", ["example/available"], "example/available"], ["no-model-fallback", [], "example/root"]]) {
+    const resolved = await loadingRegistry().resolveModelAliases({ cwd: process.cwd(), projectTrusted: true, rootModel: { provider: "example", model: "root" }, knownModels: new Set(["example/root", "example/available"]), availableModels: new Set(availableModels), signal: new AbortController().signal });
+    assert.deepEqual(resolved, { "template-model": expected }, name);
+  }
 
   const hook = loadingRegistry().agentSetupHooks().find(({ name }) => name === "templateAdvisor");
   assert.ok(hook);
-  const agent = { prompt: "Review this", options: {}, sessionInput: {} };
-  await hook.setup(agent, { signal: new AbortController().signal });
-  assert.equal(agent.sessionInput.systemPromptAppend, undefined);
-  agent.options.templateAdvisor = true;
-  await hook.setup(agent, { signal: new AbortController().signal });
-  assert.match(agent.sessionInput.systemPromptAppend, /one concrete risk/);
+  const hookCases = [
+    { options: {}, append: undefined, aborted: false },
+    { options: { templateAdvisor: true }, append: "Existing", expected: "Existing\n\nAdvisor: call out one concrete risk and one next check.", aborted: false },
+    { options: { templateAdvisor: true }, append: "Existing", expected: "Existing", aborted: true },
+  ];
+  for (const current of hookCases) {
+    const controller = new AbortController(); if (current.aborted) controller.abort();
+    const agent = { prompt: "Review this", options: current.options, sessionInput: current.append === undefined ? {} : { systemPromptAppend: current.append } };
+    await hook.setup(agent, { signal: controller.signal });
+    assert.equal(agent.sessionInput.systemPromptAppend, current.expected);
+  }
 });
