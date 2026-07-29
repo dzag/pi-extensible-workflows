@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { doctor, doctorExitCode, formatDoctorReport, type DoctorPiState } from "../src/doctor.js";
@@ -634,6 +634,59 @@ void test("portable bundle setup resolves an external runtime, launches, and fai
   assert.match(runFailure(join(missingCommand, "missing-command")), /Missing required external command/);
   const missingAlias = create("missing-alias", { roles: [], aliases: ["missing-model"], tools: [], commands: [], environment: [] });
   assert.match(runFailure(join(missingAlias, "missing-alias")), /Required model alias is unknown/);
+});
+void test("portable bundle setup installs a missing compatible engine and fails closed for install errors or incompatible versions", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-bundle-install-"));
+  const agentDir = join(root, "agent");
+  const piRoot = join(root, "node_modules", "@earendil-works", "pi-coding-agent");
+  mkdirSync(join(piRoot, "dist", "core", "tools"), { recursive: true });
+  symlinkSync(join(process.cwd(), "../../node_modules", "@earendil-works", "pi-coding-agent", "dist", "index.js"), join(piRoot, "dist", "index.js"));
+  symlinkSync(join(process.cwd(), "../../node_modules", "@earendil-works", "pi-coding-agent", "dist", "core", "tools", "index.js"), join(piRoot, "dist", "core", "tools", "index.js"));
+  writeFileSync(join(piRoot, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "0.80.9" }));
+  const piExecutable = join(piRoot, "dist", "pi");
+  writeFileSync(piExecutable, `#!/usr/bin/env node
+import { cpSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const args = process.argv.slice(2);
+if (args[0] === "--version") console.log("0.82.0");
+else if (args[0] !== "install") process.exit(2);
+else if (process.env.BUNDLE_INSTALL_MODE === "fail") { console.error("fake install failed"); process.exit(23); }
+else {
+  const target = join(process.env.PI_CODING_AGENT_DIR, "npm", "node_modules", "@piewf", "cli");
+  rmSync(target, { recursive: true, force: true });
+  cpSync(process.env.BUNDLE_ENGINE_SOURCE, target, { recursive: true });
+  mkdirSync(join(target, "node_modules"), { recursive: true });
+  symlinkSync(process.env.BUNDLE_CORE_SOURCE, join(target, "node_modules", "pi-extensible-workflows"));
+  mkdirSync(join(target, "node_modules", "@earendil-works"), { recursive: true });
+  symlinkSync(process.env.BUNDLE_AGENT_SOURCE, join(target, "node_modules", "@earendil-works", "pi-coding-agent"));
+  symlinkSync(process.env.BUNDLE_TYPEBOX_SOURCE, join(target, "node_modules", "typebox"));
+  symlinkSync(process.env.BUNDLE_PI_AI_SOURCE, join(target, "node_modules", "@earendil-works", "pi-ai"));
+  if (process.env.BUNDLE_INSTALL_MODE === "incompatible") writeFileSync(join(target, "package.json"), JSON.stringify({ name: "@piewf/cli", version: "3.0.0" }));
+}` , { mode: 0o755 });
+  chmodSync(piExecutable, 0o755);
+  const workflow = { name: "install", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle install", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
+  const environment = { ...process.env, PATH: `${join(piRoot, "dist")}:${process.env.PATH ?? ""}`, HOME: root, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1", BUNDLE_ENGINE_SOURCE: process.cwd(), BUNDLE_CORE_SOURCE: join(process.cwd(), "../core"), BUNDLE_AGENT_SOURCE: join(process.cwd(), "../../node_modules/@earendil-works/pi-coding-agent"), BUNDLE_TYPEBOX_SOURCE: join(process.cwd(), "../../node_modules/typebox"), BUNDLE_PI_AI_SOURCE: join(process.cwd(), "../../node_modules/@earendil-works/pi-ai") };
+  const create = (name: string): string => { const destination = join(root, name); writePortableWorkflowBundle({ destination, command: name, workflow, functionSource: "async run(input) { return input.value; }", piVersion: ">=0.82.0 <0.83.0", engineVersion: ">=4.0.0 <5.0.0" }); return destination; };
+  const runSetup = (bundle: string, mode: string): ReturnType<typeof spawnSync> => spawnSync(join(bundle, basename(bundle)), ["setup", "--yes"], { env: { ...environment, BUNDLE_INSTALL_MODE: mode }, encoding: "utf8" });
+  const installed = create("installed");
+  const success = runSetup(installed, "success");
+  assert.equal(success.status, 0, String(success.stderr));
+  const installedPackage = JSON.parse(readFileSync(join(agentDir, "npm", "node_modules", "@piewf", "cli", "package.json"), "utf8")) as { version?: string };
+  assert.equal(installedPackage.version, "4.0.3");
+  assert.ok(existsSync(join(installed, "bundle-state.json")));
+  assert.equal(execFileSync(join(installed, "installed"), ["7"], { env: environment, encoding: "utf8" }).trim(), "7");
+  rmSync(join(agentDir, "npm"), { recursive: true, force: true });
+  const failed = create("failed");
+  const failure = runSetup(failed, "fail");
+  assert.notEqual(failure.status, 0);
+  assert.match(String(failure.stderr), /fake install failed/);
+  assert.equal(existsSync(join(failed, "bundle-state.json")), false);
+  rmSync(join(agentDir, "npm"), { recursive: true, force: true });
+  const incompatible = create("incompatible");
+  const mismatch = runSetup(incompatible, "incompatible");
+  assert.notEqual(mismatch.status, 0);
+  assert.match(String(mismatch.stderr), /installed an incompatible/);
+  assert.equal(existsSync(join(incompatible, "bundle-state.json")), false);
 });
 void test("portable bundles can load a selected workflow extension with its module state", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-bundle-extension-"));
