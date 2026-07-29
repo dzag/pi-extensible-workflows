@@ -272,9 +272,7 @@ function herdrTransport(agent, context, runner, fullyInspectable, env, workspace
           }
           return assistant ? { assistant } : {};
         },
-        async abort() {
-          try { await session.abort(); } finally { await active?.closeRemote?.(); }
-        },
+        async abort() { await session.abort(); },
         async dispose() {
           if (disposed) return;
           disposed = true;

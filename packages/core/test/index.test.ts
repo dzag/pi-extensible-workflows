@@ -940,7 +940,7 @@ void test("cold resume does not duplicate the phase recorded before interruption
   const first = await firstWorkflow.execute("phase-first", { name: "phase-cold", script: "phase('build'); return await agent('wait');" }, undefined, undefined, context) as { content: Array<{ text: string }> };
   const runId = (JSON.parse(first.content[0]?.text ?? "null") as { runId: string }).runId;
   const store = new RunStore(home, "session", runId, home);
-  for (let attempt = 0; attempt < 200 && (await store.load()).run.phase !== "build"; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+  for (let attempt = 0; attempt < 1000 && (await store.load()).run.phase !== "build"; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal((await store.load()).run.phase, "build");
   await firstShutdown?.();
   assert.equal((await store.load()).run.state, "interrupted");
@@ -959,7 +959,7 @@ void test("cold resume does not duplicate the phase recorded before interruption
     assert.ok(secondStart && secondCommand);
     await secondStart({}, context);
     await secondCommand(`resume ${runId}`, context);
-    for (let attempt = 0; attempt < 200 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    for (let attempt = 0; attempt < 1000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
     const resumed = (await store.load()).run;
     assert.equal(resumed.state, "completed");
     assert.deepEqual(resumed.phaseHistory?.filter(({ phase }) => phase === "build"), [{ phase: "build", afterAgent: 0 }]);

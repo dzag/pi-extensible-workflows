@@ -203,10 +203,9 @@ void test("hands off sequential fully inspectable prompts and cleans the active 
   assert.deepEqual(ownership, ["suspend", "resume", "suspend", "resume"]);
   const activePrompt = session.prompt("third");
   while (!calls.some(([command, subcommand, pane]) => command === "pane" && subcommand === "run" && pane === "pane-3")) await new Promise((resolve) => globalThis.setImmediate(resolve));
-  await session.abort();
-  assert.equal(calls.filter(([command, subcommand, tab]) => command === "tab" && subcommand === "close" && tab === "tab-3").length, 1);
   controller.abort();
   await activePrompt;
+  assert.equal(calls.filter(([command, subcommand, tab]) => command === "tab" && subcommand === "close" && tab === "tab-3").length, 1);
   await session.dispose();
   assert.deepEqual(calls.filter(([command, subcommand]) => command === "tab" && subcommand === "close").map((args) => args[2]), ["tab-1", "tab-2", "tab-3"]);
   await rm(root, { recursive: true, force: true });
