@@ -69,6 +69,12 @@ void test("resolves dynamic model aliases against a launch inventory", async () 
   assert.deepEqual(resolved, { reviewer: "anthropic/opus:high" });
   assert.equal(calls, 1);
 });
+void test("validates Promise.all agent fan-out and allows explicit parallel or shell fan-out", () => {
+  const capabilities = { models: new Set<string>(), tools: new Set<string>(), agentTypes: new Set<string>() };
+  assert.throws(() => preflight("return Promise.all(items.map(() => agent('work')));", capabilities), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  assert.doesNotThrow(() => preflight("return parallel('items', { first: () => agent('one'), second: () => agent('two') });", capabilities));
+  assert.doesNotThrow(() => preflight("return Promise.all(items.map(() => shell('printf ok')));", capabilities));
+});
 void test("registers and collision-checks latest-attempt actions", () => {
   const registry = new WorkflowRegistry();
   const action = { label: "Inspect", visible: () => true, run: () => undefined };

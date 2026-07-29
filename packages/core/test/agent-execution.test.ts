@@ -673,6 +673,39 @@ void test("does not overwrite a terminal result with a post-handoff assistant", 
   assert.equal(result.value, "original report");
   assert.equal(prompts, 1);
 });
+void test("continues after a Herdr handoff with an aborted assistant", async () => {
+  const aborted = { role: "assistant", content: [], stopReason: "aborted" };
+  const messages: Array<{ role: string; content: unknown; stopReason?: string; usage?: typeof usage }> = [aborted];
+  const prompts: string[] = [];
+  let listener: ((event: AgentSessionEvent) => void) | undefined;
+  let triggerHandoff: (() => void) | undefined;
+  let handoffPromise: Promise<void> | undefined;
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({
+    transport: "local", session: { transport: "local", sessionId: "handoff-continuation", locator: { sessionFile: "/sessions/handoff-continuation.jsonl" } }, messages, getSessionStats: sessionStats,
+    subscribe(next) { listener = next; return () => { listener = undefined; }; },
+    async prompt(prompt) {
+      prompts.push(prompt);
+      if (prompts.length === 1) {
+        listener?.({ type: "turn_started" } as unknown as AgentSessionEvent);
+        triggerHandoff?.();
+        listener?.({ type: "message_end", message: aborted } as unknown as AgentSessionEvent);
+        listener?.({ type: "turn_end", message: aborted } as unknown as AgentSessionEvent);
+        await handoffPromise;
+      } else {
+        messages[0] = assistant("continued report");
+      }
+    },
+    dispose() {},
+  })));
+  const result = await executor.execute("work", { label: "worker", workflowName: "flow", onAttempt: (attempt) => {
+    if (!attempt.handoff) return;
+    const handoff = attempt.handoff;
+    triggerHandoff = () => { handoffPromise = handoff.request(async () => { handoff.takeover(); }); };
+  } });
+  assert.equal(result.value, "continued report");
+  assert.equal(prompts[1], "Continue the task from the current session state.");
+  assert.equal(prompts.length, 2);
+});
 
 void test("retries in fresh persisted sessions and reports terminal attempt history", async () => {
   let created = 0;

@@ -8,6 +8,7 @@ import workflowExtension, { RPC_LIMIT_BYTES, RunStore, WorkflowAgentExecutor, cr
 import { listRunIds } from "../src/persistence.js";
 import type { SessionInput } from "../src/agent-execution.js";
 import { testTransport, type TestPiSession } from "./test-transport.js";
+import { executeShellCommand } from "../src/execution.js";
 
 void test("untrusted project policy cannot influence launch validation", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-trust-launch-"));
@@ -175,4 +176,14 @@ void test("cold resume propagates persisted roles with current global exclusions
   assert.deepEqual(policy.effective.skills, ["global-cold", "role-cold"]);
   assert.equal(policy.effective.skills.includes("project-ignored"), false);
   await shutdown?.();
+});
+void test("rejects oversized raw shell output and terminates its process group", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-raw-shell-limit-"));
+  const survivor = join(cwd, "survivor");
+  const survivorScript = `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(survivor)}, "survived"), 500);`;
+  const script = `const { spawn } = require("node:child_process"); spawn(process.execPath, ["-e", ${JSON.stringify(survivorScript)}], { stdio: "ignore" }); process.stdout.write("x".repeat(${String(RPC_LIMIT_BYTES + 1)})); setTimeout(() => {}, 10_000);`;
+  const command = `${process.execPath} -e ${JSON.stringify(script)}`;
+  await assert.rejects(executeShellCommand(command, {}, new AbortController().signal, cwd), (error: unknown) => error instanceof WorkflowError && error.code === "RPC_LIMIT_EXCEEDED");
+  await new Promise((resolve) => setTimeout(resolve, 750));
+  assert.equal(existsSync(survivor), false);
 });
