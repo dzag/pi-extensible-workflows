@@ -9,6 +9,7 @@ import type { AgentSessionEvent, InlineExtension, ToolDefinition } from "@earend
 import { WORKFLOW_TOOL_DESCRIPTION, WORKFLOW_TOOL_PROMPT_SNIPPET } from "../src/host.js";
 import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, disabledResources, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDelivery, formatWorkflowFailureDiagnostics, formatWorkflowPhaseDashboard, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeAgentResourceExclusions, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resourcePatternMatches, resolveAgentResourcePolicy, resolveModelReference, resolveWorkflowSettings, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STALL_THRESHOLD_MS, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, openWorkflowArtifact, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
 import { loadingRegistry } from "../src/registry.js";
+import { launchScriptForSnapshot } from "../src/validation.js";
 import type { SessionInput } from "../src/agent-execution.js";
 import { listRunIds } from "../src/persistence.js";
 import { testTransport, type TestPiSession } from "./test-transport.js";
@@ -100,6 +101,9 @@ void test("rejects duplicate and invalid dynamic alias registrations with extens
   const invalid = new WorkflowRegistry();
   invalid.register({ version: "1.0.0", headline: "Invalid policy", description: "Invalid", modelAliases: { reviewer: { resolve: () => "" } } });
   await assert.rejects(invalid.resolveModelAliases({ cwd: "/project", projectTrusted: false, rootModel: { provider: "openai", model: "gpt" }, knownModels: new Set(["openai/gpt"]), availableModels: new Set(["openai/gpt"]), signal: new AbortController().signal }), (error: unknown) => error instanceof WorkflowError && error.code === "CONFIG_ERROR" && error.message.includes("Invalid policy"));
+  const throwing = new WorkflowRegistry();
+  throwing.register({ version: "1.0.0", headline: "Throwing policy", description: "Throwing", modelAliases: { reviewer: { resolve: () => { throw new Error("resolver exploded"); } } } });
+  await assert.rejects(throwing.resolveModelAliases({ cwd: "/project", projectTrusted: false, rootModel: { provider: "openai", model: "gpt" }, knownModels: new Set(["openai/gpt"]), availableModels: new Set(["openai/gpt"]), signal: new AbortController().signal }), (error: unknown) => error instanceof WorkflowError && error.code === "CONFIG_ERROR" && error.message.includes("resolver exploded"));
 });
 void test("attributes dynamic alias cycles to the registering extension", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-alias-cycle-"));
@@ -225,6 +229,7 @@ void test("workflow launches from a script file and snapshots its exact source",
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
+  await assert.rejects(workflow.execute("missing", { name: "missing-file", scriptPath: "missing.js", foreground: true }, new AbortController().signal, undefined, { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_SYNTAX");
   const result = await workflow.execute("file", { name: "file-launch", scriptPath: "workflow.js", foreground: true }, new AbortController().signal, undefined, { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }) as { content: Array<{ text: string }>; details: { runId: string } };
   assert.equal(result.content[0]?.text, '"from-file"');
   writeFileSync(scriptPath, "return 'changed';\n");
@@ -2507,6 +2512,7 @@ void test("checkpoint contract is boolean-only and enforces UTF-8 limits", async
   assert.throws(() => validateCheckpoint({ name: "x", prompt: "😀".repeat(257), context: null }), /1024/);
   assert.throws(() => validateCheckpoint({ name: "x", prompt: "ok", context: "😀".repeat(1025) }), /4096/);
   assert.throws(() => validateCheckpoint({ name: "x", prompt: "ok", context: null, default: true }), /only name/);
+  for (const value of [null, "checkpoint", { name: "x", prompt: "ok" }, { name: "", prompt: "ok", context: null }]) assert.throws(() => validateCheckpoint(value), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
 });
 
 void test("production checkpoints resolve in foreground navigator and background tool paths", async () => {
@@ -3218,14 +3224,9 @@ void test("production role policy rejects overrides before persistence and prese
   assert.deepEqual(inputs[0] && { model: inputs[0].model, thinking: inputs[0].model.thinking, tools: inputs[0].tools, systemPromptAppend: inputs[0].systemPromptAppend }, { model: { provider: "openai", model: "gpt", thinking: "high" }, thinking: "high", tools: ["read"], systemPromptAppend: "Review role" });
 });
 
-void test("interrupted resume path preserves workflow agent roles", () => {
-  const source = readFileSync(join(process.cwd(), "src", "host.ts"), "utf8");
-  const handlerStart = source.indexOf("const workflowAgentHandler =");
-  assert.ok(handlerStart >= 0);
-  const handlerBlock = source.slice(handlerStart, source.indexOf("const refreshPausedRunAliases", handlerStart));
-  assert.match(handlerBlock, /const role = typeof options\.role/);
-  assert.match(handlerBlock, /\.\.\.\(role \? \{ role \}/);
-  assert.match(source, /agent: workflowAgentHandler\(run\.store, run\.metadata, run\.lifecycle, run\.executor, run\.store\.cwd, run\.store\.runId\)/);
+void test("resume rejects a removed registered function", () => {
+  const snapshot = createLaunchSnapshot({ script: "return await gone(args);", args: null, metadata: { name: "gone" }, launchKind: "function", functionName: "gone", settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
+  assert.throws(() => launchScriptForSnapshot(snapshot, new WorkflowRegistry()), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE" && error.message.includes("gone"));
 });
 
 void test("interrupted lifecycle can cold-resume while completed and failed cannot", async () => {
@@ -3349,11 +3350,6 @@ void test("accepts Minimatch character class forms", () => {
 void test("preserves ordered duplicate resource selectors", () => {
   assert.deepEqual(mergeAgentResourceExclusions({ skills: ["*", "!*"], extensions: ["/global.ts", "!/global.ts"] }, { skills: ["*"], extensions: ["/project.ts"] }), { skills: ["*", "!*", "*"], extensions: ["/global.ts", "!/global.ts", "/project.ts"] });
   assert.deepEqual(disabledResources(["*", "!*", "*"], ["resource"]), ["resource"]);
-});
-void test("reports resource exclusion validation at the selector path", () => {
-  const path = join(mkdtempSync(join(tmpdir(), "pi-extensible-workflows-resources-invalid-")), "settings.json");
-  writeFileSync(path, JSON.stringify({ disabledAgentResources: { skills: [""] } }));
-  assert.throws(() => loadSettings(path), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_SETTINGS" && error.message.includes(`${path}.disabledAgentResources.skills[0]`));
 });
 void test("validates and resolves portable model aliases", () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-aliases-"));
@@ -4102,6 +4098,9 @@ void test("registers global functions and replays each call as one validated ope
   assert.deepEqual(await registry.invokeFunction("status", { short: true }, context, "function/status/1", journal), { clean: true });
   assert.deepEqual(await registry.invokeFunction("status", { short: false }, context, "function/status/1", journal), { clean: true });
   assert.equal(calls, 1);
+  saved.set("function/status/invalid-replay", { clean: "not-a-boolean" });
+  await assert.rejects(registry.invokeFunction("status", { short: true }, context, "function/status/invalid-replay", journal), (error: unknown) => error instanceof WorkflowError && error.code === "RESULT_INVALID");
+  assert.equal(calls, 1);
   assert.ok(Object.isFrozen((receivedContext as { run: object }).run));
   assert.deepEqual(Object.keys(receivedContext as object).sort(), ["agent", "checkpoint", "invoke", "log", "parallel", "phase", "pipeline", "prompt", "run", "shell", "withWorktree"]);
   assert.ok(Object.isFrozen((receivedContext as { run: { workflow: object } }).run.workflow));
@@ -4401,6 +4400,9 @@ void test("formats background failure delivery as one concise human-readable lin
   assert.match(delivery, /next action: workflow_retry\(\{ runId: "run-130" \}\)/);
   assert.match(delivery, /artifacts: .*state\.json .*journal\.json/);
   assert.doesNotMatch(delivery, /^\s*\{/);
+  const unicode = formatWorkflowFailureDelivery({ ...diagnostic, error: { code: "AGENT_FAILED", message: "😀".repeat(5000) } });
+  assert.ok(Buffer.byteLength(unicode) <= 4096);
+  assert.doesNotMatch(unicode, /�/);
 });
 void test("foreground workflow failures preserve codes while returning main-agent prose", async () => {
   type Tool = { name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> };

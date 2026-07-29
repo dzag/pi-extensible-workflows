@@ -69,6 +69,19 @@ function runIsolatedCli(paths: { root: string; cwd: string; agentDir: string }, 
   const result = spawnSync(process.execPath, [script], { cwd: process.cwd(), encoding: "utf8", timeout: 10_000, env: { ...process.env, HOME: paths.root, PI_CODING_AGENT_DIR: paths.agentDir, PI_OFFLINE: "1" } });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
+void test("doctor reports malformed settings and Pi discovery rejection diagnostics", async () => {
+  const paths = fixture();
+  writeFileSync(paths.settingsPath, "{\n");
+  const report = await withHome(paths.root, () => doctor({ ...paths, discoverPi: async () => { throw new Error("discovery exploded"); } }));
+  const settings = report.diagnostics.find(({ code }) => code === "SETTINGS_INVALID");
+  const discovery = report.diagnostics.find(({ code }) => code === "PI_DISCOVERY");
+  assert.ok(settings);
+  assert.equal(settings.source, paths.settingsPath);
+  assert.ok(discovery);
+  assert.match(discovery.message, /discovery exploded/);
+  assert.match(discovery.hint ?? "", /rerun doctor/);
+  assert.equal(doctorExitCode(report), 1);
+});
 
 void test("doctor reports role errors, warnings, overrides, and extension failures", async () => {
   const paths = fixture();
@@ -548,11 +561,20 @@ void test("portable bundle setup resolves an external runtime, launches, and fai
   writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:@piewf/cli"] }));
   const workflow = { name: "e2e", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle e2e", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
   const environment = { ...process.env, PATH: `${join(piRoot, "dist")}:${process.env.PATH ?? ""}`, HOME: root, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" };
-  const create = (name: string, requirements: Record<string, readonly string[]>) => { const destination = join(root, name); writePortableWorkflowBundle({ destination, command: name, workflow, functionSource: "async run(input) { return input.value; }", requirements, piVersion: ">=0.82.0 <0.83.0", engineVersion: ">=4.0.0 <5.0.0" }); return destination; };
+  const create = (name: string, requirements: Record<string, readonly string[]>, piVersion = ">=0.82.0 <0.83.0") => { const destination = join(root, name); writePortableWorkflowBundle({ destination, command: name, workflow, functionSource: "async run(input) { return input.value; }", requirements, piVersion, engineVersion: ">=4.0.0 <5.0.0" }); return destination; };
+  const runFailure = (bundle: string): string => { try { execFileSync(bundle, ["setup", "--yes"], { env: environment, encoding: "utf8", stdio: "pipe" }); return ""; } catch (error) { return String((error as { stderr?: unknown }).stderr ?? error); } };
+  const launchFailure = (bundle: string): string => { try { execFileSync(bundle, ["7"], { env: environment, encoding: "utf8", stdio: "pipe" }); return ""; } catch (error) { return String((error as { stderr?: unknown }).stderr ?? error); } };
   const bundle = create("e2e", { roles: [], aliases: [], tools: [], commands: [], environment: [] });
   execFileSync(join(bundle, "e2e"), ["setup", "--yes"], { env: environment, encoding: "utf8" });
   assert.ok(existsSync(join(bundle, "bundle-state.json")));
   assert.equal(execFileSync(join(bundle, "e2e"), ["7"], { env: environment, encoding: "utf8" }).trim(), "7");
+  const statePath = join(bundle, "bundle-state.json");
+  const state = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>;
+  state.engine = "0.0.0";
+  writeFileSync(statePath, JSON.stringify(state));
+  assert.match(launchFailure(join(bundle, "e2e")), /Bundle setup is missing or stale/);
+  const piMismatch = create("pi-mismatch", { roles: [], aliases: [], tools: [], commands: [], environment: [] }, ">=0.81.0 <0.82.0");
+  assert.match(launchFailure(join(piMismatch, "pi-mismatch")), /Bundle requires Pi >=0\.81\.0 <0\.82\.0; found 0\.82\.0/);
   const builtinTools = create("builtin-tools", { roles: [], aliases: [], tools: ["grep", "find", "ls"], commands: [], environment: [] });
   execFileSync(join(builtinTools, "builtin-tools"), ["setup", "--yes"], { env: environment, encoding: "utf8" });
   const skillSource = join(root, "selected-skill");
@@ -564,7 +586,6 @@ void test("portable bundle setup resolves an external runtime, launches, and fai
   assert.deepEqual(skillManifest.payload?.skills, ["selected-skill"]);
   execFileSync(join(skillBundle, "skill-bundle"), ["setup", "--yes"], { env: environment, encoding: "utf8" });
   assert.equal(execFileSync(join(skillBundle, "skill-bundle"), ["7"], { env: environment, encoding: "utf8" }).trim(), "7");
-  const runFailure = (bundle: string): string => { try { execFileSync(bundle, ["setup", "--yes"], { env: environment, encoding: "utf8", stdio: "pipe" }); return ""; } catch (error) { return String((error as { stderr?: unknown }).stderr ?? error); } };
   const missingCommand = create("missing-command", { roles: [], aliases: [], tools: [], commands: ["bundle-command-that-is-not-installed"], environment: [] });
   assert.match(runFailure(join(missingCommand, "missing-command")), /Missing required external command/);
   const missingAlias = create("missing-alias", { roles: [], aliases: ["missing-model"], tools: [], commands: [], environment: [] });

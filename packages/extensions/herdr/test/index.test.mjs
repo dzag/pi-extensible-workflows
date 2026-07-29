@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import extension, { breadcrumbLabel, createHerdrExtension, isFullyInspectableMode } from "../index.js";
-import { createLiveSessionHandoff } from "pi-extensible-workflows";
+import { createLiveSessionHandoff, resetWorkflowRegistry } from "pi-extensible-workflows";
 
 void test("uses the global extension setting and complete breadcrumb labels", () => {
   const root = mkdtempSync(join(tmpdir(), "herdr-extension-settings-"));
@@ -168,4 +171,45 @@ void test("routes fully inspectable agents into one labeled workflow workspace",
   assert.ok(runCommand.includes("--system-prompt '/repo/.pi/pi-extensible-workflows/SYSTEM.md'"));
   assert.ok(runCommand.includes("@'/tmp/pi-herdr-prompt-"));
   assert.ok(runCommand.length < 4096);
+});
+void test("bridges unknown tools and aborts forwarded tool calls", async () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-extension-bridge-"));
+  const agentDir = join(root, "agent"); mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
+  writeFileSync(join(agentDir, "pi-extensible-workflows", "settings.json"), JSON.stringify({ extensions: { herdr: { enableFullyInspectableMode: true } } }));
+  let runCommand; const calls = [];
+  const runner = async (args) => {
+    calls.push([...args]);
+    if (args[0] === "workspace") return JSON.stringify({ result: { workspace: { workspace_id: "workspace" }, tab: { tab_id: "tab" }, root_pane: { pane_id: "pane" } } });
+    if (args[0] === "tab" && args[1] === "create") return JSON.stringify({ result: { tab: { tab_id: "tab-2" }, root_pane: { pane_id: "pane-2" } } });
+    if (args[0] === "pane" && args[1] === "run") { const script = /sh '([^']+)'$/.exec(args[3]); runCommand = script ? readFileSync(script[1], "utf8") : args[3]; }
+    if (args[0] === "pane" && args[1] === "process-info") return JSON.stringify({ result: { process_info: { foreground_processes: [{ name: "pi", argv: ["pi"] }] } } });
+    return "";
+  };
+  const entered = []; const tool = { name: "slow", label: "Slow", description: "Wait", parameters: { type: "object", properties: {}, additionalProperties: false }, async execute(_id, _params, signal) { entered.push(true); await new Promise((resolve, reject) => { const abort = () => reject(new Error("tool observed abort")); if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true }); }); return { content: [{ type: "text", text: "done" }] }; } };
+  const herdr = createHerdrExtension({ agentDir, env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "parent" }, runner });
+  const agent = { transport: { id: "local", async createSession(value) { return { reference: { transport: "local", sessionId: "session" }, getState: () => ({ model: value.model, tools: value.tools }), getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => ({}), abort: async () => {}, dispose: async () => {} }; } } };
+  const controller = new AbortController();
+  herdr.agentSetupHooks.fullyInspectable.setup(agent, { identity: { structuralPath: ["review"], parentBreadcrumb: "flow", callSite: "agent", occurrence: 1 }, run: { runId: "run", workflow: { name: "flow" } }, signal: controller.signal });
+  const prepared = { cwd: "/repo", model: { provider: "fake", model: "model" }, tools: [], customTools: [tool], initialPrompt: "work", sessionLabel: "flow:review" };
+  const session = await agent.transport.createSession(prepared, { attempt: 1, signal: controller.signal });
+  try {
+    assert.ok(runCommand); const extensionPath = /--extension '([^']*pi-herdr-tools-[^']+\.mjs)'/.exec(runCommand)?.[1]; assert.ok(extensionPath);
+    const bridgeSource = readFileSync(extensionPath, "utf8"); const socketPath = JSON.parse(/const socketPath = (.+);/.exec(bridgeSource)?.[1] ?? "null");
+    const unknown = await new Promise((resolve, reject) => { const socket = net.createConnection(socketPath); let data = ""; socket.setEncoding("utf8"); socket.on("data", (chunk) => { data += chunk; const line = data.split("\n")[0]; if (line) { resolve(JSON.parse(line)); socket.destroy(); } }); socket.on("error", reject); socket.on("connect", () => socket.write(JSON.stringify({ toolCallId: "unknown", name: "missing", params: {} }) + "\n")); });
+    assert.deepEqual(unknown, { type: "error", error: "Unknown Herdr tool: missing" });
+    let bridged; const bridgeModule = await import(pathToFileURL(extensionPath).href); bridgeModule.default({ registerTool(candidate) { bridged = candidate; } }); assert.ok(bridged);
+    const pending = bridged.execute("abort-call", {}, controller.signal, () => {});
+    while (!entered.length) await new Promise((resolve) => globalThis.setImmediate(resolve));
+    controller.abort(); await assert.rejects(pending, /Herdr tool call aborted/);
+  } finally { controller.abort(); await session.dispose(); await new Promise((resolve) => globalThis.setTimeout(resolve, 0)); await rm(root, { recursive: true, force: true }); }
+});
+void test("closes workspaces for every terminal run state and session shutdown", async () => {
+  const handlers = new Map(); const closed = []; let closeAll = 0;
+  const workspaces = { close: async (runId) => { closed.push(runId); }, closeAll: async () => { closeAll += 1; } };
+  const pi = { events: { on(name, handler) { handlers.set(name, handler); } }, on(name, handler) { handlers.set(name, handler); } };
+  resetWorkflowRegistry();
+  extension(pi, { env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" }, workspaces });
+  for (const state of ["failed", "stopped", "interrupted", "budget_exhausted"]) await handlers.get("workflow:run-state-changed")({ runId: state, state });
+  await handlers.get("workflow:run-completed")({ runId: "completed" }); await handlers.get("session_shutdown")();
+  assert.deepEqual(closed, ["failed", "stopped", "interrupted", "budget_exhausted", "completed"]); assert.equal(closeAll, 1);
 });
