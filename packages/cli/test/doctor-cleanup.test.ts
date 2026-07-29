@@ -7,13 +7,22 @@ import test from "node:test";
 import { createLaunchSnapshot, DEFAULT_SETTINGS, type RunState } from "pi-extensible-workflows";
 import { acquireSessionLease, RunStore, structuralPath } from "pi-extensible-workflows/persistence";
 import { doctorCleanup } from "../src/doctor-cleanup.js";
+import { runCli } from "../src/cli.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const snapshot = createLaunchSnapshot({ script: "export const meta={name:'cleanup'}", args: {}, metadata: { name: "cleanup" }, settings: DEFAULT_SETTINGS, models: [], tools: [], agentTypes: [], schemas: [] });
 
 const temporaryTrees = new Set<string>();
-function fixture(): { home: string; cwd: string } { const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-cleanup-")); temporaryTrees.add(home); return { home, cwd: join(home, "project") }; }
+function fixture(): { home: string; cwd: string } { const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-cleanup-")); const cwd = join(home, "project"); mkdirSync(cwd, { recursive: true }); temporaryTrees.add(home); return { home, cwd }; }
 test.afterEach(() => { for (const home of temporaryTrees) rmSync(home, { recursive: true, force: true }); temporaryTrees.clear(); });
+async function withHomeAndCwd<T>(home: string, cwd: string, action: () => Promise<T>): Promise<T> {
+  const previousHome = process.env.HOME;
+  const previousCwd = process.cwd();
+  process.env.HOME = home;
+  process.chdir(cwd);
+  try { return await action(); }
+  finally { process.chdir(previousCwd); if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; }
+}
 async function makeRun(paths: { home: string; cwd: string }, runId: string, state: RunState, now: number, extra: Record<string, unknown> = {}, sessionId = "session-a"): Promise<RunStore> {
   const store = new RunStore(paths.cwd, sessionId, runId, paths.home);
   await store.create({ id: runId, workflowName: "cleanup", cwd: paths.cwd, sessionId, state, agents: [], agentSessions: [], ...extra }, snapshot);
@@ -22,6 +31,38 @@ async function makeRun(paths: { home: string; cwd: string }, runId: string, stat
   utimesSync(join(store.directory, "state.json"), old / 1000, old / 1000);
   return store;
 }
+
+void test("piewf doctor cleanup --yes deletes a clean inventory and formats its report", async () => {
+  const paths = fixture();
+  const old = await makeRun(paths, "old", "completed", Date.now());
+  const userFile = join(paths.home, "keep.txt");
+  writeFileSync(userFile, "preserve me\n");
+  let output = "";
+  const exit = await withHomeAndCwd(paths.home, paths.cwd, () => runCli(["doctor", "cleanup", "--yes"], { cwd: paths.cwd }, (text) => { output += text; }));
+  assert.equal(exit, 0);
+  assert.match(output, /^# pi-extensible-workflows doctor cleanup/);
+  assert.match(output, /Mode: confirmed deletion/);
+  assert.match(output, /## Deleted[\s\S]*run=old/);
+  assert.match(output, /0 failure\(s\)/);
+  assert.equal(existsSync(old.directory), false);
+  assert.equal(readFileSync(userFile, "utf8"), "preserve me\n");
+});
+
+void test("piewf doctor cleanup --yes returns failure and preserves a corrupt inventory", async () => {
+  const paths = fixture();
+  const corrupt = await makeRun(paths, "corrupt", "completed", Date.now());
+  const sibling = await makeRun(paths, "sibling", "completed", Date.now());
+  writeFileSync(join(corrupt.directory, "journal.json"), "{\n");
+  let output = "";
+  const exit = await withHomeAndCwd(paths.home, paths.cwd, () => runCli(["doctor", "cleanup", "--yes"], { cwd: paths.cwd }, (text) => { output += text; }));
+  assert.equal(exit, 1);
+  assert.match(output, /^# pi-extensible-workflows doctor cleanup/);
+  assert.match(output, /Mode: confirmed deletion/);
+  assert.match(output, /## Failures[\s\S]*corrupt/);
+  assert.match(output, /1 failure\(s\)/);
+  assert.equal(existsSync(corrupt.directory), true);
+  assert.equal(existsSync(sibling.directory), true);
+});
 
 void test("doctor cleanup previews only old terminal runs with a strict cutoff", async () => {
   const paths = fixture(); const now = 1_000_000_000_000;
