@@ -306,6 +306,7 @@ void test("rejects malformed retry provenance before replay or resume", async (t
         if (scenario.cycle) assert.match(error.message, /cycle/);
         return true;
       });
+      if (scenario.cycle) await assert.rejects(child.replay("agent/cycle"), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE");
     });
   }
 });
