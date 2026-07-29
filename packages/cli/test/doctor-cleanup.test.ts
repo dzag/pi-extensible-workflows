@@ -215,8 +215,8 @@ void test("doctor cleanup fails closed for unsafe run mutations", async () => {
   const now = 1_000_000_000_000;
   const mutations = [
     { name: "symlinked state.json", mutate: (paths: { home: string; cwd: string }, store: RunStore) => { const state = join(store.directory, "state.json"); const target = join(paths.home, "state-target.json"); const contents = readFileSync(state, "utf8"); rmSync(state); writeFileSync(target, contents); symlinkSync(target, state); } },
-    { name: "rewritten workflow.js", mutate: (_paths: { home: string; cwd: string }, store: RunStore) => writeFileSync(join(store.directory, "workflow.js"), "rewritten workflow") },
-    { name: "dangling ownership parent", mutate: (paths: { home: string; cwd: string }, store: RunStore) => writeFileSync(join(store.directory, "ownership.json"), JSON.stringify([{ id: "owner", label: "owner", state: "completed", parentId: "missing", options: { label: "owner", cwd: paths.cwd, tools: [] } }])) },
+    { name: "rewritten workflow.js", mutate: (_paths: { home: string; cwd: string }, store: RunStore) => { writeFileSync(join(store.directory, "workflow.js"), "rewritten workflow"); } },
+    { name: "dangling ownership parent", mutate: (paths: { home: string; cwd: string }, store: RunStore) => { writeFileSync(join(store.directory, "ownership.json"), JSON.stringify([{ id: "owner", label: "owner", state: "completed", parentId: "missing", options: { label: "owner", cwd: paths.cwd, tools: [] } }])); } },
     { name: "self parentRunId", mutate: (_paths: { home: string; cwd: string }, store: RunStore) => { const statePath = join(store.directory, "state.json"); const state = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>; state.parentRunId = "unsafe"; writeFileSync(statePath, JSON.stringify(state)); } },
   ] as const;
   for (const mutation of mutations) {
