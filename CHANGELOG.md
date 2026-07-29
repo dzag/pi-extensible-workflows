@@ -1,11 +1,35 @@
 # Changelog
 ## Unreleased
 
+## [5.0.0] - 2026-07-29
+
 ### Breaking changes
 
 - Removed the `workflow` argument from the `workflow` tool. Registered catalog functions are now composed inside `script` or `scriptPath` sources, and `args` remains available to pass input to them.
 - Workflow launches now require a non-empty `name` and exactly one of `script` or `scriptPath`.
 - Removed the exported `launchScriptForSnapshot` helper; persisted runs resume from their stored script source.
+
+### Herdr
+
+- Migrated `@piewf/herdr` to TypeScript and publish its compiled `dist` output.
+- Preserved the originating Pi executable and entrypoint during live handoff, and report handoff status in the originating Pi TUI.
+- Preserved completed assistant results across handoff and restored opening completed, failed, or cancelled sessions in Herdr panes.
+
+### Runtime and CLI
+
+- Ordered resolved workflow runs by completion time.
+- Report missing transcript files explicitly during session inspection.
+- Upgraded Pi development dependencies from `0.80.9` to `0.82.1`.
+
+### Verification
+
+- Expanded core, CLI, persistence, replay, recovery, validation, Herdr, and integration coverage; `npm run check` passes.
+
+## [4.0.3] - 2026-07-28
+
+### Fixes
+
+- Reused the workflow progress component for foreground workflow runs.
 
 ## [4.0.2] - 2026-07-28
 
