@@ -45,3 +45,36 @@ void test("live session handoff pauses the local owner until takeover", async ()
   await paused;
   assert.equal(resolved, true);
 });
+
+void test("live session handoff observes event aliases and settles waiters after launch failure", async () => {
+  for (const startType of ["turn_start", "turn_started", "turnStarted", "agent_start"] as const) {
+    for (const endType of ["turn_end", "turnEnded", "agent_end", "agent_settled"] as const) {
+      const handoff = createLiveSessionHandoff();
+      handoff.observe({ type: startType });
+      let launched = false;
+      const opening = handoff.request(async () => { launched = true; throw new Error("pane failed"); });
+      const takeover = handoff.waitForTakeover();
+      const resumed = handoff.waitForResume();
+      handoff.observe({ type: endType });
+      await assert.rejects(opening, /pane failed/);
+      await takeover;
+      await resumed;
+      assert.equal(launched, true);
+      assert.equal(handoff.state, "completed");
+    }
+  }
+});
+
+void test("duplicate handoff requests share one launch and settle together", async () => {
+  const handoff = createLiveSessionHandoff();
+  let launches = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const launch = async () => { launches += 1; await gate; };
+  const first = handoff.request(launch);
+  const second = handoff.request(async () => { launches += 1; });
+  release();
+  await Promise.all([first, second]);
+  assert.equal(launches, 1);
+  assert.equal(handoff.state, "completed");
+});
