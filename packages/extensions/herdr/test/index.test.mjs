@@ -19,10 +19,14 @@ void test("uses the global extension setting and complete breadcrumb labels", ()
   assert.equal(breadcrumbLabel({ structuralPath: ["review", "nested"], parentBreadcrumb: "reviewLoop", callSite: "function:agent/foo", occurrence: 2 }, 3), "review > nested > reviewLoop > function:agent/foo #3");
 });
 
-void test("registers only the live-session action when enabled", () => {
+void test("registers session and live actions when enabled", () => {
   const extension = createHerdrExtension({ agentDir: mkdtempSync(join(tmpdir(), "herdr-extension-default-")), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" } });
-  assert.deepEqual(Object.values(extension.agentAttemptActions ?? {}).map(({ label }) => label), ["Open live session in Herdr pane"]);
-  const context = { liveSession: {}, prepared: {}, handoff: {}, attempt: {}, agent: {}, run: {}, signal: new AbortController().signal, ui: {} };
+  assert.deepEqual(Object.values(extension.agentAttemptActions ?? {}).map(({ label }) => label), ["Open session in Herdr pane", "Open live session in Herdr pane"]);
+  const context = { session: { sessionId: "session", locator: { sessionFile: "/tmp/session.jsonl" } }, liveSession: {}, prepared: {}, handoff: {}, attempt: { setup: { cwd: "/repo" } }, agent: { state: "completed" }, run: {}, signal: new AbortController().signal, ui: {} };
+  assert.equal(extension.agentAttemptActions.openSession.visible({ ...context, liveSession: undefined }), true);
+  assert.equal(extension.agentAttemptActions.openSession.visible({ ...context, liveSession: undefined, agent: { state: "running" } }), false);
+  assert.equal(extension.agentAttemptActions.openSession.visible(context), false);
+  assert.equal(extension.agentAttemptActions.openSession.visible({ ...context, session: undefined, liveSession: undefined }), false);
   assert.equal(extension.agentAttemptActions.openLiveSession.visible(context), true);
   assert.equal(extension.agentAttemptActions.openLiveSession.visible({ ...context, liveSession: undefined }), false);
   const root = mkdtempSync(join(tmpdir(), "herdr-extension-full-action-"));
@@ -31,8 +35,35 @@ void test("registers only the live-session action when enabled", () => {
   writeFileSync(join(root, "agent", "pi-extensible-workflows", "settings.json"), JSON.stringify({ extensions: { herdr: { enableFullyInspectableMode: true } } }));
   const fullyInspectable = createHerdrExtension({ agentDir: join(root, "agent"), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" } });
   assert.equal(fullyInspectable.agentAttemptActions.openLiveSession.visible(context), false);
+  assert.equal(fullyInspectable.agentAttemptActions.openSession.visible({ ...context, liveSession: undefined }), true);
 });
 
+void test("opens a completed session in a Herdr pane without taking ownership", async () => {
+  const previousEnvironment = { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR, PI_CODING_AGENT_SESSION_DIR: process.env.PI_CODING_AGENT_SESSION_DIR };
+  Reflect.deleteProperty(process.env, "PI_CODING_AGENT_DIR");
+  Reflect.deleteProperty(process.env, "PI_CODING_AGENT_SESSION_DIR");
+  try {
+    const calls = [];
+    const runner = async (args) => {
+      calls.push([...args]);
+      if (args[1] === "layout") return JSON.stringify({ result: { layout: { panes: [{ pane_id: "pane", rect: { width: 80, height: 20 } }] } } });
+      if (args[1] === "split") return JSON.stringify({ result: { pane: { pane_id: "new-pane" } } });
+      return "";
+    };
+    const extension = createHerdrExtension({ agentDir: mkdtempSync(join(tmpdir(), "herdr-extension-completed-")), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" }, runner });
+    await extension.agentAttemptActions.openSession.run({ session: { sessionId: "session", locator: { sessionFile: "/tmp/completed session.jsonl" } }, attempt: { setup: { cwd: "/repo" } }, run: {}, signal: new AbortController().signal, ui: {} });
+    assert.deepEqual(calls, [
+      ["pane", "layout", "--pane", "pane"],
+      ["pane", "split", "pane", "--direction", "right", "--no-focus"],
+      ["pane", "run", "new-pane", "cd '/repo' && pi --fork '/tmp/completed session.jsonl' --tools 'read,grep,find,ls'"],
+    ]);
+  } finally {
+    for (const [name, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) Reflect.deleteProperty(process.env, name);
+      else process.env[name] = value;
+    }
+  }
+});
 void test("opens the active session after the handoff boundary and releases on pane exit", async () => {
   const calls = [];
   let runCommand;

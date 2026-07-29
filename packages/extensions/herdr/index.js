@@ -70,6 +70,10 @@ function sessionPath(reference) {
   const locator = reference?.locator;
   return locator && typeof locator === "object" && !Array.isArray(locator) && typeof locator.sessionFile === "string" ? locator.sessionFile : undefined;
 }
+function inspectSessionCommand(reference) {
+  const source = sessionPath(reference) ?? reference.sessionId;
+  return `pi --fork ${quote(source)} --tools ${quote("read,grep,find,ls")}`;
+}
 function inlineFactorySource(extension) {
   const factory = typeof extension === "function" ? extension : extension && typeof extension === "object" && typeof extension.factory === "function" ? extension.factory : undefined;
   if (!factory) throw new Error("Herdr live sessions cannot transfer an invalid inline extension factory.");
@@ -364,8 +368,18 @@ export function createHerdrExtension(options = {}) {
   return {
     version: "1.0.0",
     headline: "Herdr workflow integration",
-    description: "Open and inspect live workflow agents in Herdr panes.",
+    description: "Open and inspect workflow agents in Herdr panes.",
     agentAttemptActions: {
+      openSession: {
+        label: "Open session in Herdr pane",
+        visible(context) { return herdrAvailable(env) && !context.liveSession && ["completed", "failed", "cancelled"].includes(context.agent?.state) && Boolean(context.session?.sessionId && (context.attempt?.setup?.cwd || context.run?.cwd)); },
+        async run(context) {
+          const session = context.session;
+          const cwd = context.attempt?.setup?.cwd ?? context.run?.cwd;
+          if (!session || context.liveSession || !cwd) return;
+          await openHerdrLivePane({ action: "live", cwd, command: inspectSessionCommand(session), paneId: env?.HERDR_PANE_ID }, runner);
+        },
+      },
       openLiveSession: {
         label: "Open live session in Herdr pane",
         visible(context) { return herdrAvailable(env) && !fullyInspectable && Boolean(context.liveSession && context.prepared && context.handoff); },

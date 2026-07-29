@@ -1,6 +1,6 @@
 # Herdr workflow extension
 
-This repo-local extension is enabled when Pi is running in a Herdr-managed pane. It adds one `/workflow` agent action, `Open live session in Herdr pane`.
+This repo-local extension is enabled when Pi is running in a Herdr-managed pane. It adds `/workflow` agent actions for opening a live session or a completed agent session in a Herdr pane.
 
 Set fully inspectable mode in the global workflow settings file (`~/.pi/agent/pi-extensible-workflows/settings.json`):
 
@@ -8,6 +8,6 @@ Set fully inspectable mode in the global workflow settings file (`~/.pi/agent/pi
 { "extensions": { "herdr": { "enableFullyInspectableMode": true } } }
 ```
 
-Fully inspectable mode launches each workflow agent in a dedicated labeled Herdr workspace and hides the manual action.
+Fully inspectable mode launches each workflow agent in a dedicated labeled Herdr workspace and hides the manual live-session action while the agent is active.
 
-Live handoff pauses the local SDK at a turn boundary. The originating Pi TUI shows the handed-off agent's working state and idle or completed state before handback while the Herdr pane owns the task. Pane exit, `/quit`, or a pane that returns idle after Herdr has observed it working returns ownership to the local SDK. The monitor relies on Herdr's built-in Pi screen detection and therefore cannot distinguish an aborted turn from a completed one. In Pi's default keybindings, interrupt is `Escape`; use double-`Escape` to abort a turn. A single `Ctrl-C` clears the editor and double-`Ctrl-C` exits Pi, so `Ctrl-C` is not a handback signal. Lifecycle reports from this extension are advisory when Herdr's built-in Pi integration has authority. Inline extension factories are materialized as temporary explicit extensions in the Herdr pane.
+Live handoff pauses the local SDK at a turn boundary. The originating Pi TUI shows the handed-off agent's working state and idle or completed state before handback while the Herdr pane owns the task. Pane exit, `/quit`, or a pane that returns idle after Herdr has observed it working returns ownership to the local SDK. Completed agent sessions can be opened in a separate Herdr pane from the navigator without taking ownership. The monitor relies on Herdr's built-in Pi screen detection and therefore cannot distinguish an aborted turn from a completed one. In Pi's default keybindings, interrupt is `Escape`; use double-`Escape` to abort a turn. A single `Ctrl-C` clears the editor and double-`Ctrl-C` exits Pi, so `Ctrl-C` is not a handback signal. Lifecycle reports from this extension are advisory when Herdr's built-in Pi integration has authority. Inline extension factories are materialized as temporary explicit extensions in the Herdr pane.
