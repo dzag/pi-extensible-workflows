@@ -385,6 +385,36 @@ void test("creates snapshot worktrees from a symlinked repository cwd without re
   assert.equal(worktree.cwd, join(worktree.path, "packages", "app"));
   assert.equal((await store.load()).run.cwd, cwd);
 });
+void test("rejects a launch cwd outside the repository without rejecting dotted directory names", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-outside-worktree-"));
+  const repo = join(home, "repo");
+  const dotted = join(repo, "..foo");
+  mkdirSync(dotted, { recursive: true });
+  execFileSync("git", ["init", "-q", repo]);
+  execFileSync("git", ["-C", repo, "config", "user.name", "test"]);
+  execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+  writeFileSync(join(dotted, "tracked.txt"), "initial");
+  execFileSync("git", ["-C", repo, "add", "."]);
+  execFileSync("git", ["-C", repo, "commit", "-qm", "initial"]);
+  const dottedStore = new RunStore(dotted, "session-a", "run-a", home);
+  await dottedStore.create(run(dotted), snapshot);
+  const dottedWorktree = await dottedStore.worktree("agent");
+  assert.equal(dottedWorktree.cwd, join(dottedWorktree.path, "..foo"));
+  const outside = join(home, "elsewhere");
+  mkdirSync(outside);
+  const outsideStore = new RunStore(outside, "session-b", "run-b", home);
+  await outsideStore.create({ ...run(outside, "session-b"), id: "run-b" }, snapshot);
+  const previousGitDir = process.env.GIT_DIR;
+  const previousWorkTree = process.env.GIT_WORK_TREE;
+  process.env.GIT_DIR = join(repo, ".git");
+  process.env.GIT_WORK_TREE = repo;
+  try {
+    await assert.rejects(outsideStore.worktree("agent"), (error: unknown) => error instanceof WorkflowError && error.code === "WORKTREE_FAILED" && error.message.includes("launch cwd is outside the repository"));
+  } finally {
+    if (previousGitDir === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = previousGitDir;
+    if (previousWorkTree === undefined) delete process.env.GIT_WORK_TREE; else process.env.GIT_WORK_TREE = previousWorkTree;
+  }
+});
 void test("does not advertise non-canonical named worktree owners", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-non-canonical-named-worktree-"));
   const repo = join(home, "repo");
