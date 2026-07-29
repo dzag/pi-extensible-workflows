@@ -187,3 +187,22 @@ void test("rejects oversized raw shell output and terminates its process group",
   await new Promise((resolve) => setTimeout(resolve, 750));
   assert.equal(existsSync(survivor), false);
 });
+void test("pre-aborted shell launch cancels without leaving a child process group", { skip: process.platform === "win32", timeout: 5_000 }, async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-pre-aborted-shell-"));
+  const parentPid = join(cwd, "parent.pid");
+  const childPid = join(cwd, "child.pid");
+  const survivor = join(cwd, "survivor");
+  const survivorScript = `const fs = require("node:fs"); fs.writeFileSync(${JSON.stringify(childPid)}, String(process.pid)); setTimeout(() => fs.writeFileSync(${JSON.stringify(survivor)}, "survived"), 250); setInterval(() => {}, 1_000);`;
+  const script = `const fs = require("node:fs"); const { spawn } = require("node:child_process"); fs.writeFileSync(${JSON.stringify(parentPid)}, String(process.pid)); spawn(process.execPath, ["-e", ${JSON.stringify(survivorScript)}], { stdio: "ignore" }); setInterval(() => {}, 1_000);`;
+  const command = `${process.execPath} -e ${JSON.stringify(script)}`;
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(executeShellCommand(command, {}, controller.signal, cwd), (error: unknown) => error instanceof WorkflowError && error.code === "CANCELLED");
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  assert.equal(existsSync(survivor), false);
+  for (const pidPath of [parentPid, childPid]) {
+    if (!existsSync(pidPath)) continue;
+    const pid = Number(readFileSync(pidPath, "utf8"));
+    assert.throws(() => process.kill(-pid, 0), (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH");
+  }
+});
