@@ -145,6 +145,10 @@ export interface SessionInput {
   resourcePolicy?: AgentResourcePolicy;
   options?: AgentOptions;
 }
+export interface PiRuntimeLaunchInfo {
+  readonly executable: string;
+  readonly entrypoint: string;
+}
 export interface PreparedAgentSession {
   readonly cwd: string;
   readonly model: ModelSpec;
@@ -155,6 +159,7 @@ export interface PreparedAgentSession {
   readonly customTools?: readonly ToolDefinition[];
   readonly resultTool?: ToolDefinition;
   readonly options?: Readonly<Record<string, JsonValue>>;
+  readonly piRuntime?: Readonly<PiRuntimeLaunchInfo>;
   readonly systemPrompt?: string;
   readonly systemPromptPath?: string;
   readonly systemPromptAppend?: string;

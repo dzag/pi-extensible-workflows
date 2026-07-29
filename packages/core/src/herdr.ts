@@ -112,12 +112,13 @@ function hasPiProcess(value: unknown): boolean {
   const info = record(result?.process_info);
   const processes = info?.foreground_processes;
   if (!Array.isArray(processes)) return false;
+  const isOriginatingPiCli = (candidate: unknown) => typeof candidate === "string" && /(?:^|[\\/])pi-coding-agent[\\/].*dist[\\/]cli\.js(?:\s|$)/.test(candidate);
   return processes.some((candidate) => {
     const process = record(candidate);
     const name = process?.name;
     const argv = process?.argv;
     const commandLine = process?.cmdline;
-    return name === "pi" || Array.isArray(argv) && argv[0] === "pi" || typeof commandLine === "string" && commandLine.includes("/bin/pi");
+    return name === "pi" || Array.isArray(argv) && (argv[0] === "pi" || argv.some(isOriginatingPiCli)) || typeof commandLine === "string" && (commandLine.includes("/bin/pi") || isOriginatingPiCli(commandLine));
   });
 }
 function herdrAgentStatus(value: unknown): HerdrPaneStatus | undefined {

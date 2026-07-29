@@ -134,6 +134,8 @@ async function createToolBridge(prepared) {
 }
 
 function sessionCommand(session, prepared, prompt, bridges, files, directPrompt) {
+  const runtime = prepared.piRuntime;
+  if (!runtime || typeof runtime.executable !== "string" || !runtime.executable || typeof runtime.entrypoint !== "string" || !runtime.entrypoint) throw new Error("Herdr cannot launch workflow agent: originating Pi runtime is unavailable.");
   const source = sessionPath(session.reference);
   const sessionArg = source ? `--session ${quote(source)}` : `--session-id ${quote(session.reference.sessionId)}`;
   const model = `${prepared.model.provider}/${prepared.model.model}${prepared.model.thinking ? `:${prepared.model.thinking}` : ""}`;
@@ -150,7 +152,7 @@ function sessionCommand(session, prepared, prompt, bridges, files, directPrompt)
   const trust = prepared.resourcePolicy?.projectTrusted === false ? " --no-approve" : prepared.resourcePolicy?.projectTrusted === true ? " --approve" : "";
   const environment = [prepared.agentDir ? `PI_CODING_AGENT_DIR=${quote(prepared.agentDir)}` : "", "PI_EXTENSIBLE_WORKFLOWS_HERDR_OWNER=1"].filter(Boolean).join(" ");
   const message = prompt === undefined ? "" : directPrompt ? ` ${quote(prompt)}` : ` @${quote(files.prompt)}`;
-  return `${environment} pi ${sessionArg} --model ${quote(model)}${tools}${systemPrompt}${appendPrompt}${skills}${extensions}${trust}${message}`;
+  return `${environment} ${quote(runtime.executable)} ${quote(runtime.entrypoint)} ${sessionArg} --model ${quote(model)}${tools}${systemPrompt}${appendPrompt}${skills}${extensions}${trust}${message}`;
 }
 
 function paneId(value) { return typeof value === "string" ? value : value.paneId; }

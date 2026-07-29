@@ -273,6 +273,11 @@ void test("prepares the resolved workflow system prompt path for external transp
   await new WorkflowAgentExecutor({ ...root, cwd, agentDir: join(rootDir, "agent") }, transport).execute("work", { label: "worker", workflowName: "flow" });
   assert.equal(prepared?.systemPrompt, undefined);
   assert.equal(prepared?.systemPromptPath, systemPromptPath);
+  assert.ok(prepared);
+  assert.equal(prepared.piRuntime?.executable, process.execPath);
+  const runtime = prepared.piRuntime;
+  assert.ok(runtime);
+  assert.match(runtime.entrypoint, /@earendil-works[\\/]pi-coding-agent[\\/]dist[\\/]cli\.js$/);
 });
 
 void test("persists the effective role system prompt emitted for the native turn", async () => {

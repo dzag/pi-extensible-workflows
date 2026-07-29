@@ -124,6 +124,16 @@ void test("waits for Pi startup before reporting an exit", async () => {
   assert.equal(await waitForHerdrPane("pane", runner, { intervalMs: 0 }), "exited");
   assert.equal(processReports, 3);
 });
+void test("recognizes the originating Pi CLI as a running Herdr process", async () => {
+  let processReports = 0;
+  const runner = async (args: readonly string[]): Promise<string> => {
+    if (args[1] !== "process-info") return "";
+    processReports += 1;
+    return processReports === 1 ? JSON.stringify({ result: { process_info: { foreground_processes: [{ name: "node", argv: ["node", "/opt/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"], cmdline: "node /opt/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" }] } } }) : JSON.stringify({ result: { process_info: { foreground_processes: [] } } });
+  };
+  assert.equal(await waitForHerdrPane("pane", runner, { intervalMs: 0 }), "exited");
+  assert.equal(processReports, 2);
+});
 
 void test("reports a pane startup failure instead of waiting forever", async () => {
   await assert.rejects(waitForHerdrPane("pane", async () => JSON.stringify({ result: { process_info: { foreground_processes: [] } } }), { intervalMs: 0, startupTimeoutMs: 0 }), /did not start Pi/);
