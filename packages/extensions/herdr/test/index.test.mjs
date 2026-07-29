@@ -213,3 +213,44 @@ void test("closes workspaces for every terminal run state and session shutdown",
   await handlers.get("workflow:run-completed")({ runId: "completed" }); await handlers.get("session_shutdown")();
   assert.deepEqual(closed, ["failed", "stopped", "interrupted", "budget_exhausted", "completed"]); assert.equal(closeAll, 1);
 });
+void test("relays generated tool bridge results, errors, and updates", async () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-extension-tool-bridge-"));
+  const agentDir = join(root, "agent"); mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
+  writeFileSync(join(agentDir, "pi-extensible-workflows", "settings.json"), JSON.stringify({ extensions: { herdr: { enableFullyInspectableMode: true } } }));
+  let runCommand;
+  const runner = async (args) => {
+    if (args[0] === "pane" && args[1] === "process-info") return JSON.stringify({ result: { process_info: { foreground_processes: [{ name: "pi", argv: ["pi"] }] } } });
+    if (args[0] === "agent" && args[1] === "get") return JSON.stringify({ result: { agent: { agent_status: "working" } } });
+    return "";
+  };
+  const workspaces = { open: async (_run, request) => { const commandFile = /sh '([^']+)'$/.exec(request.command)?.[1]; runCommand = commandFile ? readFileSync(commandFile, "utf8") : request.command; return { workspaceId: "workspace", tabId: "tab", paneId: "pane" }; } };
+  const calls = [];
+  const tool = { name: "bridge", label: "Bridge", description: "Bridge", parameters: { type: "object", properties: {}, additionalProperties: false }, async execute(toolCallId, params, _signal, onUpdate) {
+    calls.push({ toolCallId, params });
+    if (params.mode === "error") throw new Error("tool failed");
+    onUpdate({ state: "working" });
+    return { content: [{ type: "text", text: "tool result" }] };
+  } };
+  const herdr = createHerdrExtension({ agentDir, env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "parent" }, runner, workspaces });
+  const agent = { transport: { id: "local", async createSession(value) { return { reference: { transport: "local", sessionId: "session" }, getState: () => ({ model: value.model, tools: value.tools }), getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), dispose: async () => {} }; } } };
+  const controller = new AbortController();
+  herdr.agentSetupHooks.fullyInspectable.setup(agent, { identity: { structuralPath: ["review"], parentBreadcrumb: "flow", callSite: "agent", occurrence: 1 }, run: { runId: "run", workflow: { name: "flow" } }, signal: controller.signal });
+  const prepared = { cwd: "/repo", model: { provider: "fake", model: "model" }, tools: [], customTools: [tool], initialPrompt: "work", sessionLabel: "flow:review" };
+  const session = await agent.transport.createSession(prepared, { attempt: 1, signal: controller.signal });
+  try {
+    assert.ok(runCommand);
+    const extensionPath = /--extension '([^']*pi-herdr-tools-[^']+\.mjs)'/.exec(runCommand)?.[1];
+    assert.ok(extensionPath);
+    const bridgeModule = await import(pathToFileURL(extensionPath).href);
+    const registered = [];
+    bridgeModule.default({ registerTool(candidate) { registered.push(candidate); } });
+    assert.equal(registered.length, 1);
+    const updates = [];
+    const result = await registered[0].execute("success-call", { mode: "success" }, controller.signal, (update) => updates.push(update));
+    assert.deepEqual(result, { content: [{ type: "text", text: "tool result" }] });
+    assert.deepEqual(updates, [{ state: "working" }]);
+    assert.deepEqual(calls, [{ toolCallId: "success-call", params: { mode: "success" } }]);
+    await assert.rejects(registered[0].execute("error-call", { mode: "error" }, controller.signal, () => {}), /tool failed/);
+    assert.deepEqual(calls.at(-1), { toolCallId: "error-call", params: { mode: "error" } });
+  } finally { controller.abort(); await session.dispose(); await rm(root, { recursive: true, force: true }); }
+});
