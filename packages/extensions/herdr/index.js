@@ -189,7 +189,10 @@ async function launchPane({ session, prepared, identity, run, attempt, runner, f
       ? await workspaces.open(run, { cwd: prepared.cwd, tabLabel: label, command })
       : await openHerdrLivePane({ action: "live", cwd: prepared.cwd, command, paneId: env?.HERDR_PANE_ID }, runner);
     pane = paneId(opened);
+    let remoteClosed = false;
     const closeRemote = async () => {
+      if (remoteClosed) return;
+      remoteClosed = true;
       await runner(fullyInspectable && typeof opened !== "string" ? ["tab", "close", opened.tabId] : ["pane", "close", pane]).catch(() => undefined);
     };
     const reporter = createHerdrAgentReporter(pane, label, runner);
@@ -248,7 +251,11 @@ function herdrTransport(agent, context, runner, fullyInspectable, env, workspace
         reference: { ...session.reference, transport: "herdr" },
         async prompt(text) {
           if (disposed) throw new Error("Herdr workflow session is disposed");
-          const current = active ?? await launchPane({ session, prepared, identity: context.identity, run: context.run, attempt: sessionContext.attempt, runner, fullyInspectable, env, signal: sessionContext.signal, prompt: text, workspaces, tuiIndex: context.tuiIndex, tuiLabel: context.tuiLabel });
+          let current = active;
+          if (!current) {
+            await session.suspendForHandoff?.();
+            current = await launchPane({ session, prepared, identity: context.identity, run: context.run, attempt: sessionContext.attempt, runner, fullyInspectable, env, signal: sessionContext.signal, prompt: text, workspaces, tuiIndex: context.tuiIndex, tuiLabel: context.tuiLabel });
+          }
           active = current;
           try {
             await current.monitor;
@@ -265,7 +272,9 @@ function herdrTransport(agent, context, runner, fullyInspectable, env, workspace
           }
           return assistant ? { assistant } : {};
         },
-        async abort() { await session.abort(); },
+        async abort() {
+          try { await session.abort(); } finally { await active?.closeRemote?.(); }
+        },
         async dispose() {
           if (disposed) return;
           disposed = true;
