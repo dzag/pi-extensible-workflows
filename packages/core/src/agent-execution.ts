@@ -1,6 +1,6 @@
 import { existsSync, realpathSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
@@ -348,25 +348,49 @@ function resourcePolicyWidened(ceiling: AgentResourcePolicy | undefined, candida
   if (!ceiling.projectTrusted && candidate.projectTrusted) return true;
   return ceiling.effective.skills.some((pattern) => !candidate.effective.skills.includes(pattern)) || ceiling.effective.extensions.some((pattern) => !candidate.effective.extensions.includes(pattern));
 }
-function resolvePiRuntime(): PiRuntimeLaunchInfo | undefined {
+function packageRoot(start: string): string | undefined {
+  let current = dirname(realpathSync(start));
+  for (;;) {
+    const candidates = [current, join(current, "..", "@earendil-works", "pi-coding-agent"), join(current, "..", "pi-coding-agent")];
+    for (const candidate of candidates) {
+      try {
+        const packageJson = JSON.parse(readFileSync(join(candidate, "package.json"), "utf8")) as { name?: unknown };
+        if (packageJson.name === "@earendil-works/pi-coding-agent") return candidate;
+      } catch { /* Continue to the next package candidate. */ }
+    }
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+type PiRuntimeResolution = { runtime?: PiRuntimeLaunchInfo; error?: string };
+function resolvePiRuntime(): PiRuntimeResolution {
+  const executableName = basename(process.execPath).toLowerCase();
+  const bunBinary = ["$bunfs", "~BUN", "%7EBUN"].some((marker) => import.meta.url.includes(marker)) || Boolean(process.versions.bun && !["bun", "bun.exe"].includes(executableName));
+  if (bunBinary) return { runtime: Object.freeze({ executable: process.execPath }) };
   try {
     const packageEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
-    const packageRoot = dirname(dirname(packageEntry));
-    const packageJson = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")) as { bin?: string | Readonly<Record<string, string>> };
+    const root = packageRoot(packageEntry);
+    if (!root) throw new Error("could not locate the @earendil-works/pi-coding-agent package root");
+    const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { bin?: string | Readonly<Record<string, string>> };
     const cli = typeof packageJson.bin === "string" ? packageJson.bin : packageJson.bin?.pi;
-    if (!cli) return undefined;
-    const entrypoint = resolve(packageRoot, cli);
-    if (!existsSync(entrypoint)) return undefined;
-    return Object.freeze({ executable: process.execPath, entrypoint });
-  } catch { return undefined; }
+    if (!cli) throw new Error("the @earendil-works/pi-coding-agent package does not declare a pi CLI");
+    const entrypoint = resolve(root, cli);
+    if (!existsSync(entrypoint)) throw new Error(`the originating Pi CLI entrypoint is unavailable: ${entrypoint}`);
+    return { runtime: Object.freeze({ executable: process.execPath, entrypoint }) };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
 }
-const piRuntime = resolvePiRuntime();
+const piRuntimeResolution = resolvePiRuntime();
+const piRuntime = piRuntimeResolution.runtime;
+const piRuntimeError = piRuntimeResolution.error;
 function preparedAgentSession(input: SessionInput, initialPrompt?: string): Readonly<PreparedAgentSession> {
   const systemPromptPath = input.systemPrompt === undefined ? workflowSystemPromptPath(input.cwd, input.agentDir ?? getAgentDir(), input.resourcePolicy?.projectTrusted ?? true) : undefined;
   const prepared = {
     cwd: input.cwd, model: Object.freeze({ ...input.model }), tools: Object.freeze([...input.tools]), sessionLabel: input.sessionLabel, ...(initialPrompt === undefined ? {} : { initialPrompt }),
     ...(input.agentDir ? { agentDir: input.agentDir } : {}), ...(input.customTools?.length ? { customTools: Object.freeze([...input.customTools]) } : {}), ...(input.resultTool ? { resultTool: input.resultTool } : {}), ...(input.options ? { options: Object.freeze(structuredClone(input.options)) } : {}),
-    ...(piRuntime ? { piRuntime } : {}),
+    ...(piRuntime ? { piRuntime } : {}), ...(piRuntimeError ? { piRuntimeError } : {}),
     ...(input.systemPrompt === undefined ? {} : { systemPrompt: input.systemPrompt }), ...(systemPromptPath ? { systemPromptPath } : {}), ...(input.systemPromptAppend ? { systemPromptAppend: input.systemPromptAppend } : {}),
     ...(input.extensionFactories?.length ? { extensionFactories: Object.freeze([...input.extensionFactories]) } : {}), ...(input.additionalSkillPaths?.length ? { additionalSkillPaths: Object.freeze([...input.additionalSkillPaths]) } : {}),
     ...(input.resourcePolicy ? { resourcePolicy: Object.freeze(structuredClone(input.resourcePolicy)) } : {}),

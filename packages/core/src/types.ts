@@ -147,7 +147,7 @@ export interface SessionInput {
 }
 export interface PiRuntimeLaunchInfo {
   readonly executable: string;
-  readonly entrypoint: string;
+  readonly entrypoint?: string;
 }
 export interface PreparedAgentSession {
   readonly cwd: string;
@@ -160,6 +160,7 @@ export interface PreparedAgentSession {
   readonly resultTool?: ToolDefinition;
   readonly options?: Readonly<Record<string, JsonValue>>;
   readonly piRuntime?: Readonly<PiRuntimeLaunchInfo>;
+  readonly piRuntimeError?: string;
   readonly systemPrompt?: string;
   readonly systemPromptPath?: string;
   readonly systemPromptAppend?: string;

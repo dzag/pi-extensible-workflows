@@ -135,7 +135,13 @@ async function createToolBridge(prepared) {
 
 function sessionCommand(session, prepared, prompt, bridges, files, directPrompt) {
   const runtime = prepared.piRuntime;
-  if (!runtime || typeof runtime.executable !== "string" || !runtime.executable || typeof runtime.entrypoint !== "string" || !runtime.entrypoint) throw new Error("Herdr cannot launch workflow agent: originating Pi runtime is unavailable.");
+  const entrypoint = runtime?.entrypoint;
+  if (!runtime || typeof runtime.executable !== "string" || !runtime.executable || entrypoint !== undefined && (typeof entrypoint !== "string" || !entrypoint)) {
+    const reason = typeof prepared.piRuntimeError === "string" && prepared.piRuntimeError ? ` (${prepared.piRuntimeError})` : "";
+    const error = new Error(`Herdr cannot launch workflow agent: originating Pi runtime is unavailable${reason}.`);
+    if (reason) error.cause = new Error(prepared.piRuntimeError);
+    throw error;
+  }
   const source = sessionPath(session.reference);
   const sessionArg = source ? `--session ${quote(source)}` : `--session-id ${quote(session.reference.sessionId)}`;
   const model = `${prepared.model.provider}/${prepared.model.model}${prepared.model.thinking ? `:${prepared.model.thinking}` : ""}`;
@@ -152,7 +158,7 @@ function sessionCommand(session, prepared, prompt, bridges, files, directPrompt)
   const trust = prepared.resourcePolicy?.projectTrusted === false ? " --no-approve" : prepared.resourcePolicy?.projectTrusted === true ? " --approve" : "";
   const environment = [prepared.agentDir ? `PI_CODING_AGENT_DIR=${quote(prepared.agentDir)}` : "", "PI_EXTENSIBLE_WORKFLOWS_HERDR_OWNER=1"].filter(Boolean).join(" ");
   const message = prompt === undefined ? "" : directPrompt ? ` ${quote(prompt)}` : ` @${quote(files.prompt)}`;
-  return `${environment} ${quote(runtime.executable)} ${quote(runtime.entrypoint)} ${sessionArg} --model ${quote(model)}${tools}${systemPrompt}${appendPrompt}${skills}${extensions}${trust}${message}`;
+  return `${environment} ${quote(runtime.executable)}${entrypoint ? ` ${quote(entrypoint)}` : ""} ${sessionArg} --model ${quote(model)}${tools}${systemPrompt}${appendPrompt}${skills}${extensions}${trust}${message}`;
 }
 
 function paneId(value) { return typeof value === "string" ? value : value.paneId; }
@@ -210,7 +216,7 @@ async function launchPane({ session, prepared, identity, run, attempt, runner, f
       await closeRemote();
       throw error;
     }
-    const monitor = waitForHerdrPane(pane, runner, { signal, ...(onStatus ? { onStatus } : {}) }).then(async (reason) => {
+    const monitor = waitForHerdrPane(pane, runner, { signal, ...(prepared.piRuntime?.entrypoint ? { originatingEntrypoint: prepared.piRuntime.entrypoint } : {}), ...(onStatus ? { onStatus } : {}) }).then(async (reason) => {
       await closeRemote();
       await reporter.release();
       await bridge?.close();

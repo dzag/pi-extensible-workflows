@@ -124,14 +124,15 @@ void test("waits for Pi startup before reporting an exit", async () => {
   assert.equal(await waitForHerdrPane("pane", runner, { intervalMs: 0 }), "exited");
   assert.equal(processReports, 3);
 });
-void test("recognizes the originating Pi CLI as a running Herdr process", async () => {
+void test("recognizes the exact originating Pi CLI as a running Herdr process", async () => {
   let processReports = 0;
+  const originatingEntrypoint = "/workspace/pi/packages/coding-agent/dist/cli.js";
   const runner = async (args: readonly string[]): Promise<string> => {
     if (args[1] !== "process-info") return "";
     processReports += 1;
-    return processReports === 1 ? JSON.stringify({ result: { process_info: { foreground_processes: [{ name: "node", argv: ["node", "/opt/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"], cmdline: "node /opt/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" }] } } }) : JSON.stringify({ result: { process_info: { foreground_processes: [] } } });
+    return processReports === 1 ? JSON.stringify({ result: { process_info: { foreground_processes: [{ name: "node", argv: [process.execPath, originatingEntrypoint], cmdline: `${process.execPath} ${originatingEntrypoint}` }] } } }) : JSON.stringify({ result: { process_info: { foreground_processes: [] } } });
   };
-  assert.equal(await waitForHerdrPane("pane", runner, { intervalMs: 0 }), "exited");
+  assert.equal(await waitForHerdrPane("pane", runner, { originatingEntrypoint, intervalMs: 0 }), "exited");
   assert.equal(processReports, 2);
 });
 

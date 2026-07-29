@@ -277,6 +277,7 @@ void test("prepares the resolved workflow system prompt path for external transp
   assert.equal(prepared.piRuntime?.executable, process.execPath);
   const runtime = prepared.piRuntime;
   assert.ok(runtime);
+  assert.ok(runtime.entrypoint);
   assert.match(runtime.entrypoint, /@earendil-works[\\/]pi-coding-agent[\\/]dist[\\/]cli\.js$/);
 });
 
