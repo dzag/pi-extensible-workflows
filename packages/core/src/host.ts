@@ -815,8 +815,17 @@ function formatCompactBudgetStatus(run: Pick<PersistedRun, "budget" | "budgetVer
 
 const ATTENTION_ORDER: Record<string, number> = { awaiting_input: 0, budget_exhausted: 1, running: 2, pausing: 3, paused: 4, interrupted: 5, failed: 6, queued: 7, stopped: 8, completed: 9 };
 
-function navigatorAttentionSort<T extends { loaded: { run: PersistedRun } }>(entries: readonly T[]): T[] {
-  return [...entries].sort((a, b) => (ATTENTION_ORDER[a.loaded.run.state] ?? 9) - (ATTENTION_ORDER[b.loaded.run.state] ?? 9));
+export function navigatorAttentionSort<T extends { loaded: { run: PersistedRun }; resolvedAt?: number | undefined }>(entries: readonly T[]): T[] {
+  return [...entries].sort((a, b) => {
+    const aResolvedAt = a.resolvedAt;
+    const bResolvedAt = b.resolvedAt;
+    if (aResolvedAt !== undefined || bResolvedAt !== undefined) {
+      if (aResolvedAt === undefined) return -1;
+      if (bResolvedAt === undefined) return 1;
+      if (aResolvedAt !== bResolvedAt) return bResolvedAt - aResolvedAt;
+    }
+    return (ATTENTION_ORDER[a.loaded.run.state] ?? 9) - (ATTENTION_ORDER[b.loaded.run.state] ?? 9);
+  });
 }
 
 function navigatorRunLabels(entries: readonly { store: RunStore; loaded: { run: PersistedRun } }[]): string[] {
@@ -2680,10 +2689,15 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const loadStores = async () => {
         const entries = await Promise.all((await listRunIds(ctx.cwd, ctx.sessionManager.getSessionId(), home)).map(async (runId) => {
           const store = new RunStore(ctx.cwd, ctx.sessionManager.getSessionId(), runId, home);
-          try { const loaded = await store.load(); return { store, loaded: { ...loaded, run: withLiveActivities(loaded.run) } }; }
+          try {
+            const loaded = await store.load();
+            const summary = await store.loadSummary().catch(() => undefined);
+            const terminalAt = summary?.terminalAt === undefined ? undefined : Date.parse(summary.terminalAt);
+            return { store, loaded: { ...loaded, run: withLiveActivities(loaded.run) }, resolvedAt: terminalAt !== undefined && Number.isFinite(terminalAt) ? terminalAt : undefined };
+          }
           catch { if (!await store.isComplete()) await store.delete(true).catch(() => undefined); return undefined; }
         }));
-        return entries.filter((entry): entry is { store: RunStore; loaded: { run: PersistedRun; snapshot: Readonly<LaunchSnapshot> } } => entry !== undefined);
+        return entries.filter((entry): entry is { store: RunStore; loaded: { run: PersistedRun; snapshot: Readonly<LaunchSnapshot> }; resolvedAt: number | undefined } => entry !== undefined);
       };
       let stores = await loadStores();
       const usage = "Usage: /workflow [model-aliases], or /workflow pause|resume|stop|approve|reject|delete <run-id> [checkpoint-name]. Approve/reject are for checkpoints only; use workflow_respond with a proposalId or the navigator's budget controls for budget decisions. Use workflow_resume for budget patches."
@@ -2826,7 +2840,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         for (;;) {
           if (!ctx.hasUI) {
             if (!stores.length) { ctx.ui.notify("No workflow runs in this session.", "info"); return; }
-            const details = await Promise.all(stores.map(async ({ store, loaded }) => formatNavigatorRun(loaded, await store.awaitingCheckpoints(), await store.worktrees())));
+            const sorted = navigatorAttentionSort(stores);
+            const details = await Promise.all(sorted.map(async ({ store, loaded }) => formatNavigatorRun(loaded, await store.awaitingCheckpoints(), await store.worktrees())));
             ctx.ui.notify(details.join("\n\n"), "info"); return;
           }
           const sorted = navigatorAttentionSort(stores);
