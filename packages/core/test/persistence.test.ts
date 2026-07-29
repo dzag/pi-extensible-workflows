@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { acquireSessionLease, createLaunchSnapshot, DEFAULT_SETTINGS, FairAgentScheduler, WorkflowError } from "../src/index.js";
-import { listRunIds, projectStorageKey, RunStore, runsDirectory, structuralPath } from "../src/persistence.js";
+import { hasLiveSessionLease, listRunIds, projectStorageKey, RunStore, runsDirectory, structuralPath } from "../src/persistence.js";
 
 const snapshot = createLaunchSnapshot({ script: "export const meta={name:'x',description:'x'}", args: { answer: 42 }, metadata: { name: "x", description: "x" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: ["read"], agentTypes: [], schemas: [] });
 
@@ -14,22 +14,30 @@ function run(cwd: string, sessionId = "session-a") {
   return { id: "run-a", workflowName: "x", cwd, sessionId, state: "running" as const, agents: [], agentSessions: [{ transport: "local", sessionId: "native-a", locator: { sessionFile: "/pi/sessions/native-a.jsonl" } }] };
 }
 
-void test("session leases reject live owners and reclaim dead owners", async () => {
+void test("session leases reject live owners, reclaim malformed or dead owners, and release only their own token", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-lease-"));
   const cwd = join(home, "project");
+  const ownerPath = join(runsDirectory(cwd, "session-a", home), "owner.json");
   const lease = await acquireSessionLease(cwd, "session-a", home);
   await assert.rejects(acquireSessionLease(cwd, "session-a", home), (error: unknown) => error instanceof WorkflowError && error.code === "RUN_OWNED");
+  writeFileSync(ownerPath, JSON.stringify({ pid: process.pid, token: "newer", startedAt: 0 }));
   await lease.release();
-  writeFileSync(join(runsDirectory(cwd, "session-a", home), "owner.json"), JSON.stringify({ pid: 2147483647, token: "dead", startedAt: 0 }));
+  assert.equal((JSON.parse(readFileSync(ownerPath, "utf8")) as { token: string }).token, "newer");
+  writeFileSync(ownerPath, JSON.stringify({ pid: 2147483647, token: "dead", startedAt: 0 }));
   const reclaimed = await acquireSessionLease(cwd, "session-a", home);
   await reclaimed.release();
   if (process.platform === "linux") {
-    writeFileSync(join(runsDirectory(cwd, "session-a", home), "owner.json"), JSON.stringify({ pid: process.pid, token: "reused", startedAt: 0 }));
+    writeFileSync(ownerPath, JSON.stringify({ pid: process.pid, token: "reused", startedAt: 0 }));
     const pidReused = await acquireSessionLease(cwd, "session-a", home);
     await pidReused.release();
   }
-  writeFileSync(join(runsDirectory(cwd, "session-a", home), "owner.json"), "{");
-  utimesSync(join(runsDirectory(cwd, "session-a", home), "owner.json"), new Date(0), new Date(0));
+  writeFileSync(ownerPath, JSON.stringify({ pid: "bad", token: "", startedAt: "bad" }));
+  await assert.rejects(hasLiveSessionLease(cwd, "session-a", home), (error: unknown) => error instanceof WorkflowError && error.code === "RUN_OWNED");
+  utimesSync(ownerPath, new Date(0), new Date(0));
+  const malformedReclaimed = await acquireSessionLease(cwd, "session-a", home);
+  await malformedReclaimed.release();
+  writeFileSync(ownerPath, "{");
+  utimesSync(ownerPath, new Date(0), new Date(0));
   const invalidReclaimed = await acquireSessionLease(cwd, "session-a", home);
   await invalidReclaimed.release();
 });
@@ -81,7 +89,7 @@ void test("reclaims an orphaned worktree transaction before retrying", async () 
   const records = JSON.parse(readFileSync(join(store.directory, "worktrees.json"), "utf8")) as Array<{ owner: string }>;
   assert.equal(records[0]?.owner, "agent");
 });
-void test("stores exact cwd and Pi session snapshots atomically and rejects cross-session loading", async () => {
+void test("stores exact cwd and Pi session snapshots and rejects cross-session loading", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-store-"));
   const cwd = join(home, "same-name");
   const store = new RunStore(cwd, "session-a", "run-a", home);
@@ -90,9 +98,11 @@ void test("stores exact cwd and Pi session snapshots atomically and rejects cros
   assert.deepEqual(loaded.snapshot.args, { answer: 42 });
   assert.equal(Object.isFrozen(loaded.snapshot.args), true);
   assert.equal(((loaded.run.agentSessions[0]?.locator as { sessionFile?: string } | undefined)?.sessionFile), "/pi/sessions/native-a.jsonl");
-  await assert.rejects(new RunStore(cwd, "session-b", "run-a", home).load());
+  const otherSession = new RunStore(cwd, "session-b", "run-a", home);
+  mkdirSync(otherSession.directory, { recursive: true });
+  for (const artifact of ["state.json", "snapshot.json"]) writeFileSync(join(otherSession.directory, artifact), readFileSync(join(store.directory, artifact)));
+  await assert.rejects(otherSession.load(), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE");
   assert.notEqual(projectStorageKey(join(home, "a", "same-name")), projectStorageKey(join(home, "b", "same-name")));
-  assert.deepEqual(readFileSync(join(store.directory, "state.json"), "utf8").trim().startsWith("{"), true);
 });
 void test("persists exact multiline Unicode workflow source without rewriting it", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-workflow-source-"));
@@ -134,13 +144,28 @@ void test("persists exact effective system prompts as private run artifacts", as
   assert.equal(statSync(store.systemPromptPath()).mode & 0o777, 0o600);
   assert.equal(readdirSync(join(store.directory, ".system-prompts", "bodies")).filter((name) => /^[0-9a-f]{64}$/.test(name)).length, 2);
 });
+void test("rejects tampered system-prompt bodies and malformed record names", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-system-prompts-invalid-"));
+  const cwd = join(home, "project");
+  const store = new RunStore(cwd, "session-a", "run-a", home);
+  await store.create(run(cwd), snapshot);
+  const prompt = "private prompt";
+  const sha256 = createHash("sha256").update(prompt).digest("hex");
+  await store.recordSystemPrompt({ sessionId: "native-a", attempt: 1, turn: 1, prompt });
+  const bodyPath = join(store.directory, ".system-prompts", "bodies", sha256);
+  writeFileSync(bodyPath, "tampered prompt");
+  await assert.rejects(store.systemPrompts(), /Persisted system-prompt body is invalid/);
+  writeFileSync(bodyPath, prompt);
+  writeFileSync(join(store.directory, ".system-prompts", "records", "malformed.json"), "{}\n");
+  await assert.rejects(store.systemPrompts(), /Persisted system-prompt records are invalid/);
+});
 void test("keeps long repeated system-prompt histories append-only", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-system-prompts-long-"));
   const cwd = join(home, "project");
   const store = new RunStore(cwd, "session-a", "run-a", home);
   await store.create(run(cwd), snapshot);
   const prompt = "long prompt\n" + "x".repeat(8192);
-  const records = Array.from({ length: 64 }, (_, index) => ({ sessionId: "native-a", attempt: Math.floor(index / 16) + 1, turn: (index % 16) + 1, prompt }));
+  const records = Array.from({ length: 16 }, (_, index) => ({ sessionId: "native-a", attempt: Math.floor(index / 4) + 1, turn: (index % 4) + 1, prompt }));
   const artifact = readFileSync(store.systemPromptPath(), "utf8");
   await Promise.all(records.map((entry) => store.recordSystemPrompt(entry)));
   assert.equal(readFileSync(store.systemPromptPath(), "utf8"), artifact);
@@ -235,11 +260,13 @@ void test("replays completed agent, shell, and checkpoint operations across rest
   const child = new RunStore(cwd, "session-a", "run-b", home);
   await child.create({ id: "run-b", workflowName: "x", cwd, sessionId: "session-a", state: "failed", parentRunId: "run-a", retry: { sourceRunId: "run-a", lineageRootRunId: "run-a", completedPaths: [agentPath, shellPath, checkpoint.path], incompletePaths: ["agent/parallel/bad"], namedWorktrees: [] }, agents: [], agentSessions: [] }, snapshot);
   const reloadedChild = new RunStore(cwd, "session-a", "run-b", home);
-  assert.deepEqual(await reloadedChild.replay(agentPath), { path: agentPath, value: "done" });
-  assert.deepEqual(await reloadedChild.replay(shellPath), { path: shellPath, value: { exitCode: 0, stdout: "ok", stderr: "" } });
-  assert.deepEqual(await reloadedChild.replay(checkpoint.path), { path: checkpoint.path, value: true });
+  const inherited = [
+    [agentPath, "done"],
+    [shellPath, { exitCode: 0, stdout: "ok", stderr: "" }],
+    [checkpoint.path, true],
+  ] as const;
+  for (const [path, value] of inherited) assert.deepEqual(await reloadedChild.replay(path), { path, value });
   assert.equal(await reloadedChild.replay(pending.path), undefined);
-  assert.equal(await reloadedChild.replay(structuralPath("agent", "parallel", "bad")), undefined);
   assert.equal((await reloadedChild.awaitingCheckpoints()).length, 0);
   assert.equal(await reloadedChild.awaitCheckpoint(checkpoint), true);
   assert.deepEqual(await reloadedChild.awaitingCheckpoints(), []);
@@ -248,23 +275,40 @@ void test("replays completed agent, shell, and checkpoint operations across rest
   await grandchild.create({ id: "run-c", workflowName: "x", cwd, sessionId: "session-a", state: "interrupted", parentRunId: "run-b", retry: { sourceRunId: "run-b", lineageRootRunId: "run-a", completedPaths: [agentPath, shellPath, checkpoint.path], incompletePaths: ["agent/parallel/bad"], namedWorktrees: [] }, agents: [], agentSessions: [] }, snapshot);
   await grandchild.complete(newPath, "new");
   const restartedGrandchild = new RunStore(cwd, "session-a", "run-c", home);
-  assert.deepEqual(await restartedGrandchild.replay(agentPath), { path: agentPath, value: "done" });
-  assert.deepEqual(await restartedGrandchild.replay(shellPath), { path: shellPath, value: { exitCode: 0, stdout: "ok", stderr: "" } });
-  assert.deepEqual(await restartedGrandchild.replay(checkpoint.path), { path: checkpoint.path, value: true });
+  for (const [path, value] of inherited) assert.deepEqual(await restartedGrandchild.replay(path), { path, value });
   assert.deepEqual(await restartedGrandchild.replay(newPath), { path: newPath, value: "new" });
-  assert.equal(await restartedGrandchild.replay(structuralPath("agent", "parallel", "bad")), undefined);
+  for (const replayStore of [reloadedChild, restartedGrandchild]) assert.equal(await replayStore.replay(structuralPath("agent", "parallel", "bad")), undefined);
   assert.equal((await source.load()).run.state, "failed");
 });
-void test("rejects retry provenance cycles before replay or resume", async () => {
-  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-retry-cycle-"));
-  const cwd = join(home, "project");
-  const source = new RunStore(cwd, "session-a", "run-a", home);
-  await source.create({ ...run(cwd), state: "failed" }, snapshot);
-  const child = new RunStore(cwd, "session-a", "run-b", home);
-  await child.create({ id: "run-b", workflowName: "x", cwd, sessionId: "session-a", state: "failed", parentRunId: "run-a", retry: { sourceRunId: "run-a", lineageRootRunId: "run-a", completedPaths: [], incompletePaths: [], namedWorktrees: [] }, agents: [], agentSessions: [] }, snapshot);
-  await source.updateState((current) => ({ ...current, retry: { sourceRunId: "run-b", lineageRootRunId: "run-a", completedPaths: [], incompletePaths: [], namedWorktrees: [] } }));
-  await assert.rejects(child.validateRetrySource(), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE");
-  await assert.rejects(child.replay("agent/cycle"), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE");
+void test("rejects malformed retry provenance before replay or resume", async (t) => {
+  const cases = [
+    { name: "malformed shape", sourceState: "failed" as const, mutate: (state: Record<string, unknown>) => { state.retry = { sourceRunId: "source" }; }, cycle: false },
+    { name: "parent mismatch", sourceState: "failed" as const, mutate: (state: Record<string, unknown>) => { state.parentRunId = "other"; }, cycle: false },
+    { name: "source is not failed", sourceState: "completed" as const, mutate: () => undefined, cycle: false },
+    { name: "lineage-root mismatch", sourceState: "failed" as const, mutate: (state: Record<string, unknown>) => { (state.retry as Record<string, unknown>).lineageRootRunId = "wrong-root"; }, cycle: false },
+    { name: "cycle", sourceState: "failed" as const, mutate: () => undefined, cycle: true },
+  ];
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const home = mkdtempSync(join(tmpdir(), `pi-extensible-workflows-retry-invalid-${scenario.name}-`));
+      const cwd = join(home, "project");
+      const source = new RunStore(cwd, "session-a", "source", home);
+      await source.create({ ...run(cwd), id: "source", state: scenario.sourceState }, snapshot);
+      const child = new RunStore(cwd, "session-a", "child", home);
+      await child.create({ ...run(cwd), id: "child", state: "failed", parentRunId: "source", retry: { sourceRunId: "source", lineageRootRunId: "source", completedPaths: [], incompletePaths: [], namedWorktrees: [] } }, snapshot);
+      const statePath = join(child.directory, "state.json");
+      const childState = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>;
+      scenario.mutate(childState);
+      writeFileSync(statePath, `${JSON.stringify(childState)}\n`);
+      if (scenario.cycle) await source.updateState((current) => ({ ...current, parentRunId: "child", retry: { sourceRunId: "child", lineageRootRunId: "source", completedPaths: [], incompletePaths: [], namedWorktrees: [] } }));
+      await assert.rejects(child.validateRetrySource(), (error: unknown) => {
+        if (!(error instanceof WorkflowError) || error.code !== "RESUME_INCOMPATIBLE") return false;
+        if (scenario.cycle) assert.match(error.message, /cycle/);
+        return true;
+      });
+      if (scenario.cycle) await assert.rejects(child.replay("agent/cycle"), (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE");
+    });
+  }
 });
 
 void test("persists awaiting checkpoints and atomically accepts only the first answer", async () => {

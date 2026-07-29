@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync, existsSync, readFileSync, symlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +11,9 @@ import { doctorCleanup } from "../src/doctor-cleanup.js";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const snapshot = createLaunchSnapshot({ script: "export const meta={name:'cleanup'}", args: {}, metadata: { name: "cleanup" }, settings: DEFAULT_SETTINGS, models: [], tools: [], agentTypes: [], schemas: [] });
 
-function fixture(): { home: string; cwd: string } { const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-cleanup-")); return { home, cwd: join(home, "project") }; }
+const temporaryTrees = new Set<string>();
+function fixture(): { home: string; cwd: string } { const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-cleanup-")); temporaryTrees.add(home); return { home, cwd: join(home, "project") }; }
+test.afterEach(() => { for (const home of temporaryTrees) rmSync(home, { recursive: true, force: true }); temporaryTrees.clear(); });
 async function makeRun(paths: { home: string; cwd: string }, runId: string, state: RunState, now: number, extra: Record<string, unknown> = {}, sessionId = "session-a"): Promise<RunStore> {
   const store = new RunStore(paths.cwd, sessionId, runId, paths.home);
   await store.create({ id: runId, workflowName: "cleanup", cwd: paths.cwd, sessionId, state, agents: [], agentSessions: [], ...extra }, snapshot);
@@ -207,6 +209,30 @@ void test("doctor cleanup fails closed for missing or corrupt persisted artifact
     assert.deepEqual(report.deleted, [], mutation.file);
     assert.equal(existsSync(corrupt.directory), true, mutation.file);
     assert.equal(existsSync(sibling.directory), true, mutation.file);
+  }
+});
+void test("doctor cleanup fails closed for unsafe run mutations", async () => {
+  const now = 1_000_000_000_000;
+  const mutations = [
+    { name: "symlinked state.json", message: /Run unsafe is corrupt or incomplete: Run artifact is not a regular file: .*state\.json/, mutate: (paths: { home: string; cwd: string }, store: RunStore) => { const state = join(store.directory, "state.json"); const target = join(paths.home, "state-target.json"); const contents = readFileSync(state, "utf8"); rmSync(state); writeFileSync(target, contents); symlinkSync(target, state); } },
+    { name: "rewritten workflow.js", message: /Run unsafe is corrupt or incomplete: Persisted workflow source does not match its launch snapshot/, mutate: (_paths: { home: string; cwd: string }, store: RunStore) => { writeFileSync(join(store.directory, "workflow.js"), "rewritten workflow"); } },
+    { name: "dangling ownership parent", message: /Run unsafe is corrupt or incomplete: Persisted ownership parent is missing/, mutate: (paths: { home: string; cwd: string }, store: RunStore) => { writeFileSync(join(store.directory, "ownership.json"), JSON.stringify([{ id: "owner", label: "owner", state: "completed", parentId: "missing", options: { label: "owner", cwd: paths.cwd, tools: [] } }])); } },
+    { name: "self parentRunId", message: /Run unsafe is corrupt or incomplete: Borrowed worktree source run is invalid/, mutate: (_paths: { home: string; cwd: string }, store: RunStore) => { const statePath = join(store.directory, "state.json"); const state = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>; state.parentRunId = "unsafe"; writeFileSync(statePath, JSON.stringify(state)); } },
+  ] as const;
+  for (const mutation of mutations) {
+    const paths = fixture();
+    const corrupt = await makeRun(paths, "unsafe", "completed", now);
+    const sibling = await makeRun(paths, "sibling", "completed", now);
+    mutation.mutate(paths, corrupt);
+    const report = await doctorCleanup({ ...paths, olderThanDays: 90, yes: true, now });
+    assert.equal(report.failures.length, 1, mutation.name);
+    const failure = report.failures[0];
+    assert.ok(failure);
+    assert.deepEqual({ sessionId: failure.sessionId, runId: failure.runId }, { sessionId: "session-a", runId: undefined }, mutation.name);
+    assert.match(failure.message, mutation.message, mutation.name);
+    assert.deepEqual(report.deleted, [], mutation.name);
+    assert.equal(existsSync(corrupt.directory), true, mutation.name);
+    assert.equal(existsSync(sibling.directory), true, mutation.name);
   }
 });
 void test("doctor cleanup fails closed for unrecorded worktree directories", async () => {

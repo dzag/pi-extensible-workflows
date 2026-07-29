@@ -45,6 +45,25 @@ void test("phase model merges empty and unstarted declarations without inventing
   assert.deepEqual(unstarted.phases.map(({ name, state }) => [name, state]), [["build", "not started"], ["review", "not started"]]);
   assert.equal(unstarted.currentPhaseId, undefined);
 });
+void test("phase model ignores malformed history, clamps boundaries, and exposes unassigned agents", () => {
+  const first = agent("first");
+  const second = agent("second");
+  const third = agent("third");
+  const malformed = buildWorkflowPhaseModel(run("running", [first, second, third], [
+    null,
+    { phase: "build", afterAgent: -4 },
+    { phase: "review", afterAgent: 99 },
+    { phase: "ignored", afterAgent: 1.5 },
+  ] as unknown as PersistedRun["phaseHistory"]), ["build", "review"]);
+  assert.deepEqual(malformed.phases.filter(({ observed }) => observed).map(({ name, afterAgent, agents }) => [name, afterAgent, agents.map(({ id }) => id)]), [
+    ["build", 0, ["first", "second", "third"]],
+    ["review", 3, []],
+  ]);
+  const withUnassigned = buildWorkflowPhaseModel(run("running", [first, second], [{ phase: "review", afterAgent: 1 }]), ["review"]);
+  assert.deepEqual(withUnassigned.unassignedAgents?.map(({ id }) => id), ["first"]);
+  const tree = buildWorkflowPhaseTree(withUnassigned);
+  assert.ok(tree.roots.some((id) => tree.byId.get(id)?.label === "Unassigned"));
+});
 
 void test("phase model preserves repeated and out-of-order observed occurrences", () => {
   const repeated = buildWorkflowPhaseModel(run("completed", [agent("a"), agent("b")], [{ phase: "build", afterAgent: 0 }, { phase: "build", afterAgent: 1 }]), ["build", "build", "review"]);
@@ -258,10 +277,22 @@ void test("phase tree navigation collapses, expands, and moves through visible r
   assert.equal(folded.nodeId, operation.id);
   assert.equal(folded.expandedNodeIds.has(operation.id), false);
 });
+void test("phase tree navigation handles empty, invalid, and wrapping selections", () => {
+  const empty = buildWorkflowPhaseTree(buildWorkflowPhaseModel(run("running"), []));
+  for (const direction of ["up", "down", "left", "right"] as const) assert.deepEqual(navigateWorkflowPhaseTree(empty, undefined, new Set(), direction), { expandedNodeIds: new Set() });
+  const tree = buildWorkflowPhaseTree(buildWorkflowPhaseModel(run("running", [agent("one"), agent("two")], [{ phase: "review", afterAgent: 0 }]), ["review"]));
+  const expanded = new Set(tree.nodes.filter((node) => node.children.length).map((node) => node.id));
+  const visible = workflowPhaseTreeVisibleNodes(tree, expanded);
+  assert.ok(visible.length > 1);
+  assert.equal(navigateWorkflowPhaseTree(tree, "missing", expanded, "down").nodeId, visible[1]?.id);
+  assert.equal(navigateWorkflowPhaseTree(tree, visible[0]?.id, expanded, "up").nodeId, visible.at(-1)?.id);
+  assert.equal(navigateWorkflowPhaseTree(tree, visible.at(-1)?.id, expanded, "down").nodeId, visible[0]?.id);
+});
 
 void test("workflow artifact views use type-appropriate temporary file content", () => {
   assert.deepEqual(workflowScriptArtifact("export const value = 1;"), { extension: ".js", content: "export const value = 1;" });
   assert.deepEqual(workflowPromptArtifact("Inspect the target"), { extension: ".md", content: "Inspect the target" });
   assert.deepEqual(workflowResultArtifact("plain result"), { extension: ".md", content: "plain result" });
   assert.deepEqual(workflowResultArtifact({ answer: 42 }), { extension: ".json", content: "{\n  \"answer\": 42\n}\n" });
+  for (const value of [null, false, ["a", 1]]) assert.deepEqual(workflowResultArtifact(value), { extension: ".json", content: `${JSON.stringify(value, null, 2)}\n` });
 });

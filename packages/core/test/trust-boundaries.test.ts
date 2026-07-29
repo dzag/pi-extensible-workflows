@@ -140,7 +140,7 @@ void test("cold resume rejects persisted project roles before launching them", a
   await shutdown?.();
 });
 
-void test("cold resume rebuilds child sessions with current global and role exclusions", async () => {
+void test("cold resume propagates persisted roles with current global exclusions", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-trust-cold-policy-"));
   const cwd = join(home, "project");
   const agentDir = join(home, "agent");
@@ -151,7 +151,7 @@ void test("cold resume rebuilds child sessions with current global and role excl
   writeFileSync(settingsPath, JSON.stringify({ disabledAgentResources: { skills: ["global-cold"], extensions: [] } }));
   writeFileSync(join(cwd, ".pi", "pi-extensible-workflows", "settings.json"), JSON.stringify({ disabledAgentResources: { skills: ["project-ignored"], extensions: [] } }));
   const store = new RunStore(cwd, "session", "run", home);
-  await store.create({ id: "run", workflowName: "cold-policy", cwd, sessionId: "session", state: "interrupted", agents: [], agentSessions: [] }, createLaunchSnapshot({ script: `return agent("review", { role: "reviewer" });`, args: null, metadata: { name: "cold-policy" }, settings: { concurrency: 1, disabledAgentResources: { skills: ["stale-snapshot"], extensions: [] } }, models: ["openai/gpt"], tools: [], agentTypes: ["reviewer"], roles: { reviewer: { disabledAgentResources: { skills: ["role-cold"], extensions: [] } } }, projectRoles: [], schemas: [] }));
+  await store.create({ id: "run", workflowName: "cold-policy", cwd, sessionId: "session", state: "interrupted", agents: [], agentSessions: [] }, createLaunchSnapshot({ script: `return agent("review", { role: "reviewer" });`, args: null, metadata: { name: "cold-policy" }, settings: { concurrency: 1, disabledAgentResources: { skills: ["stale-snapshot"], extensions: [] } }, models: ["openai/gpt"], tools: [], agentTypes: ["reviewer"], roles: { reviewer: { prompt: "Cold-resumed reviewer role", disabledAgentResources: { skills: ["role-cold"], extensions: [] } } }, projectRoles: [], schemas: [] }));
 
   const inputs: SessionInput[] = [];
   const createSession = async (input: SessionInput): Promise<TestPiSession> => {
@@ -171,6 +171,7 @@ void test("cold resume rebuilds child sessions with current global and role excl
   assert.equal(inputs.length, 1);
   const policy = inputs[0]?.resourcePolicy;
   assert.ok(policy);
+  assert.equal(inputs[0]?.systemPromptAppend, "Cold-resumed reviewer role");
   assert.deepEqual(policy.effective.skills, ["global-cold", "role-cold"]);
   assert.equal(policy.effective.skills.includes("project-ignored"), false);
   await shutdown?.();

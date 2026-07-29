@@ -755,9 +755,67 @@ void test("failed best-effort snapshots do not mask agent failures", async () =>
   await assert.rejects(executor.execute("worktree", { label: "worker", workflowName: "flow", worktreeOwner: "worker" }), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_FAILED" && error.message === "agent failed");
 });
 
+void test("rejects invalid retries and timeoutMs before launching", async () => {
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => { throw new Error("must not launch"); }));
+  for (const options of [{ retries: -1 }, { retries: 1.5 }, { timeoutMs: 0 }, { timeoutMs: 1.5 }] as const) {
+    await assert.rejects(executor.execute("work", { label: "worker", workflowName: "flow", ...options }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  }
+});
+
 void test("per-attempt timeout is typed and terminal", async () => {
   const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({ transport: "local", session: { transport: "local", sessionId: "slow", locator: { sessionFile: "/sessions/slow.jsonl" } }, messages: [], getSessionStats: sessionStats, prompt: () => new Promise(() => {}), dispose() {} })));
   await assert.rejects(executor.execute("slow", { label: "slow", workflowName: "flow", timeoutMs: 10 }), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_TIMEOUT" && Array.isArray((error as WorkflowError & { attempts: unknown[] }).attempts));
+});
+
+void test("local session suspend and resume retain the session seam with a stubbed prompt", async () => {
+  const originalPrompt = Object.getOwnPropertyDescriptor(AgentSession.prototype, "prompt");
+  const originalSessionFile = Object.getOwnPropertyDescriptor(AgentSession.prototype, "sessionFile");
+  assert.ok(originalPrompt && originalSessionFile);
+  const prompts: string[] = [];
+  const events: string[] = [];
+  AgentSession.prototype.prompt = async function (text) {
+    prompts.push(text);
+    for (const listener of (this as unknown as { agent: { listeners: Set<(event: unknown) => void> } }).agent.listeners) listener({ type: "agent_end", messages: [], willRetry: false });
+  };
+  try {
+    const prepared = { cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], sessionLabel: "handoff-real-local" } satisfies import("../src/types.js").PreparedAgentSession;
+    const session = await localAgentTransport.createSession(prepared, {} as never);
+    try {
+      session.subscribe((event) => { if (event.type === "agent_end") events.push(event.type); });
+      assert.ok(session.reference.locator);
+      await session.prompt("before handoff");
+      assert.equal(typeof session.suspendForHandoff, "function");
+      assert.equal(typeof session.resumeFromHandoff, "function");
+      if (typeof session.suspendForHandoff !== "function" || typeof session.resumeFromHandoff !== "function") throw new Error("handoff methods are missing");
+      await session.suspendForHandoff();
+      await session.resumeFromHandoff();
+      await session.prompt("after handoff");
+      assert.deepEqual(prompts, ["before handoff", "after handoff"]);
+      assert.deepEqual(events, ["agent_end", "agent_end"]);
+    } finally {
+      await session.dispose();
+    }
+    Object.defineProperty(AgentSession.prototype, "sessionFile", { configurable: true, get: () => undefined });
+    try {
+      const noFile = await localAgentTransport.createSession(prepared, {} as never);
+      try {
+        assert.equal(noFile.reference.locator, undefined);
+        assert.equal(typeof noFile.suspendForHandoff, "function");
+        assert.equal(typeof noFile.resumeFromHandoff, "function");
+        if (typeof noFile.suspendForHandoff !== "function" || typeof noFile.resumeFromHandoff !== "function") throw new Error("handoff methods are missing");
+        await noFile.suspendForHandoff();
+        await noFile.resumeFromHandoff();
+        await noFile.prompt("without session file");
+        assert.deepEqual(prompts, ["before handoff", "after handoff", "without session file"]);
+      } finally {
+        await noFile.dispose();
+      }
+    } finally {
+      Object.defineProperty(AgentSession.prototype, "sessionFile", originalSessionFile);
+    }
+  } finally {
+    Object.defineProperty(AgentSession.prototype, "prompt", originalPrompt);
+  }
 });
 
 void test("production native Pi session installs nested scheduler tools", async () => {
@@ -1093,6 +1151,36 @@ void test("releasing a result after run cleanup is harmless", async () => {
 });
 
 
+void test("rejects concurrent child results, late steering, and active result release", async () => {
+  let releaseChild!: () => void;
+  let childStarted!: () => void;
+  const started = new Promise<void>((resolve) => { childStarted = resolve; });
+  const childGate = new Promise<void>((resolve) => { releaseChild = resolve; });
+  let scheduler: FairAgentScheduler;
+  // eslint-disable-next-line prefer-const
+  scheduler = new FairAgentScheduler(async ({ prompt, signal }) => {
+    if (prompt === "parent") {
+      await new Promise<void>((resolve) => { signal.addEventListener("abort", () => { resolve(); }, { once: true }); });
+      throw new WorkflowError("CANCELLED", "cancelled");
+    }
+    if (prompt === "child") { childStarted(); await childGate; return "child result"; }
+    return "other";
+  }, 2);
+  scheduler.addRun("run", 2);
+  const parent = scheduler.spawn("run", "parent", { label: "parent", cwd: "/repo", tools: [] });
+  const child = scheduler.spawn("run", "child", { label: "child", cwd: "/repo", tools: [] }, parent.id);
+  await started;
+  const first = scheduler.result(parent.id, child.id);
+  await assert.rejects(scheduler.result(parent.id, child.id), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_FAILED" && error.message === "Child result is already being collected");
+  assert.throws(() => { scheduler.releaseResult(child.id); }, (error: unknown) => error instanceof WorkflowError && error.code === "INTERNAL_ERROR");
+  releaseChild();
+  assert.deepEqual(await first, { id: child.id, ok: true, value: "child result" });
+  await assert.rejects(scheduler.steer(parent.id, child.id, "too late"), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_FAILED" && error.message === "Child is not running");
+  scheduler.cancel(parent.id);
+  await parent.result;
+  scheduler.releaseResult(parent.id);
+});
+
 void test("nested ownership releases permits, contains child failure, and blocks escalation", async () => {
   let scheduler: FairAgentScheduler;
   // eslint-disable-next-line prefer-const
@@ -1137,6 +1225,27 @@ void test("cancelling a parent waiting for a child releases its reacquired permi
   const later = scheduler.spawn("run", "later", { label: "later", cwd: "/repo", tools: [] });
   assert.deepEqual(await later.result, { id: later.id, ok: true, value: "later completed" });
   assert.deepEqual(scheduler.snapshot().map(({ state }) => state), ["cancelled", "cancelled", "completed"]);
+});
+
+void test("restores scheduler terminal states and rejects foreign runs", async () => {
+  const scheduler = new FairAgentScheduler(async () => "unused", 1);
+  const options = { label: "restored", cwd: "/repo", tools: [] };
+  scheduler.restoreRun("run", 1, [
+    { id: "run:1", label: "parent", state: "waiting_for_child", options },
+    { id: "run:2", parentId: "run:1", label: "done", state: "completed", options },
+    { id: "run:3", parentId: "run:1", label: "failed", state: "failed", options },
+    { id: "run:4", parentId: "run:1", label: "cancelled", state: "cancelled", options },
+  ]);
+  assert.deepEqual(await scheduler.result("run:1", "run:2"), { id: "run:2", ok: true, value: null });
+  assert.deepEqual(await scheduler.result("run:1", "run:3"), { id: "run:3", ok: false, error: { code: "AGENT_FAILED", message: "Persisted agent failed" } });
+  assert.deepEqual(await scheduler.result("run:1", "run:4"), { id: "run:4", ok: false, error: { code: "CANCELLED", message: "Persisted agent cancelled" } });
+  assert.deepEqual(scheduler.snapshot().map(({ id, state }) => ({ id, state })), [
+    { id: "run:1", state: "running" },
+    { id: "run:2", state: "completed" },
+    { id: "run:3", state: "failed" },
+    { id: "run:4", state: "cancelled" },
+  ]);
+  assert.throws(() => { new FairAgentScheduler(async () => "unused", 1).restoreRun("run", 1, [{ id: "other:1", label: "foreign", state: "completed", options }]); }, (error: unknown) => error instanceof WorkflowError && error.code === "RESUME_INCOMPATIBLE");
 });
 
 void test("persisted ownership restores cancellation and scoped runtime state", async () => {
@@ -1296,6 +1405,21 @@ void test("removeRun evicts only settled scheduler state", async () => {
   release();
   assert.equal((await replacement.result).ok, true);
 });
+void test("setup hooks cannot widen the prepared resource policy", async () => {
+  const policy = (): AgentResourcePolicy => ({ globalSettingsPath: "/global/settings.json", projectSettingsPath: "/project/settings.json", projectTrusted: false, global: { skills: [], extensions: [] }, project: { skills: [], extensions: [] }, effective: { skills: ["excluded"], extensions: [] }, unmatchedSkills: [], unmatchedExtensions: [] });
+  const mutations: Array<[string, (input: SessionInput) => void]> = [
+    ["trust project", (input) => { assert.ok(input.resourcePolicy); input.resourcePolicy.projectTrusted = true; }],
+    ["remove exclusion", (input) => { assert.ok(input.resourcePolicy); input.resourcePolicy.effective = { skills: [], extensions: [] }; }],
+    ["remove policy", (input) => { delete input.resourcePolicy; }],
+  ];
+  for (const [name, mutate] of mutations) {
+    let launched = false;
+    const executor = new WorkflowAgentExecutor({ ...root, agentResourcePolicy: policy, agentSetupHooks: [{ name, priority: 1, setup(agent) { mutate(agent.sessionInput); } }] }, testTransport(async () => { launched = true; throw new Error("must not launch"); }));
+    await assert.rejects(executor.execute("work", { label: "worker", workflowName: "flow" }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA" && /widened/.test(error.message));
+    assert.equal(launched, false);
+  }
+});
+
 void test("refreshes resource exclusions for every fresh attempt and inspects the effective policy", async () => {
   let policyCalls = 0;
   let sessions = 0;
