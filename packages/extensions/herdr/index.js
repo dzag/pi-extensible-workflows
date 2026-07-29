@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { unlinkSync, writeFileSync } from "node:fs";
+import { statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { createServer } from "node:net";
 import { join } from "node:path";
@@ -43,6 +43,11 @@ export function breadcrumbLabel(identity, attempt = 1) {
 function quote(value) { return `'${String(value).replace(/'/g, `'\\''`)}'`; }
 function hasToolCall(message) { return Array.isArray(message?.content) && message.content.some((part) => part && typeof part === "object" && part.type === "toolCall"); }
 function needsContinuation(message) { return !message || message.stopReason === "aborted" || hasToolCall(message); }
+function usableCwd(cwd) {
+  if (typeof cwd !== "string" || !cwd.trim()) return false;
+  try { return statSync(cwd).isDirectory(); } catch { return false; }
+}
+function completedSessionCwd(context) { return [context.attempt?.setup?.cwd, context.run?.cwd].find(usableCwd); }
 function createCommandFiles(prepared, prompt, directPrompt) {
   const paths = [];
   const create = (kind, value) => {
@@ -380,10 +385,10 @@ export function createHerdrExtension(options = {}) {
     agentAttemptActions: {
       openSession: {
         label: "Open session in Herdr pane",
-        visible(context) { return herdrAvailable(env) && !context.liveSession && ["completed", "failed", "cancelled"].includes(context.agent?.state) && Boolean(context.session?.sessionId && (context.attempt?.setup?.cwd || context.run?.cwd)); },
+        visible(context) { return herdrAvailable(env) && !context.liveSession && ["completed", "failed", "cancelled"].includes(context.agent?.state) && Boolean(context.session?.sessionId && completedSessionCwd(context)); },
         async run(context) {
           const session = context.session;
-          const cwd = context.attempt?.setup?.cwd ?? context.run?.cwd;
+          const cwd = completedSessionCwd(context);
           if (!session || context.liveSession || !cwd) return;
           await openHerdrLivePane({ action: "live", cwd, command: inspectSessionCommand(session), paneId: env?.HERDR_PANE_ID }, runner);
         },

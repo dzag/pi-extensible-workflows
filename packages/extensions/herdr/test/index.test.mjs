@@ -24,7 +24,7 @@ void test("uses the global extension setting and complete breadcrumb labels", ()
 void test("registers session and live actions when enabled", () => {
   const extension = createHerdrExtension({ agentDir: mkdtempSync(join(tmpdir(), "herdr-extension-default-")), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" } });
   assert.deepEqual(Object.values(extension.agentAttemptActions ?? {}).map(({ label }) => label), ["Open session in Herdr pane", "Open live session in Herdr pane"]);
-  const context = { session: { sessionId: "session", locator: { sessionFile: "/tmp/session.jsonl" } }, liveSession: {}, prepared: {}, handoff: {}, attempt: { setup: { cwd: "/repo" } }, agent: { state: "completed" }, run: {}, signal: new AbortController().signal, ui: {} };
+  const context = { session: { sessionId: "session", locator: { sessionFile: "/tmp/session.jsonl" } }, liveSession: {}, prepared: {}, handoff: {}, attempt: { setup: { cwd: process.cwd() } }, agent: { state: "completed" }, run: { cwd: process.cwd() }, signal: new AbortController().signal, ui: {} };
   assert.equal(extension.agentAttemptActions.openSession.visible({ ...context, liveSession: undefined }), true);
   assert.equal(extension.agentAttemptActions.openSession.visible({ ...context, liveSession: undefined, agent: { state: "running" } }), false);
   assert.equal(extension.agentAttemptActions.openSession.visible(context), false);
@@ -53,11 +53,11 @@ void test("opens a completed session in a Herdr pane without taking ownership", 
       return "";
     };
     const extension = createHerdrExtension({ agentDir: mkdtempSync(join(tmpdir(), "herdr-extension-completed-")), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" }, runner });
-    await extension.agentAttemptActions.openSession.run({ session: { sessionId: "session", locator: { sessionFile: "/tmp/completed session.jsonl" } }, attempt: { setup: { cwd: "/repo" } }, run: {}, signal: new AbortController().signal, ui: {} });
+    await extension.agentAttemptActions.openSession.run({ session: { sessionId: "session", locator: { sessionFile: "/tmp/completed session.jsonl" } }, attempt: { setup: { cwd: process.cwd() } }, run: { cwd: process.cwd() }, signal: new AbortController().signal, ui: {} });
     assert.deepEqual(calls, [
       ["pane", "layout", "--pane", "pane"],
       ["pane", "split", "pane", "--direction", "right", "--no-focus"],
-      ["pane", "run", "new-pane", "cd '/repo' && pi --fork '/tmp/completed session.jsonl' --tools 'read,grep,find,ls'"],
+      ["pane", "run", "new-pane", `cd '${process.cwd()}' && pi --fork '/tmp/completed session.jsonl' --tools 'read,grep,find,ls'`],
     ]);
   } finally {
     for (const [name, value] of Object.entries(previousEnvironment)) {
@@ -66,6 +66,35 @@ void test("opens a completed session in a Herdr pane without taking ownership", 
     }
   }
 });
+
+void test("falls back to the run cwd when a completed attempt worktree was removed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-extension-removed-worktree-"));
+  const worktree = join(root, "worktree");
+  mkdirSync(worktree);
+  await rm(worktree, { recursive: true, force: true });
+  try {
+    const calls = [];
+    const runner = async (args) => {
+      calls.push([...args]);
+      if (args[1] === "layout") return JSON.stringify({ result: { layout: { panes: [{ pane_id: "pane", rect: { width: 80, height: 20 } }] } } });
+      if (args[1] === "split") return JSON.stringify({ result: { pane: { pane_id: "new-pane" } } });
+      return "";
+    };
+    const extension = createHerdrExtension({ agentDir: mkdtempSync(join(tmpdir(), "herdr-extension-fallback-")), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" }, runner });
+    const context = { session: { sessionId: "session", locator: { sessionFile: "/tmp/completed session.jsonl" } }, attempt: { setup: { cwd: worktree } }, agent: { state: "completed" }, run: { cwd: root }, signal: new AbortController().signal, ui: {} };
+    assert.equal(extension.agentAttemptActions.openSession.visible(context), true);
+    await extension.agentAttemptActions.openSession.run(context);
+    assert.deepEqual(calls, [
+      ["pane", "layout", "--pane", "pane"],
+      ["pane", "split", "pane", "--direction", "right", "--no-focus"],
+      ["pane", "run", "new-pane", `cd '${root}' && pi --fork '/tmp/completed session.jsonl' --tools 'read,grep,find,ls'`],
+    ]);
+    assert.equal(extension.agentAttemptActions.openSession.visible({ ...context, run: { cwd: join(root, "removed") } }), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 void test("opens the active session after the handoff boundary and releases on pane exit", async () => {
   const calls = [];
   let runCommand;
