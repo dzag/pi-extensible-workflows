@@ -12,6 +12,7 @@
     "extensions": ["./dist/index.js"]
   },
   "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
     "pi-extensible-workflows": "*"
   },
   "publishConfig": {

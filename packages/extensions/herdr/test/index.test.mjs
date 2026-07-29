@@ -184,12 +184,15 @@ void test("does not open a pane after a terminal assistant response", async () =
 void test("reports terminal turns as idle", async () => {
   const handlers = new Map();
   const calls = [];
+  let releaseAgent;
+  let releaseStarted = false;
+  const releaseFinished = new Promise((resolve) => { releaseAgent = resolve; });
   extension({
-    on(name, handler) { handlers.set(name, handler); },
+    on(name, handler) { const previous = handlers.get(name); handlers.set(name, previous ? async (...args) => { await previous(...args); await handler(...args); } : handler); },
     events: { on(name, handler) { handlers.set(name, handler); } },
   }, {
     env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane", PI_EXTENSIBLE_WORKFLOWS_HERDR_OWNER: "1" },
-    runner: async (args) => { calls.push([...args]); return ""; },
+    runner: async (args) => { calls.push([...args]); if (args[1] === "release-agent") { releaseStarted = true; await releaseFinished; } return ""; },
   });
   const context = { hasUI: true, isIdle: () => false, sessionManager: { getSessionId: () => "session", getSessionFile: () => "/tmp/session.jsonl" } };
   await handlers.get("session_start")({ reason: "workflow-agent" }, context);
@@ -199,6 +202,16 @@ void test("reports terminal turns as idle", async () => {
   await handlers.get("agent_start")({}, context);
   await handlers.get("agent_settled")({}, context);
   assert.deepEqual(calls.filter(([command, subcommand]) => command === "pane" && subcommand === "report-agent").map((args) => args[args.indexOf("--state") + 1]), ["working", "idle", "working", "idle", "working", "idle"]);
+  const shutdown = handlers.get("session_shutdown")({ reason: "quit" }, context);
+  assert.ok(shutdown instanceof Promise);
+  await new Promise((resolve) => globalThis.setImmediate(resolve));
+  assert.equal(releaseStarted, true);
+  let shutdownFinished = false;
+  shutdown.then(() => { shutdownFinished = true; });
+  await Promise.resolve();
+  assert.equal(shutdownFinished, false);
+  releaseAgent();
+  await shutdown;
 });
 
 void test("routes fully inspectable agents into one labeled workflow workspace", async () => {
@@ -311,6 +324,10 @@ void test("bridges unknown tools and aborts forwarded tool calls", async () => {
     const bridgeSource = readFileSync(extensionPath, "utf8"); const socketPath = JSON.parse(/const socketPath = (.+);/.exec(bridgeSource)?.[1] ?? "null");
     const unknown = await new Promise((resolve, reject) => { const socket = net.createConnection(socketPath); let data = ""; socket.setEncoding("utf8"); socket.on("data", (chunk) => { data += chunk; const line = data.split("\n")[0]; if (line) { resolve(JSON.parse(line)); socket.destroy(); } }); socket.on("error", reject); socket.on("connect", () => socket.write(JSON.stringify({ toolCallId: "unknown", name: "missing", params: {} }) + "\n")); });
     assert.deepEqual(unknown, { type: "error", error: "Unknown Herdr tool: missing" });
+    const malformed = await new Promise((resolve, reject) => { const socket = net.createConnection(socketPath); let data = ""; socket.setEncoding("utf8"); socket.on("data", (chunk) => { data += chunk; const line = data.split("\n")[0]; if (line) { resolve(JSON.parse(line)); globalThis.setImmediate(() => socket.destroy()); } }); socket.on("error", reject); socket.on("connect", () => socket.write(`${JSON.stringify({})}\n${JSON.stringify({ toolCallId: "ignored", name: "slow", params: {} })}\n`)); });
+    assert.deepEqual(malformed, { type: "error", error: "Unknown Herdr tool: undefined" });
+    await new Promise((resolve) => globalThis.setImmediate(resolve));
+    assert.equal(entered.length, 0);
     let bridged; const bridgeModule = await import(pathToFileURL(extensionPath).href); bridgeModule.default({ registerTool(candidate) { bridged = candidate; } }); assert.ok(bridged);
     const pending = bridged.execute("abort-call", {}, controller.signal, () => {});
     while (!entered.length) await new Promise((resolve) => globalThis.setImmediate(resolve));
@@ -319,12 +336,21 @@ void test("bridges unknown tools and aborts forwarded tool calls", async () => {
 });
 void test("closes workspaces for every terminal run state and session shutdown", async () => {
   const handlers = new Map(); const closed = []; let closeAll = 0;
-  const workspaces = { close: async (runId) => { closed.push(runId); }, closeAll: async () => { closeAll += 1; } };
+  let releaseCloseAll;
+  const closeAllFinished = new Promise((resolve) => { releaseCloseAll = resolve; });
+  const workspaces = { close: async (runId) => { closed.push(runId); }, closeAll: async () => { closeAll += 1; await closeAllFinished; } };
   const pi = { events: { on(name, handler) { handlers.set(name, handler); } }, on(name, handler) { handlers.set(name, handler); } };
   resetWorkflowRegistry();
   extension(pi, { env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" }, workspaces });
   for (const state of ["failed", "stopped", "interrupted", "budget_exhausted"]) await handlers.get("workflow:run-state-changed")({ runId: state, state });
-  await handlers.get("workflow:run-completed")({ runId: "completed" }); await handlers.get("session_shutdown")();
+  await handlers.get("workflow:run-completed")({ runId: "completed" });
+  const shutdown = handlers.get("session_shutdown")();
+  let shutdownFinished = false;
+  shutdown.then(() => { shutdownFinished = true; });
+  await Promise.resolve();
+  assert.equal(shutdownFinished, false);
+  releaseCloseAll();
+  await shutdown;
   assert.deepEqual(closed, ["failed", "stopped", "interrupted", "budget_exhausted", "completed"]); assert.equal(closeAll, 1);
 });
 void test("default workspace manager reuses one workspace and closes it once on completion", async () => {
@@ -384,7 +410,7 @@ void test("relays generated tool bridge results, errors, and updates", async () 
     return { content: [{ type: "text", text: "tool result" }] };
   } };
   const herdr = createHerdrExtension({ agentDir, env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "parent" }, runner, workspaces });
-  const agent = { transport: { id: "local", async createSession(value) { return { reference: { transport: "local", sessionId: "session" }, getState: () => ({ model: value.model, tools: value.tools }), getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), dispose: async () => {} }; } } };
+  const agent = { transport: { id: "local", async createSession(value) { return { reference: { transport: "local", sessionId: "session" }, getState: () => ({ model: value.model, tools: value.tools }), getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), abort: async () => {}, dispose: async () => {} }; } } };
   const controller = new AbortController();
   herdr.agentSetupHooks.fullyInspectable.setup(agent, { identity: { structuralPath: ["review"], parentBreadcrumb: "flow", callSite: "agent", occurrence: 1 }, run: { runId: "run", workflow: { name: "flow" } }, signal: controller.signal });
   const prepared = { cwd: "/repo", model: { provider: "fake", model: "model" }, tools: [], customTools: [tool], initialPrompt: "work", sessionLabel: "flow:review", piRuntime };

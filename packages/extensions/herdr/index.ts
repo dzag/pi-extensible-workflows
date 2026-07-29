@@ -19,7 +19,6 @@ import {
 } from "pi-extensible-workflows";
 import type {
   AgentAttemptAction,
-  AgentAttemptActionContext,
   AgentIdentity,
   AgentSetup,
   AgentSetupContext,
@@ -42,7 +41,7 @@ import type {
 type HerdrSettings = Pick<WorkflowSettings, "extensions">;
 type HerdrConfig = NonNullable<NonNullable<HerdrSettings["extensions"]>["herdr"]>;
 type HerdrResourcePaths = { extensions: readonly string[]; skills: readonly string[] };
-type HerdrSession = Omit<WorkflowAgentSession, "getLastAssistant" | "abort"> & { getLastAssistant?(): WorkflowAgentMessage | undefined; abort?(): Promise<void>; getHerdrResourcePaths?(): HerdrResourcePaths | undefined };
+type HerdrSession = Omit<WorkflowAgentSession, "getLastAssistant" | "abort"> & { getLastAssistant?(): WorkflowAgentMessage | undefined; abort(): Promise<void>; getHerdrResourcePaths?(): HerdrResourcePaths | undefined };
 type SessionReference = Parameters<HerdrAgentReporter["reportSession"]>[0];
 type ToolCallContent = { type: "toolCall"; name?: string };
 type LifecycleState = "idle" | "working" | "blocked";
@@ -57,6 +56,8 @@ type ToolBridgeMessage = { type: "update"; value: unknown } | { type: "error"; e
 type WorkspaceManager = { open(run: Readonly<WorkflowRunContext>, request: HerdrWorkspacePaneRequest): Promise<HerdrWorkspacePane>; close(runId: string): Promise<void>; closeAll(): Promise<void> };
 type LaunchPaneOptions = { session: HerdrSession; prepared: Readonly<PreparedAgentSession>; identity: Readonly<AgentIdentity>; run?: Readonly<WorkflowRunContext> | undefined; attempt: number; runner: HerdrCommandRunner; fullyInspectable: boolean; env: NodeJS.ProcessEnv; signal: AbortSignal; prompt?: string | undefined; workspaces?: WorkspaceManager | undefined; tuiIndex?: number | undefined; tuiLabel?: string | undefined; directPrompt?: boolean | undefined; onStatus?: ((state: HerdrAgentStatus) => void | Promise<void>) | undefined };
 type PaneHandle = { pane: string; monitor: Promise<"closed" | "exited" | "idle" | "aborted">; reporter: HerdrAgentReporter; closeRemote(): Promise<void>; close(): Promise<void> };
+type HerdrBreadcrumbIdentity = Omit<AgentIdentity, "structuralPath"> & { structuralPath?: readonly string[] };
+type CompletedSessionContext = { attempt?: { setup?: { cwd?: string } }; run?: { cwd?: string } };
 export interface HerdrExtensionOptions { env?: NodeJS.ProcessEnv; runner?: HerdrCommandRunner; workspaces?: WorkspaceManager; agentDir?: string }
 type HerdrExtensionOverrides = Pick<HerdrExtensionOptions, "env" | "runner" | "workspaces">;
 export interface HerdrExtension extends WorkflowExtension { agentAttemptActions: { openSession: AgentAttemptAction; openLiveSession: AgentAttemptAction }; agentSetupHooks: { fullyInspectable: AgentSetupHook } }
@@ -75,9 +76,9 @@ function herdrConfig(agentDirectory = agentDir()): HerdrConfig {
 
 export function isFullyInspectableMode(agentDirectory = agentDir()): boolean { return herdrConfig(agentDirectory).enableFullyInspectableMode === true; }
 
-export function breadcrumbLabel(identity: Readonly<AgentIdentity>, attempt = 1): string {
+export function breadcrumbLabel(identity: Readonly<HerdrBreadcrumbIdentity>, attempt = 1): string {
   const parts = [
-    ...identity.structuralPath,
+    ...(identity.structuralPath ?? []),
     ...(identity.parentBreadcrumb ? [identity.parentBreadcrumb] : []),
     ...(identity.worktreeOwner ? [`worktree:${identity.worktreeOwner}`] : []),
     identity.callSite,
@@ -94,7 +95,7 @@ function usableCwd(cwd: string | undefined): boolean {
   if (typeof cwd !== "string" || !cwd.trim()) return false;
   try { return statSync(cwd).isDirectory(); } catch { return false; }
 }
-function completedSessionCwd(context: Readonly<AgentAttemptActionContext>): string | undefined { return [context.attempt.setup.cwd, context.run.cwd].find(usableCwd); }
+function completedSessionCwd(context: Readonly<CompletedSessionContext>): string | undefined { return [context.attempt?.setup?.cwd, context.run?.cwd].find(usableCwd); }
 function createCommandFiles(prepared: Readonly<PreparedAgentSession>, prompt: string | undefined, directPrompt: boolean): CommandFiles {
   const paths: string[] = [];
   const create = (kind: string, value: string): string => {
@@ -146,7 +147,8 @@ function isToolBridgeRequest(value: unknown): value is ToolBridgeRequest {
 }
 function toolBridgeRequest(value: unknown): ToolBridgeRequest {
   if (isToolBridgeRequest(value)) return value;
-  throw new Error("Invalid Herdr tool request");
+  const name = value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>).name : undefined;
+  throw new Error(`Unknown Herdr tool: ${String(name)}`);
 }
 
 async function createToolBridge(prepared: Readonly<PreparedAgentSession>): Promise<ExtensionBridge | undefined> {
@@ -167,20 +169,21 @@ async function createToolBridge(prepared: Readonly<PreparedAgentSession>): Promi
     let buffer = "";
     let handled = false;
     const send = (message: ToolBridgeMessage): void => { if (!socket.destroyed) socket.write(`${JSON.stringify(message)}\n`); };
-    const handle = async (request: ToolBridgeRequest): Promise<void> => {
+    const handle = async (value: unknown): Promise<void> => {
       if (handled) return;
       handled = true;
-      const definition = definitions.find(({ name }) => name === request.name);
-      if (!definition) { send({ type: "error", error: `Unknown Herdr tool: ${request.name}` }); return; }
       try {
-        const value = await definition.execute(request.toolCallId, request.params, controller.signal, (update: unknown) => { send({ type: "update", value: update }); }, undefined as never);
-        send({ type: "result", value });
+        const request = toolBridgeRequest(value);
+        const definition = definitions.find(({ name }) => name === request.name);
+        if (!definition) { send({ type: "error", error: `Unknown Herdr tool: ${request.name}` }); return; }
+        const result = await definition.execute(request.toolCallId, request.params, controller.signal, (update: unknown) => { send({ type: "update", value: update }); }, undefined as never);
+        send({ type: "result", value: result });
       } catch (error) {
         send({ type: "error", error: error instanceof Error ? error.message : String(error) });
       }
     };
     socket.setEncoding("utf8");
-    socket.on("data", (chunk) => { buffer += chunk.toString(); let newline; while ((newline = buffer.indexOf("\n")) >= 0) { const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); if (!line) continue; try { void handle(toolBridgeRequest(JSON.parse(line))); } catch (error) { send({ type: "error", error: error instanceof Error ? error.message : String(error) }); } } });
+    socket.on("data", (chunk) => { buffer += chunk.toString(); let newline; while ((newline = buffer.indexOf("\n")) >= 0) { const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); if (!line) continue; try { void handle(JSON.parse(line)); } catch (error) { send({ type: "error", error: error instanceof Error ? error.message : String(error) }); } } });
     socket.on("close", () => { controller.abort(); sockets.delete(socket); });
     socket.on("error", () => { controller.abort(); sockets.delete(socket); });
   });
@@ -325,7 +328,7 @@ function herdrTransport(agent: AgentSetup, context: Readonly<AgentSetupContext>,
       let opened;
       try {
         await session.suspendForHandoff?.();
-        if (!session.suspendForHandoff) await session.abort?.();
+        if (!session.suspendForHandoff) await session.abort();
         opened = await launchPane({ session, prepared, identity: context.identity, run: context.run, attempt: sessionContext.attempt, runner, fullyInspectable, env, signal: sessionContext.signal, prompt: prepared.initialPrompt, workspaces, tuiIndex: context.tuiIndex, tuiLabel: context.tuiLabel });
       } catch (error) {
         await session.dispose();
@@ -335,7 +338,7 @@ function herdrTransport(agent: AgentSetup, context: Readonly<AgentSetupContext>,
       let active: PaneHandle | undefined = opened;
       return {
         ...session,
-        getLastAssistant: () => session.getLastAssistant?.(),
+        getLastAssistant(this: HerdrSession): WorkflowAgentMessage | undefined { return session.getLastAssistant?.call(this); },
         reference: { ...session.reference, transport: "herdr" },
         async prompt(text) {
           if (disposed) throw new Error("Herdr workflow session is disposed");
@@ -361,7 +364,7 @@ function herdrTransport(agent: AgentSetup, context: Readonly<AgentSetupContext>,
           }
           return assistant ? { assistant } : {};
         },
-        async abort() { await session.abort?.(); },
+        async abort() { await session.abort(); },
         async dispose() {
           if (disposed) return;
           disposed = true;
@@ -378,14 +381,18 @@ function herdrTransport(agent: AgentSetup, context: Readonly<AgentSetupContext>,
 }
 
 async function abortSession(session: { abort?: () => Promise<void> }): Promise<void> { await session.abort?.(); }
-
+function hasExtensionHooks(value: unknown): value is ExtensionAPI {
+  if (value === null || typeof value !== "object") return false;
+  const candidate = value as { on?: unknown; events?: { on?: unknown } };
+  return typeof candidate.on === "function" && typeof candidate.events?.on === "function";
+}
 function isHerdrBlockedEvent(value: unknown): value is HerdrBlockedEvent {
   return value !== null && typeof value === "object" && typeof (value as Record<string, unknown>).active === "boolean" && ((value as Record<string, unknown>).label === undefined || typeof (value as Record<string, unknown>).label === "string");
 }
 
-function registerLifecycleHooks(pi: ExtensionAPI, runner: HerdrCommandRunner, env: NodeJS.ProcessEnv): void {
+function registerLifecycleHooks(pi: ExtensionAPI | null | undefined, runner: HerdrCommandRunner, env: NodeJS.ProcessEnv): void {
   const pane = env.HERDR_PANE_ID;
-  if (env.PI_EXTENSIBLE_WORKFLOWS_HERDR_OWNER !== "1" || !pane) return;
+  if (env.PI_EXTENSIBLE_WORKFLOWS_HERDR_OWNER !== "1" || !pane || !hasExtensionHooks(pi)) return;
   const reporter = createHerdrAgentReporter(pane, "pi", runner);
   let sessionRef: SessionReference = {};
   let rootSession = false;
@@ -449,7 +456,7 @@ function registerLifecycleHooks(pi: ExtensionAPI, runner: HerdrCommandRunner, en
   });
   pi.on("agent_settled", async () => { if (!rootSession) return; agentActive = false; publishState(); await stateReport; });
   pi.on("agent_end", async (_event: AgentEndEvent, ctx: ExtensionContext) => { if (!rootSession || !ctx.isIdle()) return; agentActive = false; publishState(); await stateReport; });
-  pi.on("session_shutdown", (event: SessionShutdownEvent) => { if (event.reason === "quit") void reporter.release(); });
+  pi.on("session_shutdown", async (event: SessionShutdownEvent) => { if (event.reason === "quit") await reporter.release(); });
 }
 
 export function createHerdrExtension(options: HerdrExtensionOptions = {}): HerdrExtension {
@@ -557,10 +564,11 @@ function isTerminalRunState(value: unknown): value is "failed" | "stopped" | "in
   return value === "failed" || value === "stopped" || value === "interrupted" || value === "budget_exhausted";
 }
 
-function registerWorkspaceLifecycle(pi: ExtensionAPI, workspaces: WorkspaceManager): void {
+function registerWorkspaceLifecycle(pi: ExtensionAPI | null | undefined, workspaces: WorkspaceManager): void {
+  if (!hasExtensionHooks(pi)) return;
   pi.events.on(WORKFLOW_RUN_COMPLETED_EVENT, (event) => { if (isRunEvent(event)) void workspaces.close(event.runId); });
   pi.events.on(WORKFLOW_RUN_STATE_CHANGED_EVENT, (event) => { if (isRunEvent(event) && isTerminalRunState((event as { state?: unknown }).state)) void workspaces.close(event.runId); });
-  pi.on("session_shutdown", () => { void workspaces.closeAll(); });
+  pi.on("session_shutdown", async () => { await workspaces.closeAll(); });
 }
 
 export default function extension(pi: ExtensionAPI, overrides: HerdrExtensionOverrides = {}): void {
