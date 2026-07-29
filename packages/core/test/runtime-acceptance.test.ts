@@ -7,7 +7,7 @@ import test from "node:test";
 import { Type } from "@earendil-works/pi-ai";
 import workflowExtension, { createLaunchSnapshot, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, persistActiveAgentAttempt, persistAgentAttempts, registerWorkflowExtension, runWorkflow, shellIdentityPath, structuralPath, WorkflowAgentExecutor, WorkflowError, type JsonValue, type WorkflowExtension } from "../src/index.js";
 import { createLocalPiSession } from "../src/agent-execution.js";
-import { listRunIds, RunStore } from "../src/persistence.js";
+import { listRunIds, runsDirectory, RunStore } from "../src/persistence.js";
 import type { SessionInput } from "../src/agent-execution.js";
 function sessionStats(cost = 0.25) { return { tokens: { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, total: 14 }, cost }; }
 async function waitForRunState(store: RunStore, state: string): Promise<void> {
@@ -69,6 +69,38 @@ void test("production session_start cold-restores ownership and /workflow stop c
   assert.deepEqual((await store.load()).run.agents.map(({ state }) => state), ["cancelled", "cancelled"]);
   assert.deepEqual((await store.load()).run.agents.map(({ model, tools }) => ({ model, tools })), [{ model: { provider: "runtime", model: "runtime-model", thinking: "medium" }, tools: ["agent"] }, { model: { provider: "runtime", model: "runtime-model", thinking: "medium" }, tools: [] }]);
   assert.deepEqual(notices, [`Stopped workflow ${runId}.`]);
+});
+
+void test("session recovery skips a partial run without hiding a valid /workflow resume", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-partial-recovery-"));
+  const cwd = join(home, "project");
+  const sessionId = "session-a";
+  const runId = "valid-run";
+  const store = new RunStore(cwd, sessionId, runId, home);
+  await store.create({ id: runId, workflowName: "valid", cwd, sessionId, state: "interrupted", agents: [], agentSessions: [] }, createLaunchSnapshot({ script: "return await agent('resume me');", args: null, metadata: { name: "valid" }, settings: { concurrency: 1 }, models: ["openai/gpt"], tools: ["agent"], agentTypes: [], roles: {}, schemas: [] }));
+  const corruptId = "partial-run";
+  const corruptDirectory = join(runsDirectory(cwd, sessionId, home), corruptId);
+  mkdirSync(corruptDirectory, { recursive: true });
+  writeFileSync(join(corruptDirectory, "state.json"), "{");
+
+  let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+  let shutdown: (() => Promise<void>) | undefined;
+  const notices: string[] = [];
+  const ctx = { cwd, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => sessionId }, ui: { notify: (message: string) => { notices.push(message); } } };
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => ({ sessionId: `resume-${input.sessionLabel}`, sessionFile: `/sessions/${input.sessionLabel}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "resumed" }] }], getSessionStats: sessionStats, prompt: async () => {}, dispose() {} });
+  workflowExtension({ on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, registerTool() {}, registerCommand(_name: string, value: { handler: typeof command }) { command = value.handler; }, getThinkingLevel: () => "medium", getActiveTools: () => ["agent", "workflow"] } as never, home, async () => {}, testTransport(createSession));
+  assert.ok(start && command && shutdown);
+  try {
+    await start({}, ctx);
+    assert.deepEqual(await listRunIds(cwd, sessionId, home), [runId]);
+    await command("", ctx);
+    assert.ok(notices.some((message) => message.includes("Workflow: valid") && message.includes("Status: interrupted")));
+    await command(`resume ${runId}`, ctx);
+    await waitForRunState(store, "completed");
+  } finally {
+    await shutdown();
+  }
 });
 
 void test("cold resume persists effective role, fallback, nested, retry, and explicit policies", async () => {
