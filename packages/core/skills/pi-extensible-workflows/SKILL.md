@@ -26,10 +26,12 @@ Await `parallel(...)` or `pipeline(...)` results before interpolation. Runs are 
 
 ## Runtime and safety rules
 
-
-
-```json
-{ "workflow": "workflowName", "args": { "issue": 42 } }
+Functions returned by `workflow_catalog` are globals inside workflow source. Compose them with other workflow operations by calling them in `script`; pass their inputs through `args` when appropriate:
+```js
+// other code
+const res = await fnName(args);
+// consume res
+return ...;
 ```
 
 A reviewed JavaScript file on disk can use `scriptPath` instead of `script`.

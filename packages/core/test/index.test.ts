@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import type { AgentSessionEvent, InlineExtension, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { WORKFLOW_TOOL_DESCRIPTION, WORKFLOW_TOOL_PROMPT_SNIPPET, navigatorAttentionSort } from "../src/host.js";
+import { WORKFLOW_TOOL_DESCRIPTION, WORKFLOW_TOOL_PARAMETERS, WORKFLOW_TOOL_PROMPT_SNIPPET, navigatorAttentionSort } from "../src/host.js";
 import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, disabledResources, ERROR_CODES, FairAgentScheduler, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowFailure, formatWorkflowFailureDelivery, formatWorkflowFailureDiagnostics, formatWorkflowPhaseDashboard, formatWorkflowPreview, formatWorkflowProgress, inspectWorkflowScript, loadAgentDefinitions, loadSettings, mergeAgentResourceExclusions, mergeBudget, parseRoleMarkdown, preflight, registerWorkflowExtension, resourcePatternMatches, resolveAgentResourcePolicy, resolveModelReference, resolveWorkflowSettings, resumeBudgetAllowed, RPC_LIMIT_BYTES, RunLifecycle, RunStore, runWorkflow, saveModelAliases, structuralPath, truncateWorkflowProgress, validateBudget, validateBudgetPatch, validateCheckpoint, validateModelAliases, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_AGENT_STALL_THRESHOLD_MS, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, WorkflowRegistry, openWorkflowArtifact, type AgentOptions, type JsonValue, type PersistedRun, type WorkflowExtension, type WorkflowFailureDiagnostics, type WorkflowFunctionContext, type WorkflowOrchestrationContext } from "../src/index.js";
 import { loadingRegistry } from "../src/registry.js";
 import type { SessionInput } from "../src/agent-execution.js";
@@ -167,12 +167,11 @@ const capabilities = {
 const reuseExtension: WorkflowExtension = { version: "1.0.0", headline: "Reusable", description: "Reusable test workflows", functions: { inspect: { description: "Inspect", input: { type: "object", additionalProperties: false }, output: { type: "string" }, run: () => "ok" }, hello: { description: "Say hello", input: { type: "object", properties: { name: { type: "string" } }, required: ["name"], additionalProperties: false }, output: { type: "string" }, run: (input) => typeof input.name === "string" ? input.name : "" } } };
 const valid = `phase("check"); agent("review", { role: "reviewer" }); agent("custom", { model: "openai/gpt", tools: ["read"] });`;
 
-void test("workflow call preview summarizes inline and registered functions safely", () => {
+void test("workflow call preview summarizes inline scripts safely", () => {
   const preview = formatWorkflowPreview({ script: valid, name: "review", description: "Review code" });
   assert.match(preview, /^workflow review\nReview code/m);
   assert.doesNotMatch(preview, /^(Phases|Steps|Agents|Models|Roles|Tools|Extensions):/m);
-  assert.equal(formatWorkflowPreview({ workflow: "audit" }), "workflow audit\nRegistered function");
-  assert.equal(formatWorkflowPreview({ workflow: "audit", name: "nightly" }), "workflow nightly\nRegistered function: audit");
+  assert.equal(formatWorkflowPreview({ scriptPath: "workflow.js", name: "nightly" }), "workflow nightly");
   assert.equal(formatWorkflowPreview({ script: "not javascript", name: "review" }), "workflow review");
 });
 void test("workflow guidance leads with the inline parallel-to-summary path", () => {
@@ -228,14 +227,17 @@ void test("registers the workflow tool, command, and conditional skill", async (
   assert.match(skillSource, /return \{ ok: true \};/);
   assert.doesNotThrow(() => preflight(shellExample, { models: new Set(), tools: new Set(), agentTypes: new Set() }));
   await assert.rejects(tool.execute("id", { script: "return true" }, new AbortController().signal, undefined, { model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
-  await assert.rejects(tool.execute("id", { script: "return true", workflow: "missing" }, new AbortController().signal, undefined, { model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
-  await assert.rejects(tool.execute("id", { workflow: "missing", name: "missing-run" }, new AbortController().signal, undefined, { model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }), (error: unknown) => error instanceof WorkflowError && error.code === "MISSING_WORKFLOW");
-  await assert.rejects(tool.execute("id", { workflow: "missing", name: " " }, new AbortController().signal, undefined, { model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  assert.equal("workflow" in WORKFLOW_TOOL_PARAMETERS.properties, false);
+  assert.deepEqual(WORKFLOW_TOOL_PARAMETERS.required, ["name"]);
+  assert.equal("args" in WORKFLOW_TOOL_PARAMETERS.properties, true);
+  await assert.rejects(tool.execute("id", { name: "missing-source" }, new AbortController().signal, undefined, { model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_SYNTAX");
+  await assert.rejects(tool.execute("id", { name: "both", script: "return true", scriptPath: "missing.js" }, new AbortController().signal, undefined, { model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  await assert.rejects(tool.execute("id", { name: " ", script: "return true" }, new AbortController().signal, undefined, { model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   await assert.rejects(tool.execute("id", { script: "" }, undefined, undefined, { model: undefined }), (error: unknown) => error instanceof WorkflowError && error.code === "UNKNOWN_MODEL");
 });
 void test("workflow launches from a script file and snapshots its exact source", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-script-file-"));
-  const script = "export const meta={name:'file-launch'}; return 'from-file';\r\n";
+  const script = "export const meta={name:'file-launch'}; return args.value;\r\n";
   const scriptPath = join(home, "workflow.js");
   writeFileSync(scriptPath, script);
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
@@ -243,12 +245,13 @@ void test("workflow launches from a script file and snapshots its exact source",
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   await assert.rejects(workflow.execute("missing", { name: "missing-file", scriptPath: "missing.js", foreground: true }, new AbortController().signal, undefined, { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_SYNTAX" && error.message.includes("Cannot read workflow script file missing.js"));
-  const result = await workflow.execute("file", { name: "file-launch", scriptPath: "workflow.js", foreground: true }, new AbortController().signal, undefined, { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }) as { content: Array<{ text: string }>; details: { runId: string } };
+  const result = await workflow.execute("file", { name: "file-launch", scriptPath: "workflow.js", args: { value: "from-file" }, foreground: true }, new AbortController().signal, undefined, { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }) as { content: Array<{ text: string }>; details: { runId: string } };
   assert.equal(result.content[0]?.text, '"from-file"');
   writeFileSync(scriptPath, "return 'changed';\n");
   const store = new RunStore(home, "session", result.details.runId, home);
   const loaded = await store.load();
   assert.equal(loaded.snapshot.script, script);
+  assert.deepEqual(loaded.snapshot.args, { value: "from-file" });
   assert.equal(readFileSync(join(store.directory, "workflow.js"), "utf8"), script);
 });
 void test("workflow_retry links children, replays parallel branches, inherits budgets, and supports retry chains", async () => {
@@ -1048,30 +1051,30 @@ void test("resuming a launched trusted-project run keeps per-run concurrency and
   await shutdown?.();
 });
 
-void test("registered extension functions can run by name", async () => {
+void test("registered extension functions can run as script globals with args", async () => {
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> }> = [];
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never);
   registerWorkflowExtension(reuseExtension);
   const execute = tools.find(({ name }) => name === "workflow")?.execute;
   assert.ok(execute);
-  const result = await execute("id", { workflow: "hello", args: { name: "Andrea" }, foreground: true }, new AbortController().signal, undefined, { cwd: mkdtempSync(join(tmpdir(), "pi-extensible-workflows-reuse-")), model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } });
+  const result = await execute("id", { name: "hello-run", script: "return await hello(args);", args: { name: "Andrea" }, foreground: true }, new AbortController().signal, undefined, { cwd: mkdtempSync(join(tmpdir(), "pi-extensible-workflows-reuse-")), model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } });
   assert.equal(result.content[0]?.text, '"Andrea"');
 });
-void test("direct function launches enforce input and output schemas", async () => {
+void test("registered function schemas remain enforced inside scripts", async () => {
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never);
-  registerWorkflowExtension({ version: "1.0.0", headline: "Schema tests", description: "Schema tests", functions: { needsValue: { description: "Needs a value", input: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }, output: { type: "string" }, run: () => "ok" }, badResult: { description: "Bad result", input: { type: "object", additionalProperties: false }, output: { type: "string" }, run: () => 42 } } });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Schema tests", description: "Schema tests", functions: { needsValue: { description: "Needs a value", input: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }, output: { type: "string" }, run: (input) => typeof input.value === "string" ? input.value : "" }, badResult: { description: "Bad result", input: { type: "object", additionalProperties: false }, output: { type: "string" }, run: () => 42 } } });
   const execute = tools.find(({ name }) => name === "workflow")?.execute;
   assert.ok(execute);
   const context = { cwd: mkdtempSync(join(tmpdir(), "pi-extensible-workflows-function-schema-")), model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
-  await assert.rejects(execute("id", { workflow: "needsValue", args: {}, foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESULT_INVALID");
-  await assert.rejects(execute("id", { name: " ", workflow: "needsValue", args: { value: "ok" }, foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
-  const named = await execute("id", { name: "needs-value", workflow: "needsValue", args: { value: "ok" }, foreground: true }, new AbortController().signal, undefined, context) as { content: Array<{ text: string }>; details: { run: { workflowName: string } } };
+  await assert.rejects(execute("id", { name: "missing-value", script: "return await needsValue(args);", args: {}, foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESULT_INVALID");
+  await assert.rejects(execute("id", { name: " ", script: "return await needsValue(args);", args: { value: "ok" }, foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  const named = await execute("id", { name: "needs-value", script: "return await needsValue(args);", args: { value: "ok" }, foreground: true }, new AbortController().signal, undefined, context) as { content: Array<{ text: string }>; details: { run: { workflowName: string } } };
   assert.equal(named.content[0]?.text, '"ok"');
   assert.equal(named.details.run.workflowName, "needs-value");
-  await assert.rejects(execute("id", { workflow: "badResult", args: {}, foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESULT_INVALID");
+  await assert.rejects(execute("id", { name: "bad-result", script: "return await badResult(args);", args: {}, foreground: true }, new AbortController().signal, undefined, context), (error: unknown) => error instanceof WorkflowError && error.code === "RESULT_INVALID");
 });
-void test("registered workflow retries preserve role definitions for agent calls", async () => {
+void test("registered globals preserve role definitions for agent calls across retries", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-registered-role-retry-"));
   const agentDir = mkdtempSync(join(home, "agent-"));
   mkdirSync(join(agentDir, "pi-extensible-workflows", "roles"), { recursive: true });
@@ -1088,7 +1091,7 @@ void test("registered workflow retries preserve role definitions for agent calls
   const retry = tools.find(({ name }) => name === "workflow_retry");
   assert.ok(workflow && retry);
   const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
-  await assert.rejects(workflow.execute("source", { workflow: "registeredRoleRetry", args: {}, foreground: true }, new AbortController().signal, undefined, context), WorkflowError);
+  await assert.rejects(workflow.execute("source", { name: "registered-role-retry", script: "return await registeredRoleRetry(args);", args: {}, foreground: true }, new AbortController().signal, undefined, context), WorkflowError);
   const sourceId = (await listRunIds(home, "session", home))[0];
   assert.ok(sourceId);
   const source = await new RunStore(home, "session", sourceId, home).load();

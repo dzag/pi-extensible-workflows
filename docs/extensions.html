@@ -118,14 +118,14 @@
             <tr><td><code>sessionId</code></td><td>Owning Pi session ID.</td></tr>
             <tr><td><code>runId</code></td><td>Durable workflow run ID.</td></tr>
             <tr><td><code>workflow</code></td><td>Read-only <code>WorkflowMetadata</code> with <code>name</code> and optional <code>description</code>.</td></tr>
-            <tr><td><code>args</code></td><td>Read-only JSON launch arguments. For a registered function this is the validated function input.</td></tr>
+            <tr><td><code>args</code></td><td>Read-only JSON launch arguments passed to the script; scripts can pass them to registered globals.</td></tr>
             <tr><td><code>signal</code></td><td>AbortSignal for run cancellation. Check it in bounded work and stop promptly when aborted.</td></tr>
           </tbody>
         </table></div>
         <p>Completed function calls are journaled by structural path. A repeated call with the same path returns the validated stored output without running the implementation again. The journal is durable across cold resume and retry, while <code>phase</code> and <code>log</code> side effects are applied around the call. Design function side effects to be bounded and replay-aware: a host crash after an external side effect but before its result is journaled can cause that side effect to run again.</p>
-        <p>If a function throws, its call is not completed and the workflow fails. <code>workflow_retry</code> is for persisted failed runs: completed function calls replay from the journal and incomplete calls run again. Per-agent <code>retries</code> apply to calls made through <code>agent()</code>; they do not silently rerun the containing function. Cold resume of a registered launch requires the named function to be registered again, otherwise it fails with <code>RESUME_INCOMPATIBLE</code>.</p>
-        <p>Direct launch validates the input before creating a run and validates the final result against <code>output</code>. Each function is also available to sandboxed workflow scripts as a global that takes one object argument and returns a promise, so scripts must await it. An inline or file-backed launch uses a required non-empty <code>name</code>; a registered launch may use <code>name</code> as an optional run label and otherwise uses <code>workflow</code> as the run name.</p>
-        <h3>Complete function and launch</h3>
+        <p>If a function throws, its call is not completed and the workflow fails. <code>workflow_retry</code> is for persisted failed runs: completed function calls replay from the journal and incomplete calls run again. Per-agent <code>retries</code> apply to calls made through <code>agent()</code>; they do not silently rerun the containing function.</p>
+        <p>Each registered function is available to sandboxed workflow scripts as a global that takes one object argument and returns a promise, so scripts must await it. Launch a script with a required non-empty <code>name</code> and exactly one of <code>script</code> or <code>scriptPath</code>; pass JSON values through <code>args</code>.</p>
+        <h3>Complete function and script composition</h3>
         <pre><code class="language-typescript"><span class="tok-keyword">import</span> <span class="tok-punctuation">{</span> registerWorkflowExtension<span class="tok-punctuation">,</span> <span class="tok-keyword">type</span> WorkflowExtension <span class="tok-punctuation">}</span> <span class="tok-keyword">from</span> <span class="tok-string">"pi-extensible-workflows"</span><span class="tok-punctuation">;</span>
 <span class="tok-keyword">const</span> reviewExtension<span class="tok-punctuation">:</span> WorkflowExtension <span class="tok-punctuation">=</span> <span class="tok-punctuation">{</span>
   <span class="tok-property">version</span><span class="tok-punctuation">:</span> <span class="tok-string">"1.0.0"</span><span class="tok-punctuation">,</span>
@@ -146,7 +146,8 @@
 <span class="tok-punctuation">}</span><span class="tok-punctuation">;</span>
 <span class="tok-keyword">export</span> <span class="tok-keyword">default</span> <span class="tok-keyword">function</span> extension<span class="tok-punctuation">()</span> <span class="tok-punctuation">{</span> <span class="tok-function">registerWorkflowExtension</span><span class="tok-punctuation">(</span>reviewExtension<span class="tok-punctuation">)</span><span class="tok-punctuation">;</span> <span class="tok-punctuation">}</span></code></pre>
         <pre><code class="language-json"><span class="tok-punctuation">{</span>
-  <span class="tok-property">"workflow"</span><span class="tok-punctuation">:</span> <span class="tok-string">"reviewTask"</span><span class="tok-punctuation">,</span>
+  <span class="tok-property">"name"</span><span class="tok-punctuation">:</span> <span class="tok-string">"review-task"</span><span class="tok-punctuation">,</span>
+  <span class="tok-property">"script"</span><span class="tok-punctuation">:</span> <span class="tok-string">"return await reviewTask(args);"</span><span class="tok-punctuation">,</span>
   <span class="tok-property">"args"</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span> <span class="tok-property">"task"</span><span class="tok-punctuation">:</span> <span class="tok-string">"Check the release notes for omissions"</span> <span class="tok-punctuation">}</span><span class="tok-punctuation">,</span>
   <span class="tok-property">"foreground"</span><span class="tok-punctuation">:</span> <span class="tok-boolean">true</span>
 <span class="tok-punctuation">}</span></code></pre>
@@ -282,7 +283,7 @@
             <tr><td><code>DUPLICATE_NAME</code></td><td>An agent setup hook or model alias name is already registered. Choose a globally unique name.</td></tr>
             <tr><td><code>UNKNOWN_MODEL</code>, <code>CONFIG_ERROR</code></td><td>A model alias target is invalid, cyclic, unavailable, or its resolver failed. The error identifies the alias and registering extension; fix the resolver or inventory-dependent target.</td></tr>
             <tr><td><code>REGISTRY_FROZEN</code></td><td>Registration ran after <code>session_start</code>. Move registration into the extension factory.</td></tr>
-            <tr><td><code>MISSING_WORKFLOW</code></td><td>A launch or <code>context.invoke()</code> names a function that is not in the active registry, or uses a qualified name.</td></tr>
+            <tr><td><code>MISSING_WORKFLOW</code></td><td><code>context.invoke()</code> names a function that is not in the active registry, or uses a qualified name.</td></tr>
             <tr><td><code>RESULT_INVALID</code></td><td>Function input or output, or a replayed value does not satisfy its schema. Check the schema and return a JSON value.</td></tr>
             <tr><td><code>AGENT_FAILED</code>, <code>AGENT_TIMEOUT</code>, <code>SHELL_FAILED</code>, <code>WORKTREE_FAILED</code></td><td>A context operation failed. Bound side effects, honor cancellation, and use stable named worktree scopes.</td></tr>
             <tr><td><code>AGENT_RESULT_COLLECTED</code></td><td>A direct nested-agent result was already delivered and collected. Nested results are one-shot; do not retry a successful <code>get_subagent_result</code> call.</td></tr>

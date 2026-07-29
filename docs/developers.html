@@ -85,7 +85,7 @@
         <h2>Tool API</h2>
         <p>The extension registers these core tools and one command:</p>
         <ul>
-          <li><code>workflow</code> runs an inline, file-backed, or registered-function deterministic JavaScript workflow.</li>
+          <li><code>workflow</code> runs a named inline or file-backed deterministic JavaScript workflow.</li>
           <li><code>workflow_status</code> reads a compact run summary for any session under the current project cwd.</li>
           <li><code>workflow_resume</code> resumes a budget-exhausted run with an optional budget patch and preserves its foreground/background launch mode unless overridden.</li>
           <li><code>workflow_retry</code> creates a linked child for an explicitly failed run, replays its completed journal operations, and preserves its launch mode unless overridden.</li>
@@ -98,12 +98,11 @@
         <div class="table-wrap"><table>
           <thead><tr><th>Field</th><th>Type</th><th>Contract</th></tr></thead>
           <tbody>
-            <tr><td><code>name</code></td><td>string</td><td>Optional run label. Required and non-empty for inline or file-backed launches; defaults to the registered function name when omitted for a registered launch.</td></tr>
+            <tr><td><code>name</code></td><td>string</td><td>Required and non-empty for every launch.</td></tr>
             <tr><td><code>description</code></td><td>string</td><td>Optional human-readable metadata.</td></tr>
-            <tr><td><code>script</code></td><td>string</td><td>Immutable workflow source. Mutually exclusive with <code>scriptPath</code> and <code>workflow</code>.</td></tr>
-            <tr><td><code>scriptPath</code></td><td>string</td><td>Path to a JavaScript workflow file, resolved from the launch project directory and read once at launch. Its exact contents become the immutable persisted inline source. Mutually exclusive with <code>script</code> and <code>workflow</code>.</td></tr>
-            <tr><td><code>workflow</code></td><td>string</td><td>Registered function by its unqualified name.</td></tr>
-            <tr><td><code>args</code></td><td>JSON value</td><td>Available inside an inline script as <code>args</code>; for a registered function it must satisfy the function input schema. Defaults to <code>null</code> for inline scripts.</td></tr>
+            <tr><td><code>script</code></td><td>string</td><td>Immutable workflow source. Exactly one of <code>script</code> or <code>scriptPath</code> is required.</td></tr>
+            <tr><td><code>scriptPath</code></td><td>string</td><td>Path to a JavaScript workflow file, resolved from the launch project directory and read once at launch. Its exact contents become the immutable persisted source. Exactly one of <code>script</code> or <code>scriptPath</code> is required.</td></tr>
+            <tr><td><code>args</code></td><td>JSON value</td><td>Available inside an inline or file-backed script as <code>args</code>. Defaults to <code>null</code>.</td></tr>
             <tr><td><code>foreground</code></td><td>boolean</td><td>Wait for the final value instead of returning a run ID; the model-visible result also includes the completed run ID.</td></tr>
             <tr><td><code>concurrency</code></td><td>integer 1-16</td><td>Per-run active-agent limit.</td></tr>
             <tr><td><code>budget</code></td><td>object</td><td>Optional aggregate soft/hard limits for <code>tokens</code>, <code>costUsd</code>, <code>durationMs</code>, and <code>agentLaunches</code>.</td></tr>
@@ -264,7 +263,7 @@ Focus on correctness and regressions.</code></pre>
         <h3 id="run-artifacts">Run storage and executed source</h3>
         <p>Runs are stored under <code>~/.pi/workflows/projects/&lt;cwd-slug&gt;-&lt;cwd-hash&gt;/sessions/&lt;session-id&gt;/runs/&lt;run-id&gt;/</code>. Identity checks use the resolved launch cwd and Pi session ID.</p>
         <p>Every new run contains <code>workflow.js</code> with the exact UTF-8 JavaScript source that was preflighted and executed. It is an immutable inspection artifact written during atomic run creation and is opened through a read-only temporary copy. <code>snapshot.json</code> remains authoritative for execution and resume; historical runs without <code>workflow.js</code> remain loadable.</p>
-        <p>Launch snapshots use identity version 5 and persist <code>launchMode</code> as <code>foreground</code> or <code>background</code>. Cold resume rejects older snapshots, including v4 snapshots created with the previous worktree or registered-function naming contracts, with <code>RESUME_INCOMPATIBLE</code>; snapshots from the current contract without launch-mode metadata recover in background mode for compatibility. Relaunch an obsolete workflow instead.</p>
+        <p>Launch snapshots use identity version 5 and persist <code>launchMode</code> as <code>foreground</code> or <code>background</code>. Cold resume rejects older snapshots, including v4 snapshots created with the previous worktree contract, with <code>RESUME_INCOMPATIBLE</code>; snapshots from the current contract without launch-mode metadata recover in background mode for compatibility. Relaunch an obsolete workflow instead.</p>
         <p>Each run's private <code>system-prompts.json</code> records the full effective system prompt at every native Pi <code>agent_start</code>, after <code>before_agent_start</code> extensions have run. Entries include the native session ID, attempt, turn, SHA-256 digest, and prompt. New artifacts use append-only records and content-addressed prompt bodies under <code>.system-prompts</code>; version-1 artifacts remain readable. Native Pi JSONL transcripts intentionally omit system prompts.</p>
         <p>Run directories use mode <code>0700</code>, prompt artifacts use <code>0600</code>, and prompt storage directories use <code>0700</code>. Treat them as sensitive because they can contain role bodies, project instructions, tool guidance, and extension modifications. Confirmed run deletion removes them; native Pi transcripts remain in Pi session storage.</p>
         <h3 id="lifecycle-events">Workflow lifecycle events</h3>

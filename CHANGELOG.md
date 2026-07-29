@@ -1,6 +1,12 @@
 # Changelog
 ## Unreleased
 
+### Breaking changes
+
+- Removed the `workflow` argument from the `workflow` tool. Registered catalog functions are now composed inside `script` or `scriptPath` sources, and `args` remains available to pass input to them.
+- Workflow launches now require a non-empty `name` and exactly one of `script` or `scriptPath`.
+- Removed the exported `launchScriptForSnapshot` helper; persisted runs resume from their stored script source.
+
 ## [4.0.2] - 2026-07-28
 
 ### Packaging

@@ -390,7 +390,7 @@ async function invokeWorkflow(fn: WorkflowCatalogFunction, args: Record<string, 
   const announceRunId = (runId: string) => { if (announcedRunId === runId) return; announcedRunId = runId; options.stderr(`Run ID: ${runId}\n`); };
   const progress = new CliProgress(options.stderr, options.isTTY ?? process.stderr.isTTY, announceRunId);
   try {
-    const result = await runtime.workflowTool.execute(randomUUID(), { workflow: fn.name, args, foreground: true }, options.signal, (update: unknown) => { if (object(update) && object(update.details) && object(update.details.run)) progress.update(update.details.run as unknown as PersistedRun); }, context);
+    const result = await runtime.workflowTool.execute(randomUUID(), { name: fn.name, script: `return await ${fn.name}(args);`, args, foreground: true }, options.signal, (update: unknown) => { if (object(update) && object(update.details) && object(update.details.run)) progress.update(update.details.run as unknown as PersistedRun); }, context);
     const details = object(result.details) ? result.details : {};
     const runId = typeof details.runId === "string" ? details.runId : undefined;
     if (runId) announceRunId(runId);

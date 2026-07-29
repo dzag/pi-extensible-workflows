@@ -5,10 +5,8 @@ import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as acorn from "acorn";
 import { Script } from "node:vm";
-import { Value } from "typebox/value";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import { WorkflowError } from "./types.js";
-import type { AgentDefinition, AgentResourceExclusions, AgentResourcePolicy, CheckpointInput, JsonSchema, JsonValue, LaunchSnapshot, PreflightCapabilities, PreflightResult, ShellOptions, StaticWorkflowCall, StaticWorkflowExecution, StaticWorkflowScope, ValidatedWorkflowLaunch, WorkflowCallKind, WorkflowErrorCode, WorkflowExtensionMetadata, WorkflowExtensionSettings, WorkflowMetadata, WorkflowRoleDirectoryRegistration, WorkflowSettings, WorkflowSettingsOverrides, WorkflowSettingsResolution, WorkflowSettingsSources, WorkflowValidationContext, WorkflowValidationParameters } from "./types.js";
+import type { AgentDefinition, AgentResourceExclusions, AgentResourcePolicy, CheckpointInput, JsonSchema, JsonValue, PreflightCapabilities, PreflightResult, ShellOptions, StaticWorkflowCall, StaticWorkflowExecution, StaticWorkflowScope, ValidatedWorkflowLaunch, WorkflowCallKind, WorkflowErrorCode, WorkflowExtensionMetadata, WorkflowExtensionSettings, WorkflowMetadata, WorkflowRoleDirectoryRegistration, WorkflowSettings, WorkflowSettingsOverrides, WorkflowSettingsResolution, WorkflowSettingsSources, WorkflowValidationContext, WorkflowValidationParameters } from "./types.js";
 import type { WorkflowRegistryApi } from "./registry.js";
 import { registeredWorkflowRoleDirectoryRegistrations } from "./registry.js";
 import { annotateModelAliasError, deepFreeze, errorText, fail, jsonValue, modelAliasName, modelCapability, object, parseThinking, positiveInteger, resolveModelReference, unknownModel, validateModelAliases, validateResourcePattern } from "./utils.js";
@@ -685,36 +683,27 @@ export function preflight(script: string, capabilities: PreflightCapabilities, s
   return Object.freeze({ metadata: deepFreeze(checkedMetadata), referenced: deepFreeze({ phases, models, tools, agentTypes }), schemas: deepFreeze(checkedSchemas) as readonly JsonSchema[], dynamicAgentRoles });
 }
 
-
-
-function functionLaunchScript(name: string): string { return `return await ${name}(args);`; }
-
 export function validateWorkflowLaunch(params: WorkflowValidationParameters, context: WorkflowValidationContext, registry?: WorkflowRegistryApi): ValidatedWorkflowLaunch {
   return validateWorkflowLaunchWithRegistry(params, context, registry);
 }
 export function validateWorkflowLaunchWithRegistry(params: WorkflowValidationParameters, context: WorkflowValidationContext, registry?: WorkflowRegistryApi): ValidatedWorkflowLaunch {
   if (Object.prototype.hasOwnProperty.call(params, "maxAgentLaunches")) fail("INVALID_METADATA", "maxAgentLaunches has been removed; use budget.agentLaunches");
-  if (params.script !== undefined && params.workflow !== undefined) fail("INVALID_METADATA", "Provide either script or workflow, not both");
-  if (params.scriptPath !== undefined && (typeof params.scriptPath !== "string" || !params.scriptPath.trim())) fail("INVALID_METADATA", "scriptPath must be a non-empty path");
-  if ((params.script !== undefined || params.workflow !== undefined) && params.scriptPath !== undefined) fail("INVALID_METADATA", "Provide either script, scriptPath, or workflow, not more than one");
+  const hasScript = params.script !== undefined;
+  const hasScriptPath = params.scriptPath !== undefined;
+  if (hasScript && hasScriptPath) fail("INVALID_METADATA", "Provide either script or scriptPath, not more than one");
   const scriptPath = typeof params.scriptPath === "string" ? params.scriptPath.trim() : undefined;
+  if (hasScriptPath && !scriptPath) fail("INVALID_METADATA", "scriptPath must be a non-empty path");
   let fileScript: string | undefined;
   if (scriptPath !== undefined) {
     try { fileScript = readFileSync(resolve(context.cwd, scriptPath), "utf8"); }
     catch (error) { fail("INVALID_SYNTAX", `Cannot read workflow script file ${scriptPath}: ${errorText(error)}`); }
   }
-  const functionName = typeof params.workflow === "string" ? params.workflow : undefined;
-  const explicitName = params.name === undefined ? undefined : typeof params.name === "string" ? params.name.trim() : "";
-  if (params.name !== undefined && !explicitName) fail("INVALID_METADATA", "Workflow name must be non-empty when provided");
-  const workflowName = explicitName ?? functionName ?? "";
-  if (functionName === undefined && !workflowName) fail("INVALID_METADATA", "Inline workflow launches require a non-empty name");
-  const fn = functionName === undefined ? undefined : registry?.function(functionName);
-  if (functionName !== undefined && !registry) fail("MISSING_WORKFLOW", `Registered function is unavailable: ${functionName}`);
-  const args = params.args === undefined ? null : params.args;
-  if (functionName !== undefined && fn && (!object(args) || !jsonValue(args) || !Value.Check(fn.input, args))) fail("RESULT_INVALID", `Invalid input for ${functionName}`);
-  const script = functionName !== undefined && fn ? functionLaunchScript(functionName) : typeof params.script === "string" && params.script.trim() ? params.script : fileScript ?? "";
-  if (!script) fail("INVALID_SYNTAX", "Provide script, scriptPath, or registered function");
-  const metadata = validateWorkflowMetadata({ name: workflowName, ...(typeof params.description === "string" ? { description: params.description } : fn?.description ? { description: fn.description } : {}) });
+  const rawName: unknown = params.name;
+  const explicitName = typeof rawName === "string" ? rawName.trim() : "";
+  if (!explicitName) fail("INVALID_METADATA", "Workflow name must be non-empty");
+  const script = typeof params.script === "string" && params.script.trim() ? params.script : fileScript ?? "";
+  if (!script) fail("INVALID_SYNTAX", "Provide script or scriptPath");
+  const metadata = validateWorkflowMetadata({ name: explicitName, ...(typeof params.description === "string" ? { description: params.description } : {}) });
   const globalAgentDefinitions = loadAgentDefinitions(context.cwd, context.agentDir, false, registry && typeof registry.roleDirectoryRegistrations === "function" ? registry.roleDirectoryRegistrations() : registry && typeof registry.roleDirectories === "function" ? registry.roleDirectories() : undefined);
   const projectAgentDefinitions = context.projectTrusted ? readRoleDefinitions(projectRoleDirectories(join(context.cwd, ".pi"))) : {};
   const agentDefinitions = deepFreeze({ ...globalAgentDefinitions, ...projectAgentDefinitions });
@@ -723,19 +712,7 @@ export function validateWorkflowLaunchWithRegistry(params: WorkflowValidationPar
   const checked = preflight(script, { models: context.availableModels, tools: context.rootTools, agentTypes: new Set(Object.keys(agentDefinitions)), modelAliases: aliases, knownModels, ...(context.settingsPath ? { settingsPath: context.settingsPath } : {}) }, [], metadata);
   const roleNames = checked.dynamicAgentRoles ? Object.keys(agentDefinitions) : checked.referenced.agentTypes;
   validateRolePolicies(agentDefinitions, roleNames, context.availableModels, context.rootTools, aliases, knownModels, context.settingsPath);
-  return { script, checked, agentDefinitions, projectAgentDefinitions, roleNames, ...(functionName ? { functionName } : {}) };
-}
-
-
-
-export function launchScriptForSnapshot(snapshot: Readonly<LaunchSnapshot>, registry: WorkflowRegistryApi): string {
-  if (snapshot.launchKind === "function") {
-    if (!snapshot.functionName) fail("RESUME_INCOMPATIBLE", "Persisted registered function launch is missing its function name");
-    try { registry.function(snapshot.functionName); } catch (error) { if (error instanceof WorkflowError && error.code === "MISSING_WORKFLOW") throw new WorkflowError("RESUME_INCOMPATIBLE", `Persisted registered function is unavailable: ${snapshot.functionName}`); throw error; }
-    return functionLaunchScript(snapshot.functionName);
-  }
-  if (snapshot.launchKind === "inline") return snapshot.script;
-  fail("RESUME_INCOMPATIBLE", "This persisted run uses the removed registered-workflow format; launch it again as a registered function or inline script");
+  return { script, checked, agentDefinitions, projectAgentDefinitions, roleNames };
 }
 
 export { createLaunchSnapshot, loadLaunchSnapshot } from "./utils.js";
