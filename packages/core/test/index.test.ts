@@ -917,6 +917,57 @@ void test("workflow_stop reports unknown and terminal runs and persists cancella
   const stoppedAgain = (await stop.execute("id", { runId: activeRunId })) as { content: [{ text: string }] };
   assert.deepEqual(JSON.parse(stoppedAgain.content[0].text), { runId: activeRunId, state: "stopped", stopped: false, reason: "already_terminal" });
 });
+void test("cold resume does not duplicate the phase recorded before interruption", async () => {
+  type Tool = { name: string; execute: (...args: unknown[]) => Promise<unknown> };
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-phase-cold-resume-"));
+  const context = { cwd: home, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const createHeldSession = async (input: SessionInput): Promise<TestPiSession> => ({
+    sessionId: `phase-first-${input.sessionLabel}`, sessionFile: `/sessions/phase-first-${input.sessionLabel}.jsonl`,
+    messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+    getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
+    prompt: async () => { await held; },
+    steer: async () => {},
+    abort: async () => { release(); },
+    dispose() {},
+  });
+  const firstTools: Tool[] = [];
+  let firstShutdown: (() => Promise<void>) | undefined;
+  workflowExtension({ registerTool(tool: Tool) { firstTools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_shutdown") firstShutdown = handler as typeof firstShutdown; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createHeldSession));
+  const firstWorkflow = firstTools.find(({ name }) => name === "workflow");
+  assert.ok(firstWorkflow);
+  const first = await firstWorkflow.execute("phase-first", { name: "phase-cold", script: "phase('build'); return await agent('wait');" }, undefined, undefined, context) as { content: Array<{ text: string }> };
+  const runId = (JSON.parse(first.content[0]?.text ?? "null") as { runId: string }).runId;
+  const store = new RunStore(home, "session", runId, home);
+  for (let attempt = 0; attempt < 200 && (await store.load()).run.phase !== "build"; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal((await store.load()).run.phase, "build");
+  await firstShutdown?.();
+  assert.equal((await store.load()).run.state, "interrupted");
+  const secondTools: Tool[] = [];
+  let secondStart: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let secondCommand: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+  let secondShutdown: (() => Promise<void>) | undefined;
+  const createImmediateSession = async (input: SessionInput): Promise<TestPiSession> => ({
+    sessionId: `phase-second-${input.sessionLabel}`, sessionFile: `/sessions/phase-second-${input.sessionLabel}.jsonl`,
+    messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+    getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
+    prompt: async () => {}, steer: async () => {}, dispose() {},
+  });
+  workflowExtension({ registerTool(tool: Tool) { secondTools.push(tool); }, registerCommand(_name: string, value: { handler: typeof secondCommand }) { secondCommand = value.handler; }, on(name: string, handler: unknown) { if (name === "session_start") secondStart = handler as typeof secondStart; if (name === "session_shutdown") secondShutdown = handler as typeof secondShutdown; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createImmediateSession));
+  try {
+    assert.ok(secondStart && secondCommand);
+    await secondStart({}, context);
+    await secondCommand(`resume ${runId}`, context);
+    for (let attempt = 0; attempt < 200 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    const resumed = (await store.load()).run;
+    assert.equal(resumed.state, "completed");
+    assert.deepEqual(resumed.phaseHistory?.filter(({ phase }) => phase === "build"), [{ phase: "build", afterAgent: 0 }]);
+  } finally {
+    release();
+    await secondShutdown?.();
+  }
+});
 void test("session recovery emits interruption as state change only", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-interruption-events-"));
   const cwd = join(home, "project");
@@ -3380,8 +3431,10 @@ void test("validates and resolves portable model aliases", () => {
   assert.throws(() => blocked.resolve({ label: "deleted", workflowName: "test", model: "reviewer-model:low" }), (error: unknown) => error instanceof WorkflowError && error.code === "UNKNOWN_MODEL" && error.message.includes("reviewer-model:low") && error.message.includes("anthropic/opus:high") && error.message.includes(path));
   saveModelAliases(path, { "reviewer-model": "anthropic/opus:high" });
   assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { concurrency: 4, modelAliases: { "reviewer-model": "anthropic/opus:high" } });
-  writeFileSync(path, "{");
-  assert.throws(() => loadSettings(path), (error: unknown) => error instanceof WorkflowError && error.code === "CONFIG_ERROR");
+  const malformed = "{\n  \"concurrency\": 4,";
+  writeFileSync(path, malformed);
+  assert.throws(() => { saveModelAliases(path, { "reviewer-model": "anthropic/opus:high" }); }, (error: unknown) => error instanceof WorkflowError && error.code === "CONFIG_ERROR");
+  assert.equal(readFileSync(path, "utf8"), malformed);
 });
 void test("workflow TUI manages aliases without runs and preserves settings", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-alias-tui-"));
@@ -4539,6 +4592,44 @@ void test("foreground failures patch finalized tool results with bounded diagnos
   assert.equal(emptyResult.isError, true);
   assert.equal(emptyDiagnostic.error.message, "The workflow failed without an error message.");
 });
+void test("failure diagnostics retain identity and retry fields when long sibling lists are truncated", async () => {
+  type Tool = { name: string; execute: (...args: unknown[]) => Promise<unknown> };
+  type ToolResultHandler = (event: object, ctx: object) => Promise<{ content?: readonly object[]; details?: unknown; isError?: boolean } | undefined> | { content?: readonly object[]; details?: unknown; isError?: boolean } | undefined;
+  const tools: Tool[] = [];
+  let toolResultHandler: ToolResultHandler | undefined;
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-long-diagnostics-"));
+  const siblings = Array.from({ length: 40 }, (_, index) => {
+    const label = `sibling-${String(index)}-${"long-label-".repeat(12)}`;
+    return `${JSON.stringify(`sibling_${String(index)}`)}: () => agent(${JSON.stringify(`work-${String(index)}`)}, { label: ${JSON.stringify(label)} })`;
+  }).join(", ");
+  const script = `return parallel("reviewers", { ${siblings}, bad: () => agent("bad", { label: "bad" }) });`;
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => ({
+    sessionId: `long-diagnostics-${input.sessionLabel}`, sessionFile: `/sessions/long-diagnostics-${input.sessionLabel}.jsonl`,
+    messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+    getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
+    prompt: async () => { if (input.sessionLabel.includes(":bad:")) throw new Error(`long sibling failure ${"x".repeat(2000)}`); },
+    steer: async () => {},
+    dispose() {},
+  });
+  workflowExtension({
+    registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {},
+    on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as ToolResultHandler; },
+    getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"],
+  } as never, home, async () => {}, testTransport(createSession));
+  const workflow = tools.find(({ name }) => name === "workflow");
+  assert.ok(workflow && toolResultHandler);
+  const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
+  await assert.rejects(workflow.execute("long-diagnostic-call", { name: "long-diagnostics", script, foreground: true }, new AbortController().signal, undefined, context), WorkflowError);
+  const patched = await toolResultHandler({ type: "tool_result", toolName: "workflow", toolCallId: "long-diagnostic-call", input: {}, content: [{ type: "text", text: "old" }], details: {}, isError: true }, {});
+  assert.ok(patched);
+  const result = patched as { content: Array<{ text: string }>; details: WorkflowFailureDiagnostics; isError: boolean };
+  const diagnostic = JSON.parse(result.content[0]?.text ?? "null") as WorkflowFailureDiagnostics;
+  assert.equal(result.isError, true);
+  assert.ok(Buffer.byteLength(result.content[0]?.text ?? "") <= 4096);
+  assert.equal(diagnostic.runId, result.details.runId);
+  assert.equal(diagnostic.state, "failed");
+  assert.equal(diagnostic.retry?.action, `workflow_retry({ runId: ${JSON.stringify(diagnostic.runId)} })`);
+});
 void test("failure diagnostics include replayable shell operations", async () => {
   type Tool = { name: string; execute: (...args: unknown[]) => Promise<unknown> };
   type ToolResultHandler = (event: object, ctx: object) => Promise<{ content?: readonly object[]; details?: unknown; isError?: boolean } | undefined> | { content?: readonly object[]; details?: unknown; isError?: boolean } | undefined;
@@ -4558,6 +4649,77 @@ void test("failure diagnostics include replayable shell operations", async () =>
   assert.ok(patched);
   const diagnostic = JSON.parse((patched as { content: Array<{ text: string }> }).content[0]?.text ?? "null") as WorkflowFailureDiagnostics;
   assert.ok(diagnostic.retry?.completedPaths.some((path) => path.startsWith("shell/")));
+});
+void test("background and cold-resumed terminal failures deliver artifacts without retry advice", async () => {
+  type Tool = { name: string; execute: (...args: unknown[]) => Promise<unknown> };
+  const tools: Tool[] = [];
+  const messages: string[] = [];
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-terminal-failure-delivery-"));
+  const sessionId = "session";
+  const createSession = async (input: SessionInput): Promise<TestPiSession> => {
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    return {
+      sessionId: `terminal-delivery-${input.sessionLabel}`, sessionFile: `/sessions/terminal-delivery-${input.sessionLabel}.jsonl`,
+      messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+      getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
+      prompt: async () => { await hold; },
+      steer: async () => {},
+      abort: async () => { release(); },
+      dispose() {},
+    };
+  };
+  let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let shutdown: (() => Promise<void>) | undefined;
+  let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+  workflowExtension({
+    registerTool(tool: Tool) { tools.push(tool); },
+    registerCommand(_name: string, value: { handler: typeof command }) { command = value.handler; },
+    on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; },
+    sendMessage(message: { content: string }) { messages.push(message.content); },
+    getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"],
+  } as never, home, async () => {}, testTransport(createSession));
+  const stop = tools.find(({ name }) => name === "workflow_stop");
+  assert.ok(start && command && stop);
+  const snapshot = (name: string, script: string) => createLaunchSnapshot({ script, args: null, metadata: { name }, launchMode: "background", settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] });
+  const stopped = new RunStore(home, sessionId, "stopped-run", home);
+  const interrupted = new RunStore(home, sessionId, "interrupted-run", home);
+  const exhausted = new RunStore(home, sessionId, "exhausted-run", home);
+  const waitingScript = "phase('build'); return await agent('wait');";
+  await stopped.create({ id: stopped.runId, workflowName: "stopped-run", cwd: home, sessionId, state: "interrupted", agents: [], agentSessions: [], delivery: { mode: "background", state: "pending" } }, snapshot("stopped-run", waitingScript));
+  await interrupted.create({ id: interrupted.runId, workflowName: "interrupted-run", cwd: home, sessionId, state: "interrupted", agents: [], agentSessions: [], delivery: { mode: "background", state: "pending" } }, snapshot("interrupted-run", waitingScript));
+  await exhausted.create({ id: exhausted.runId, workflowName: "exhausted-run", cwd: home, sessionId, state: "budget_exhausted", agents: [], agentSessions: [], delivery: { mode: "background", state: "pending" } }, snapshot("exhausted-run", "throw Object.assign(new Error('budget exhausted'), { code: 'BUDGET_EXHAUSTED' });"));
+  const context = { cwd: home, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => sessionId }, ui: { notify() {} } };
+  const waitFor = async (store: RunStore, predicate: (run: PersistedRun) => boolean): Promise<PersistedRun> => {
+    for (let attempt = 0; attempt < 200; attempt += 1) { const run = (await store.load()).run; if (predicate(run)) return run; await new Promise<void>((resolve) => setImmediate(resolve)); }
+    throw new Error(`Timed out waiting for ${store.runId}`);
+  };
+  const delivered = async (name: string): Promise<string> => {
+    for (let attempt = 0; attempt < 200; attempt += 1) { const message = messages.find((candidate) => candidate.includes(`Workflow ${name} failed`)); if (message) return message; await new Promise<void>((resolve) => setTimeout(resolve, 10)); }
+    throw new Error(`Timed out waiting for delivery ${name}`);
+  };
+  try {
+    await start({}, context);
+    await command("resume stopped-run", context);
+    await waitFor(stopped, (run) => run.state === "running");
+    await stop.execute("stop", { runId: stopped.runId });
+    const stoppedMessage = await delivered("stopped-run");
+    await command("resume exhausted-run", context);
+    const exhaustedMessage = await delivered("exhausted-run");
+    await command("resume interrupted-run", context);
+    await waitFor(interrupted, (run) => run.state === "running");
+    await shutdown?.();
+    const interruptedMessage = await delivered("interrupted-run");
+    for (const [name, message, code] of [["stopped-run", stoppedMessage, "CANCELLED"], ["interrupted-run", interruptedMessage, "CANCELLED"], ["exhausted-run", exhaustedMessage, "BUDGET_EXHAUSTED"]] as const) {
+      assert.match(message, new RegExp(`error=${code}:`));
+      assert.match(message, new RegExp(`runDirectory=.*${name}`));
+      assert.match(message, /statePath=.*state\.json/);
+      assert.match(message, /journalPath=.*journal\.json/);
+      assert.doesNotMatch(message, /workflow_retry/);
+    }
+  } finally {
+    await shutdown?.();
+  }
 });
 void test("background failure diagnostics drive workflow_retry with the advertised run ID", async () => {
   type Tool = { name: string; execute: (...args: unknown[]) => Promise<unknown> };
