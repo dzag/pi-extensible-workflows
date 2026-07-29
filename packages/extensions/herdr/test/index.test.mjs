@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import extension, { breadcrumbLabel, createHerdrExtension, isFullyInspectableMode } from "../index.js";
+import extension, { breadcrumbLabel, createHerdrExtension, isFullyInspectableMode } from "../dist/index.js";
 import { createLiveSessionHandoff, loadingRegistry, resetWorkflowRegistry } from "pi-extensible-workflows";
 
 const piRuntime = { executable: process.execPath, entrypoint: "/originating/pi-coding-agent/dist/cli.js" };
