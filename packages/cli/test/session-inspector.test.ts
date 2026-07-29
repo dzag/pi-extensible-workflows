@@ -222,6 +222,13 @@ void test("session inspector uses labels and omits missing roles consistently", 
   assert.match(rendered, /explicit label[\s\S]*provider\/worker/);
   assert.doesNotMatch(rendered, /role=/);
 });
+void test("renders concise empty inspector states", () => {
+  const empty = { id: "session", cwd: "/repo", path: "/session.jsonl", cost: 0, models: [], workflows: [], totalCost: 0, totalModels: [] } as Parameters<typeof renderInspector>[0];
+  assert.match(renderInspector(empty, { view: "list", selected: 0, scroll: 0 }).join("\n"), /No workflow calls found/);
+  assert.match(renderInspector(empty, { view: "detail", selected: 0, scroll: 0 }).join("\n"), /No workflow selected/);
+  const noScript = { ...empty, workflows: [{ name: "workflow", status: "pending", cost: 0, models: [], calls: [], agents: [] }] } as Parameters<typeof renderInspector>[0];
+  assert.match(renderInspector(noScript, { view: "script", selected: 0, scroll: 0 }, 80, 10, () => []).join("\n"), /Script unavailable/);
+});
 
 void test("renders active transcript entries with message roles and content", () => {
   const entries = [
@@ -233,6 +240,24 @@ void test("renders active transcript entries with message roles and content", ()
   assert.match(rendered, /\[user\][\s\S]*Inspect the API/);
   assert.match(rendered, /\[assistant\][\s\S]*Tool call: read[\s\S]*src\/api\.ts/);
   assert.match(rendered, /\[toolResult: read\][\s\S]*API source/);
+});
+void test("transcript command renders the default view and reports missing files", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-transcript-cli-"));
+  const transcript = join(home, "session.jsonl");
+  writeJsonl(transcript, [
+    { type: "session", version: 3, id: "transcript-session", timestamp: "2026-01-01T00:00:00.000Z", cwd: home },
+    { type: "message", id: "user", parentId: null, timestamp: "2026-01-01T00:00:01.000Z", message: { role: "user", content: "Inspect this", timestamp: 1 } },
+    { type: "message", id: "assistant", parentId: "user", timestamp: "2026-01-01T00:00:02.000Z", message: { role: "assistant", content: [{ type: "text", text: "Done" }], api: "openai-responses", provider: "openai", model: "gpt", usage: usage(0), stopReason: "stop", timestamp: 2 } },
+  ]);
+  let output = "";
+  assert.equal(await runCli(["transcript", transcript], {}, (text) => { output += text; }), 0);
+  assert.match(output, /\[user\][\s\S]*Inspect this/);
+  assert.match(output, /\[assistant\][\s\S]*Done/);
+  const missing = join(home, "missing.jsonl");
+  output = "";
+  assert.equal(await runCli(["transcript", missing], {}, (text) => { output += text; }), 1);
+  assert.match(output, /Error:/);
+  assert.match(output, /missing\.jsonl/);
 });
 void test("non-TTY inspection discovers persisted runs without a transcript", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-inspect-summary-"));
