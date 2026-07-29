@@ -45,8 +45,8 @@ async function openNavigator(h: TestHarness): Promise<string> {
   h.sendKey("ctrl+c");
   await new Promise((resolve) => setTimeout(resolve, 500));
   h.send("/workflow");
-  await h.waitFor("Close", 10_000);
-  return h.readPane(40);
+  await h.waitFor("build  interrupted", 10_000);
+  return h.readVisiblePane();
 }
 
 /** Step the tree until an agent leaf is selected, returning its name. */
