@@ -56,6 +56,7 @@ export function transcriptLines(entries: readonly SessionEntry[]): string[] {
 }
 
 export function transcriptFileLines(path: string): string[] {
+  if (!existsSync(path)) throw new Error(`Transcript file not found: ${path}`);
   return transcriptLines(SessionManager.open(path).buildContextEntries());
 }
 

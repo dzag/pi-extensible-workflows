@@ -767,7 +767,7 @@ void test("per-attempt timeout is typed and terminal", async () => {
   await assert.rejects(executor.execute("slow", { label: "slow", workflowName: "flow", timeoutMs: 10 }), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_TIMEOUT" && Array.isArray((error as WorkflowError & { attempts: unknown[] }).attempts));
 });
 
-void test("real local sessions suspend and resume with a subsequent prompt and event", async () => {
+void test("local session suspend and resume retain the session seam with a stubbed prompt", async () => {
   const originalPrompt = Object.getOwnPropertyDescriptor(AgentSession.prototype, "prompt");
   const originalSessionFile = Object.getOwnPropertyDescriptor(AgentSession.prototype, "sessionFile");
   assert.ok(originalPrompt && originalSessionFile);
@@ -784,8 +784,11 @@ void test("real local sessions suspend and resume with a subsequent prompt and e
       session.subscribe((event) => { if (event.type === "agent_end") events.push(event.type); });
       assert.ok(session.reference.locator);
       await session.prompt("before handoff");
-      await session.suspendForHandoff?.();
-      await session.resumeFromHandoff?.();
+      assert.equal(typeof session.suspendForHandoff, "function");
+      assert.equal(typeof session.resumeFromHandoff, "function");
+      if (typeof session.suspendForHandoff !== "function" || typeof session.resumeFromHandoff !== "function") throw new Error("handoff methods are missing");
+      await session.suspendForHandoff();
+      await session.resumeFromHandoff();
       await session.prompt("after handoff");
       assert.deepEqual(prompts, ["before handoff", "after handoff"]);
       assert.deepEqual(events, ["agent_end", "agent_end"]);
@@ -797,8 +800,11 @@ void test("real local sessions suspend and resume with a subsequent prompt and e
       const noFile = await localAgentTransport.createSession(prepared, {} as never);
       try {
         assert.equal(noFile.reference.locator, undefined);
-        await noFile.suspendForHandoff?.();
-        await noFile.resumeFromHandoff?.();
+        assert.equal(typeof noFile.suspendForHandoff, "function");
+        assert.equal(typeof noFile.resumeFromHandoff, "function");
+        if (typeof noFile.suspendForHandoff !== "function" || typeof noFile.resumeFromHandoff !== "function") throw new Error("handoff methods are missing");
+        await noFile.suspendForHandoff();
+        await noFile.resumeFromHandoff();
         await noFile.prompt("without session file");
         assert.deepEqual(prompts, ["before handoff", "after handoff", "without session file"]);
       } finally {
@@ -1145,7 +1151,7 @@ void test("releasing a result after run cleanup is harmless", async () => {
 });
 
 
-void test("rejects concurrent child results, invalid steering, and active result release", async () => {
+void test("rejects concurrent child results, late steering, and active result release", async () => {
   let releaseChild!: () => void;
   let childStarted!: () => void;
   const started = new Promise<void>((resolve) => { childStarted = resolve; });
@@ -1165,11 +1171,11 @@ void test("rejects concurrent child results, invalid steering, and active result
   const child = scheduler.spawn("run", "child", { label: "child", cwd: "/repo", tools: [] }, parent.id);
   await started;
   const first = scheduler.result(parent.id, child.id);
-  await assert.rejects(scheduler.result(parent.id, child.id), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_FAILED");
+  await assert.rejects(scheduler.result(parent.id, child.id), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_FAILED" && error.message === "Child result is already being collected");
   assert.throws(() => { scheduler.releaseResult(child.id); }, (error: unknown) => error instanceof WorkflowError && error.code === "INTERNAL_ERROR");
   releaseChild();
   assert.deepEqual(await first, { id: child.id, ok: true, value: "child result" });
-  await assert.rejects(scheduler.steer(parent.id, child.id, "too late"), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_FAILED");
+  await assert.rejects(scheduler.steer(parent.id, child.id, "too late"), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_FAILED" && error.message === "Child is not running");
   scheduler.cancel(parent.id);
   await parent.result;
   scheduler.releaseResult(parent.id);

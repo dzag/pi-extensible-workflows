@@ -241,7 +241,7 @@ void test("renders active transcript entries with message roles and content", ()
   assert.match(rendered, /\[assistant\][\s\S]*Tool call: read[\s\S]*src\/api\.ts/);
   assert.match(rendered, /\[toolResult: read\][\s\S]*API source/);
 });
-void test("transcript command renders the default view and reports missing files", async () => {
+void test("transcript command renders a transcript file", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-transcript-cli-"));
   const transcript = join(home, "session.jsonl");
   writeJsonl(transcript, [
@@ -253,8 +253,11 @@ void test("transcript command renders the default view and reports missing files
   assert.equal(await runCli(["transcript", transcript], {}, (text) => { output += text; }), 0);
   assert.match(output, /\[user\][\s\S]*Inspect this/);
   assert.match(output, /\[assistant\][\s\S]*Done/);
+});
+void test("transcript command reports a missing file", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-transcript-cli-missing-"));
   const missing = join(home, "missing.jsonl");
-  output = "";
+  let output = "";
   assert.equal(await runCli(["transcript", missing], {}, (text) => { output += text; }), 1);
   assert.match(output, /Error:/);
   assert.match(output, /missing\.jsonl/);

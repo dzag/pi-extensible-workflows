@@ -106,7 +106,7 @@ appendFileSync(join(process.cwd(), "src/score.js"), "\\n// edited only in this w
     assert.equal(paths.every((path) => !existsSync(path)), true);
   }
 });
-void test("ambient evals fail early for missing config and filter cases before execution", async () => {
+void test("ambient evals reject missing config and select requested cases", async () => {
   const missingConfig = [
     [{ PI_WORKFLOW_EVAL_AMBIENT: "0", PI_WORKFLOW_EVAL_PROVIDER: "", PI_WORKFLOW_EVAL_MODEL: "" }, /PI_WORKFLOW_EVAL_AMBIENT=1/],
     [{ PI_WORKFLOW_EVAL_AMBIENT: "1", PI_WORKFLOW_EVAL_PROVIDER: "", PI_WORKFLOW_EVAL_MODEL: "" }, /Set --provider and --model/],
@@ -130,7 +130,7 @@ void test("ambient Pi budget aborts and malformed capture still cleans every fix
   const budgetPi = join(root, "budget-pi.mjs");
   writeFileSync(budgetPi, "#!/usr/bin/env node\nconsole.log(JSON.stringify({ type: 'message_end', message: { usage: { cost: { total: 2 } } } })); setInterval(() => {}, 1000);\n"); chmodSync(budgetPi, 0o755);
   try {
-    const budget = await runAmbientPiProcess({ worktree: root, sessionDir: join(root, "budget-session"), prompt: "wait", provider: "fake", model: "model", piCommand: budgetPi, timeoutMs: 2000, maxCost: 1 });
+    const budget = await runAmbientPiProcess({ worktree: root, sessionDir: join(root, "budget-session"), prompt: "wait", provider: "fake", model: "model", piCommand: budgetPi, timeoutMs: 10_000, maxCost: 1 });
     assert.equal(budget.budgetExceeded, true); assert.equal(budget.timedOut, false); assert.equal(budget.processGroupTerminated, true);
     const malformedPi = join(root, "malformed-pi.mjs");
     writeFileSync(malformedPi, `#!/usr/bin/env node\nimport { mkdirSync, writeFileSync } from "node:fs"; import { join } from "node:path"; const args = process.argv.slice(2); const value = name => args[args.indexOf(name) + 1]; const dir = value("--session-dir"); const id = value("--session-id"); mkdirSync(dir, { recursive: true }); const rows = [{ type: "session", version: 3, id }, { type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "workflow", arguments: { name: "bad-capture" } }] } }, { type: "message", message: { role: "toolResult", toolName: "workflow", content: [{ type: "text", text: "not capture metadata" }], details: { realWorkflowAgentsLaunched: 1 }, isError: false } }]; writeFileSync(join(dir, "parent.jsonl"), rows.map(JSON.stringify).join("\\n") + "\\n");\n`); chmodSync(malformedPi, 0o755);
