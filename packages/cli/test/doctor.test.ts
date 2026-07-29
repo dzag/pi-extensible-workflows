@@ -589,6 +589,22 @@ void test("portable bundles load method shorthand functions and selected payload
   assert.ok(method);
   assert.equal(await method.run({ value: 7 }), 7);
 });
+void test("portable bundles name dependency packages and entry points by their payload paths", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-bundle-dependencies-"));
+  const dependency = join(root, "scoped-source");
+  mkdirSync(dependency);
+  writeFileSync(join(dependency, "package.json"), JSON.stringify({ name: "@scope/example" }));
+  writeFileSync(join(dependency, "index.js"), "export const dependency = true;\n");
+  const entryPoint = join(root, "entry-point.mjs");
+  writeFileSync(entryPoint, "export const entryPoint = true;\n");
+  const destination = join(root, "bundle");
+  const workflow = { name: "dependencyWorkflow", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle dependencies", input: { type: "object", additionalProperties: false }, output: { type: "boolean" } };
+  const manifest = writePortableWorkflowBundle({ destination, command: "dependency-workflow", workflow, functionSource: "async run() { return true; }", resources: { dependencies: [dependency, entryPoint] }, piVersion: ">=0.80.9 <0.81.0", engineVersion: ">=4.0.0 <5.0.0" });
+  assert.deepEqual(manifest.payload?.dependencies, ["@scope/example", "entry-point.mjs"]);
+  assert.equal(readFileSync(join(destination, "payload", "node_modules", "@scope", "example", "package.json"), "utf8"), JSON.stringify({ name: "@scope/example" }));
+  assert.equal(readFileSync(join(destination, "payload", "node_modules", "@scope", "example", "index.js"), "utf8"), "export const dependency = true;\n");
+  assert.equal(readFileSync(join(destination, "payload", "node_modules", "entry-point.mjs"), "utf8"), "export const entryPoint = true;\n");
+});
 void test("portable bundle setup resolves an external runtime, launches, and fails closed on requirements", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-bundle-e2e-"));
   const agentDir = join(root, "agent");
@@ -605,9 +621,10 @@ void test("portable bundle setup resolves an external runtime, launches, and fai
   writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:@piewf/cli"] }));
   const workflow = { name: "e2e", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle e2e", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
   const environment = { ...process.env, PATH: `${join(piRoot, "dist")}:${process.env.PATH ?? ""}`, HOME: root, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" };
-  const create = (name: string, requirements: Record<string, readonly string[]>, piVersion = ">=0.82.0 <0.83.0") => { const destination = join(root, name); writePortableWorkflowBundle({ destination, command: name, workflow, functionSource: "async run(input) { return input.value; }", requirements, piVersion, engineVersion: ">=4.0.0 <5.0.0" }); return destination; };
+  const create = (name: string, requirements: Record<string, readonly string[]>, piVersion = ">=0.82.0 <0.83.0", aliasTargets?: Readonly<Record<string, string>>) => { const destination = join(root, name); writePortableWorkflowBundle({ destination, command: name, workflow, functionSource: "async run(input) { return input.value; }", requirements, ...(aliasTargets ? { aliasTargets } : {}), piVersion, engineVersion: ">=4.0.0 <5.0.0" }); return destination; };
   const runFailure = (bundle: string): string => { try { execFileSync(bundle, ["setup", "--yes"], { env: environment, encoding: "utf8", stdio: "pipe" }); return ""; } catch (error) { return String((error as { stderr?: unknown }).stderr ?? error); } };
   const launchFailure = (bundle: string): string => { try { execFileSync(bundle, ["7"], { env: environment, encoding: "utf8", stdio: "pipe" }); return ""; } catch (error) { return String((error as { stderr?: unknown }).stderr ?? error); } };
+  const setupResult = (bundle: string): ReturnType<typeof spawnSync> => spawnSync(join(bundle, basename(bundle)), ["setup", "--yes"], { env: environment, encoding: "utf8" });
   const bundle = create("e2e", { roles: [], aliases: [], tools: [], commands: [], environment: [] });
   execFileSync(join(bundle, "e2e"), ["setup", "--yes"], { env: environment, encoding: "utf8" });
   assert.ok(existsSync(join(bundle, "bundle-state.json")));
@@ -634,6 +651,22 @@ void test("portable bundle setup resolves an external runtime, launches, and fai
   assert.match(runFailure(join(missingCommand, "missing-command")), /Missing required external command/);
   const missingAlias = create("missing-alias", { roles: [], aliases: ["missing-model"], tools: [], commands: [], environment: [] });
   assert.match(runFailure(join(missingAlias, "missing-alias")), /Required model alias is unknown/);
+  const missingEnvironment = create("missing-environment", { roles: [], aliases: [], tools: [], commands: [], environment: ["BUNDLE_REQUIRED_ENV"] });
+  const environmentFailure = setupResult(missingEnvironment);
+  assert.notEqual(environmentFailure.status, 0);
+  assert.match(String(environmentFailure.stderr), /Missing required environment variable: BUNDLE_REQUIRED_ENV/);
+  assert.equal(existsSync(join(missingEnvironment, "bundle-state.json")), false);
+  const unavailableTool = create("unavailable-tool", { roles: [], aliases: [], tools: ["not-a-pi-tool"], commands: [], environment: [] });
+  const toolFailure = setupResult(unavailableTool);
+  assert.notEqual(toolFailure.status, 0);
+  assert.match(String(toolFailure.stderr), /Required Pi tool is unavailable: not-a-pi-tool/);
+  assert.equal(existsSync(join(unavailableTool, "bundle-state.json")), false);
+  writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: { unavailable: { baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", models: [{ id: "offline-model" }] } } }));
+  const unavailableAlias = create("unavailable-alias", { roles: [], aliases: ["offline"], tools: [], commands: [], environment: [] }, ">=0.82.0 <0.83.0", { offline: "unavailable/offline-model" });
+  const aliasFailure = setupResult(unavailableAlias);
+  assert.notEqual(aliasFailure.status, 0);
+  assert.match(String(aliasFailure.stderr), /Required model alias is unavailable: offline -> unavailable\/offline-model/);
+  assert.equal(existsSync(join(unavailableAlias, "bundle-state.json")), false);
 });
 void test("portable bundle setup installs a missing compatible engine and fails closed for install errors or incompatible versions", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-bundle-install-"));
@@ -672,7 +705,8 @@ else {
   const success = runSetup(installed, "success");
   assert.equal(success.status, 0, String(success.stderr));
   const installedPackage = JSON.parse(readFileSync(join(agentDir, "npm", "node_modules", "@piewf", "cli", "package.json"), "utf8")) as { version?: string };
-  assert.equal(installedPackage.version, "4.0.3");
+  const packageMetadata = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { version?: string };
+   assert.equal(installedPackage.version, packageMetadata.version);
   assert.ok(existsSync(join(installed, "bundle-state.json")));
   assert.equal(execFileSync(join(installed, "installed"), ["7"], { env: environment, encoding: "utf8" }).trim(), "7");
   rmSync(join(agentDir, "npm"), { recursive: true, force: true });

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync, existsSync, readFileSync, symlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, utimesSync, writeFileSync, existsSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { createLaunchSnapshot, DEFAULT_SETTINGS, type RunState } from "pi-extensible-workflows";
 import { acquireSessionLease, RunStore, structuralPath } from "pi-extensible-workflows/persistence";
@@ -274,6 +274,77 @@ void test("doctor cleanup fails closed for unsafe run mutations", async () => {
     assert.deepEqual(report.deleted, [], mutation.name);
     assert.equal(existsSync(corrupt.directory), true, mutation.name);
     assert.equal(existsSync(sibling.directory), true, mutation.name);
+  }
+});
+void test("doctor cleanup fails closed for unsafe session inventories", async () => {
+  const now = 1_000_000_000_000;
+  const mutations = [
+    { name: "non-directory session root", mutate: (paths: { home: string; cwd: string }, store: RunStore) => { const session = dirname(dirname(store.directory)); rmSync(session, { recursive: true }); writeFileSync(session, "preserve session root"); } },
+    { name: "missing runs directory", mutate: (_paths: { home: string; cwd: string }, store: RunStore) => { rmSync(dirname(store.directory), { recursive: true }); } },
+    { name: "symlinked runs directory", mutate: (paths: { home: string; cwd: string }, store: RunStore) => { const runs = dirname(store.directory); const target = join(paths.home, "runs-target"); renameSync(runs, target); symlinkSync(target, runs); } },
+    { name: "extra session root entry", mutate: (_paths: { home: string; cwd: string }, store: RunStore) => { writeFileSync(join(dirname(dirname(store.directory)), "unexpected"), "preserve"); } },
+    { name: "symlinked owner.json", mutate: (paths: { home: string; cwd: string }, store: RunStore) => { const owner = join(dirname(store.directory), "owner.json"); const target = join(paths.home, "owner-target.json"); writeFileSync(target, "{}"); symlinkSync(target, owner); } },
+    { name: "hidden runs entry", mutate: (_paths: { home: string; cwd: string }, store: RunStore) => { mkdirSync(join(dirname(store.directory), ".hidden-run")); } },
+  ] as const;
+  for (const mutation of mutations) {
+    const paths = fixture();
+    const run = await makeRun(paths, "inventory-run", "completed", now);
+    const artifact = join(paths.home, "preserve-artifact.txt");
+    writeFileSync(artifact, mutation.name);
+    mutation.mutate(paths, run);
+    const report = await doctorCleanup({ ...paths, olderThanDays: 90, yes: true, now });
+    assert.deepEqual(report.deleted, [], mutation.name);
+    assert.equal(report.failures.length, 1, mutation.name);
+    assert.equal(readFileSync(artifact, "utf8"), mutation.name, mutation.name);
+  }
+});
+void test("doctor cleanup stops when the session lease token changes during rescanning", async () => {
+  const paths = fixture(); const now = 1_000_000_000_000;
+  const run = await makeRun(paths, "lease-changed", "completed", now);
+  const originalLoad = Reflect.get(RunStore.prototype, "load");
+  let loads = 0;
+  RunStore.prototype.load = async function (this: RunStore) {
+    const loaded = await originalLoad.call(this);
+    if (this.runId === run.runId && ++loads === 4) {
+      const ownerPath = join(dirname(this.directory), "owner.json");
+      const owner = JSON.parse(readFileSync(ownerPath, "utf8")) as Record<string, unknown>;
+      writeFileSync(ownerPath, JSON.stringify({ ...owner, token: "changed-token" }));
+    }
+    return loaded;
+  };
+  try {
+    const report = await doctorCleanup({ ...paths, olderThanDays: 90, yes: true, now });
+    assert.deepEqual(report.deleted, []);
+    assert.equal(report.failures.length, 1);
+    assert.match(report.failures[0]?.message ?? "", /lease changed|ownership lease/i);
+    assert.equal(existsSync(run.directory), true);
+  } finally { RunStore.prototype.load = originalLoad; }
+});
+void test("doctor cleanup rechecks deletion races and never deletes a changed candidate", async () => {
+  const cases = [
+    { name: "state disappears", kind: "failure", mutate: (store: RunStore) => { rmSync(join(store.directory, "state.json")); } },
+    { name: "reload throws", kind: "failure", mutate: () => { throw new Error("reload race"); } },
+    { name: "mtime-only change", kind: "skip", mutate: (store: RunStore) => { const mtime = (1_000_000_000_000 - 100 * DAY_MS + 1_000) / 1000; utimesSync(join(store.directory, "state.json"), mtime, mtime); } },
+    { name: "mtime after cutoff", kind: "skip", mutate: (store: RunStore) => { const mtime = (1_000_000_000_000 - 90 * DAY_MS + 1_000) / 1000; utimesSync(join(store.directory, "state.json"), mtime, mtime); } },
+  ] as const;
+  for (const race of cases) {
+    const paths = fixture();
+    const run = await makeRun(paths, "recheck-race", "completed", 1_000_000_000_000);
+    const originalLoad = Reflect.get(RunStore.prototype, "load");
+    let loads = 0;
+    RunStore.prototype.load = async function (this: RunStore) {
+      if (this.runId === run.runId && ++loads === 7 && race.kind === "failure") race.mutate(this);
+      const loaded = await originalLoad.call(this);
+      if (this.runId === run.runId && loads === 7 && race.kind !== "failure") race.mutate(this);
+      return loaded;
+    };
+    try {
+      const report = await doctorCleanup({ ...paths, olderThanDays: 90, yes: true, now: 1_000_000_000_000 });
+      assert.deepEqual(report.deleted, [], race.name);
+      if (race.kind === "failure") assert.equal(report.failures.length, 1, race.name);
+      else { assert.equal(report.failures.length, 0, race.name); assert.ok(report.skipped.some(({ runId, reason }) => runId === run.runId && reason?.includes("changed")), race.name); }
+      assert.equal(existsSync(run.directory), true, race.name);
+    } finally { RunStore.prototype.load = originalLoad; }
   }
 });
 void test("doctor cleanup fails closed for unrecorded worktree directories", async () => {
