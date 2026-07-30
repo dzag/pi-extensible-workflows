@@ -74,6 +74,11 @@ void test("accepts role system prompt override metadata", () => {
   assert.deepEqual(parseRoleMarkdown("---\noverrideSystemPrompt: false\n---\nbody", true), { prompt: "body", overrideSystemPrompt: false });
   assert.throws(() => parseRoleMarkdown("---\noverrideSystemPrompt: yes\n---\nbody", true), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
 });
+void test("parses and validates role context file scopes", () => {
+  assert.deepEqual(parseRoleMarkdown("---\ncontextFiles: [global, project, cwd]\n---\nbody", true), { prompt: "body", contextFiles: ["global", "project", "cwd"] });
+  assert.deepEqual(parseRoleMarkdown("---\ncontextFiles: []\n---\nbody", true), { prompt: "body", contextFiles: [] });
+  for (const content of ["---\ncontextFiles: global\n---\nbody", "---\ncontextFiles: [global, repository]\n---\nbody", "---\ncontextFiles: [2]\n---\nbody"]) assert.throws(() => parseRoleMarkdown(content, true), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+});
 void test("strict role resource exclusions normalize relative and portable paths", () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-extensible-workflows-role-resources-")));
   const rolePath = join(root, "roles", "reviewer.md");

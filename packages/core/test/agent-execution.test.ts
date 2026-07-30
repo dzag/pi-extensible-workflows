@@ -237,6 +237,14 @@ void test("passes role prompt as system append, not task text", async () => {
   assert.match(prompt, /Task:\nDo work/);
 });
 
+void test("carries role context file scope policy into session preparation", async () => {
+  const roleRoot: AgentExecutionRoot = { ...root, agentDefinitions: { ...root.agentDefinitions, scoped: { prompt: "Scoped role", contextFiles: ["global", "project"] } } };
+  let input: SessionInput | undefined;
+  const executor = new WorkflowAgentExecutor(roleRoot, testTransport(async (sessionInput) => { input = sessionInput; return { transport: "local", session: { transport: "local", sessionId: "scoped", locator: { sessionFile: "/sessions/scoped.jsonl" } }, messages: [assistant("done")], getSessionStats: sessionStats, prompt: async () => {}, dispose() {} }; }));
+  assert.deepEqual(executor.resolve({ label: "worker", workflowName: "flow", role: "scoped" }).contextFiles, ["global", "project"]);
+  await executor.execute("Do work", { label: "worker", workflowName: "flow", role: "scoped" });
+  assert.deepEqual(input?.contextFiles, ["global", "project"]);
+});
 void test("uses a role body as the full system prompt when requested", async () => {
   const roleRoot: AgentExecutionRoot = { ...root, agentDefinitions: { ...root.agentDefinitions, override: { prompt: "Replace the system prompt", model: "anthropic/opus", thinking: "high", tools: ["read"], overrideSystemPrompt: true } } };
   let input: unknown;
@@ -1656,6 +1664,27 @@ void test("applies ordered minimatch resource exclusions and records concrete ma
   assert.deepEqual(resourcePolicy.unmatchedExtensions, []);
   session.dispose();
 });
+void test("filters local context files by the role scope policy", async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-context-files-"));
+  const agentDir = join(rootDir, "agent");
+  const projectRoot = join(rootDir, "project");
+  const cwd = join(projectRoot, "nested");
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(cwd, { recursive: true });
+  writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: {} }));
+  writeFileSync(join(agentDir, "auth.json"), "{}");
+  writeFileSync(join(agentDir, "AGENTS.md"), "global");
+  writeFileSync(join(rootDir, "AGENTS.md"), "ancestor");
+  writeFileSync(join(projectRoot, "AGENTS.md"), "project");
+  writeFileSync(join(cwd, "AGENTS.md"), "cwd");
+  const session = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "context-files", contextFiles: ["global", "project"] });
+  try {
+    assert.deepEqual((session as unknown as { herdrContextFiles?: readonly { path: string; content: string }[] }).herdrContextFiles?.map(({ content }) => content), ["global", "ancestor", "project"]);
+  } finally {
+    session.dispose();
+  }
+});
+
 void test("selected skill paths load in native Pi sessions", async () => {
   const rootDir = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-bundle-skill-runtime-"));
   const agentDir = join(rootDir, "agent");

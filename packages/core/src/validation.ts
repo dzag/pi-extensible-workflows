@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import * as acorn from "acorn";
 import { Script } from "node:vm";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import type { AgentDefinition, AgentResourceExclusions, AgentResourcePolicy, CheckpointInput, JsonSchema, JsonValue, PreflightCapabilities, PreflightResult, ShellOptions, StaticWorkflowCall, StaticWorkflowExecution, StaticWorkflowScope, ValidatedWorkflowLaunch, WorkflowCallKind, WorkflowErrorCode, WorkflowExtensionMetadata, WorkflowExtensionSettings, WorkflowMetadata, WorkflowRoleDirectoryRegistration, WorkflowSettings, WorkflowSettingsOverrides, WorkflowSettingsResolution, WorkflowSettingsSources, WorkflowValidationContext, WorkflowValidationParameters } from "./types.js";
+import type { AgentDefinition, AgentResourceExclusions, AgentResourcePolicy, CheckpointInput, ContextFileScope, JsonSchema, JsonValue, PreflightCapabilities, PreflightResult, ShellOptions, StaticWorkflowCall, StaticWorkflowExecution, StaticWorkflowScope, ValidatedWorkflowLaunch, WorkflowCallKind, WorkflowErrorCode, WorkflowExtensionMetadata, WorkflowExtensionSettings, WorkflowMetadata, WorkflowRoleDirectoryRegistration, WorkflowSettings, WorkflowSettingsOverrides, WorkflowSettingsResolution, WorkflowSettingsSources, WorkflowValidationContext, WorkflowValidationParameters } from "./types.js";
 import type { WorkflowRegistryApi } from "./registry.js";
 import { registeredWorkflowRoleDirectoryRegistrations } from "./registry.js";
 import { annotateModelAliasError, deepFreeze, errorText, fail, jsonValue, modelAliasName, modelCapability, object, parseThinking, positiveInteger, resolveModelReference, unknownModel, validateModelAliases, validateResourcePattern } from "./utils.js";
@@ -64,6 +64,11 @@ function validateAgentResourceExclusions(value: unknown, settingsPath: string, e
     }
   }
   return Object.freeze({ skills: Object.freeze(normalized.skills), extensions: Object.freeze(normalized.extensions) });
+}
+function validateContextFileScopes(value: unknown, rolePath: string): readonly ContextFileScope[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((scope) => typeof scope !== "string" || !["global", "project", "cwd"].includes(scope))) fail("INVALID_METADATA", `${rolePath}.contextFiles must be an array containing only global, project, or cwd`);
+  return value.map((scope) => scope as ContextFileScope);
 }
 function validateWorkflowExtensions(value: unknown, settingsPath: string, errorCode: "INVALID_SETTINGS" | "INVALID_METADATA" = "INVALID_SETTINGS"): WorkflowExtensionSettings | undefined {
   if (value === undefined) return undefined;
@@ -152,7 +157,7 @@ export function parseRoleMarkdown(content: string, strict = false, rolePath?: st
     if (end < 0) return { prompt: content };
     const meta: Record<string, string> = {};
     for (const line of content.slice(4, end).split("\n")) {
-      const match = /^(model|thinking|tools|description|overrideSystemPrompt|override_system_prompt|is_system_prompt)\s*:\s*(.+)$/.exec(line.trim());
+      const match = /^(model|thinking|tools|description|overrideSystemPrompt|override_system_prompt|is_system_prompt|contextFiles)\s*:\s*(.+)$/.exec(line.trim());
       if (match?.[1] && match[2]) meta[match[1]] = match[2].trim();
     }
     const tools = meta.tools ? meta.tools.replace(/^\[|\]$/g, "").split(",").map((tool) => tool.trim().replace(/^[']|[']$/g, "").replace(/^["]|["]$/g, "")).filter(Boolean) : undefined;
@@ -164,7 +169,10 @@ export function parseRoleMarkdown(content: string, strict = false, rolePath?: st
     if (thinking) definition.thinking = thinking as NonNullable<AgentDefinition["thinking"]>;
     if (tools) definition.tools = tools;
     const overrideSystemPrompt = meta.overrideSystemPrompt ?? meta.override_system_prompt ?? meta.is_system_prompt;
+    const contextFiles = meta.contextFiles ? meta.contextFiles.replace(/^\[|\]$/g, "").split(",").map((scope) => scope.trim().replace(/^[']|[']$/g, "").replace(/^["]|["]$/g, "")).filter(Boolean) : undefined;
+    const normalizedContextFiles = validateContextFileScopes(contextFiles, "role");
     if (overrideSystemPrompt) definition.overrideSystemPrompt = overrideSystemPrompt === "true";
+    if (normalizedContextFiles) definition.contextFiles = normalizedContextFiles;
     return definition;
   }
   const normalized = content.replace(/\r\n?/g, "\n");
@@ -173,15 +181,16 @@ export function parseRoleMarkdown(content: string, strict = false, rolePath?: st
   try { parsed = parseFrontmatter(content); }
   catch (error) { fail("INVALID_METADATA", `Invalid role frontmatter: ${errorText(error)}`); }
   if (!object(parsed.frontmatter)) fail("INVALID_METADATA", "Role frontmatter must be an object");
-  const { model, thinking, tools, description, disabledAgentResources } = parsed.frontmatter;
+  const { model, thinking, tools, description, disabledAgentResources, contextFiles } = parsed.frontmatter;
   const overrideSystemPrompt = parsed.frontmatter.overrideSystemPrompt ?? parsed.frontmatter.override_system_prompt ?? parsed.frontmatter.is_system_prompt;
   if (model !== undefined && (typeof model !== "string" || model.trim() === "")) fail("INVALID_METADATA", "Role model must be a non-empty string");
   if (thinking !== undefined && (typeof thinking !== "string" || !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinking))) fail("INVALID_METADATA", `Invalid role thinking level: ${typeof thinking === "string" ? thinking : typeof thinking}`);
   if (description !== undefined && (typeof description !== "string" || description.trim() === "" || description.length > 1024 || /[\r\n]/.test(description))) fail("INVALID_METADATA", "Role description must be a non-empty single-line string of at most 1024 characters");
   if (overrideSystemPrompt !== undefined && typeof overrideSystemPrompt !== "boolean") fail("INVALID_METADATA", "Role overrideSystemPrompt must be a boolean");
+  const normalizedContextFiles = validateContextFileScopes(contextFiles, rolePath ?? "<role>");
   if (tools !== undefined && (!Array.isArray(tools) || tools.some((tool) => typeof tool !== "string" || tool.trim() === ""))) fail("INVALID_METADATA", "Role tools must be an array of non-empty strings");
   const normalizedResources = validateAgentResourceExclusions(disabledAgentResources, rolePath ?? "<role>", "INVALID_METADATA");
-  return { prompt: parsed.body, ...(typeof description === "string" ? { description: description.trim() } : {}), ...(typeof model === "string" ? { model: model.trim() } : {}), ...(typeof thinking === "string" ? { thinking: thinking as NonNullable<AgentDefinition["thinking"]> } : {}), ...(Array.isArray(tools) ? { tools: tools.map((tool) => (tool as string).trim()) } : {}), ...(typeof overrideSystemPrompt === "boolean" ? { overrideSystemPrompt } : {}), ...(normalizedResources ? { disabledAgentResources: normalizedResources } : {}) };
+  return { prompt: parsed.body, ...(typeof description === "string" ? { description: description.trim() } : {}), ...(typeof model === "string" ? { model: model.trim() } : {}), ...(typeof thinking === "string" ? { thinking: thinking as NonNullable<AgentDefinition["thinking"]> } : {}), ...(Array.isArray(tools) ? { tools: tools.map((tool) => (tool as string).trim()) } : {}), ...(typeof overrideSystemPrompt === "boolean" ? { overrideSystemPrompt } : {}), ...(normalizedContextFiles ? { contextFiles: normalizedContextFiles } : {}), ...(normalizedResources ? { disabledAgentResources: normalizedResources } : {}) };
 }
 
 const ROLE_DIRECTORY = "pi-extensible-workflows";

@@ -30,6 +30,7 @@ import type {
   HerdrWorkspacePane,
   HerdrWorkspacePaneRequest,
   PreparedAgentSession,
+  ContextFile,
   WorkflowAgentMessage,
   WorkflowAgentSession,
   WorkflowAgentSessionReference,
@@ -41,14 +42,14 @@ import type {
 type HerdrSettings = Pick<WorkflowSettings, "extensions">;
 type HerdrConfig = NonNullable<NonNullable<HerdrSettings["extensions"]>["herdr"]>;
 type HerdrResourcePaths = { extensions: readonly string[]; skills: readonly string[] };
-type HerdrSession = Omit<WorkflowAgentSession, "getLastAssistant" | "abort"> & { getLastAssistant?(): WorkflowAgentMessage | undefined; abort(): Promise<void>; getHerdrResourcePaths?(): HerdrResourcePaths | undefined };
+type HerdrSession = Omit<WorkflowAgentSession, "getLastAssistant" | "abort"> & { getLastAssistant?(): WorkflowAgentMessage | undefined; abort(): Promise<void>; getHerdrResourcePaths?(): HerdrResourcePaths | undefined; getHerdrContextFiles?(): readonly ContextFile[] | undefined };
 type SessionReference = Parameters<HerdrAgentReporter["reportSession"]>[0];
 type ToolCallContent = { type: "toolCall"; name?: string };
 type LifecycleState = "idle" | "working" | "blocked";
 type LifecycleReport = { state: LifecycleState; message: string | undefined };
 type HerdrBlockedEvent = { active: boolean; label?: string };
 type ExtensionBridge = { extensionPath: string; close(): Promise<void> };
-type CommandFiles = { systemPrompt: string | undefined; appendPrompt: string | undefined; prompt: string | undefined; command(value: string): string; close(): Promise<void> };
+type CommandFiles = { systemPrompt: string | undefined; appendPrompt: string | undefined; contextPrompt: string | undefined; prompt: string | undefined; command(value: string): string; close(): Promise<void> };
 type HerdrToolDefinition = NonNullable<PreparedAgentSession["customTools"]>[number];
 type HerdrCommandResult = Awaited<ReturnType<typeof openHerdrLivePane>>;
 type ToolBridgeRequest = { toolCallId: string; name: string; params: unknown };
@@ -96,7 +97,8 @@ function usableCwd(cwd: string | undefined): boolean {
   try { return statSync(cwd).isDirectory(); } catch { return false; }
 }
 function completedSessionCwd(context: Readonly<CompletedSessionContext>): string | undefined { return [context.attempt?.setup?.cwd, context.run?.cwd].find(usableCwd); }
-function createCommandFiles(prepared: Readonly<PreparedAgentSession>, prompt: string | undefined, directPrompt: boolean): CommandFiles {
+function formatContextFiles(files: readonly ContextFile[]): string { return files.length ? `<project_context>\n\nProject-specific instructions and guidelines:\n\n${files.map(({ path, content }) => `<project_instructions path="${path}">\n${content}\n</project_instructions>`).join("\n\n")}\n</project_context>\n` : ""; }
+function createCommandFiles(prepared: Readonly<PreparedAgentSession>, prompt: string | undefined, directPrompt: boolean, contextFiles: readonly ContextFile[] | undefined): CommandFiles {
   const paths: string[] = [];
   const create = (kind: string, value: string): string => {
     const path = join(tmpdir(), `pi-herdr-${kind}-${String(process.pid)}-${randomBytes(6).toString("hex")}.txt`);
@@ -107,6 +109,7 @@ function createCommandFiles(prepared: Readonly<PreparedAgentSession>, prompt: st
   const files = {
     systemPrompt: prepared.systemPrompt === undefined ? undefined : create("system-prompt", prepared.systemPrompt),
     appendPrompt: prepared.systemPromptAppend ? create("append-prompt", prepared.systemPromptAppend) : undefined,
+    contextPrompt: contextFiles && formatContextFiles(contextFiles) ? create("context-prompt", formatContextFiles(contextFiles)) : undefined,
     prompt: prompt === undefined || directPrompt ? undefined : create("prompt", prompt),
   };
   return { ...files, command(value: string): string { return `sh ${quote(create("command", `${value}\n`))}`; }, async close(): Promise<void> { for (const path of paths) { try { unlinkSync(path); } catch { /* Cleanup is best effort after the child exits. */ } } } };
@@ -215,6 +218,8 @@ function sessionCommand(session: HerdrSession, prepared: Readonly<PreparedAgentS
   const tools = toolNames.length ? ` --tools ${quote(toolNames.join(","))}` : " --no-tools";
   const systemPrompt = prepared.systemPrompt !== undefined ? ` --system-prompt ${quote(files.systemPrompt ?? "")}` : prepared.systemPromptPath ? ` --system-prompt ${quote(prepared.systemPromptPath)}` : "";
   const appendPrompt = files.appendPrompt ? ` --append-system-prompt ${quote(files.appendPrompt)}` : "";
+  const contextPrompt = files.contextPrompt ? ` --append-system-prompt ${quote(files.contextPrompt)}` : "";
+  const contextFiles = prepared.contextFiles === undefined ? "" : " --no-context-files";
   const loaded = resourcePaths(session);
   const allowedSkills = [...new Set([...(prepared.additionalSkillPaths ?? []), ...loaded.skills])];
   const skills = prepared.resourcePolicy ? ` --no-skills${allowedSkills.map((path) => ` --skill ${quote(path)}`).join("")}` : allowedSkills.map((path) => ` --skill ${quote(path)}`).join("");
@@ -224,7 +229,7 @@ function sessionCommand(session: HerdrSession, prepared: Readonly<PreparedAgentS
   const trust = prepared.resourcePolicy?.projectTrusted === false ? " --no-approve" : prepared.resourcePolicy?.projectTrusted === true ? " --approve" : "";
   const environment = [prepared.agentDir ? `PI_CODING_AGENT_DIR=${quote(prepared.agentDir)}` : "", "PI_EXTENSIBLE_WORKFLOWS_HERDR_OWNER=1"].filter(Boolean).join(" ");
   const message = prompt === undefined ? "" : directPrompt ? ` ${quote(prompt)}` : ` @${quote(files.prompt ?? "")}`;
-  return `${environment} ${quote(runtime.executable)}${entrypoint ? ` ${quote(entrypoint)}` : ""} ${sessionArg} --model ${quote(model)}${tools}${systemPrompt}${appendPrompt}${skills}${extensions}${trust}${message}`;
+  return `${environment} ${quote(runtime.executable)}${entrypoint ? ` ${quote(entrypoint)}` : ""} ${sessionArg} --model ${quote(model)}${tools}${systemPrompt}${appendPrompt}${contextPrompt}${contextFiles}${skills}${extensions}${trust}${message}`;
 }
 
 function paneId(value: HerdrCommandResult): string { return typeof value === "string" ? value : value.paneId; }
@@ -265,7 +270,8 @@ async function launchPane({ session, prepared, identity, run, attempt, runner, f
   let pane: string | undefined;
   try {
     inlineBridge = createInlineExtensionBridge(prepared);
-    commandFiles = createCommandFiles(prepared, prompt, directPrompt);
+    const selectedContextFiles = prepared.contextFiles === undefined ? undefined : session.getHerdrContextFiles?.() ?? [];
+    commandFiles = createCommandFiles(prepared, prompt, directPrompt, selectedContextFiles);
     const bridges = [bridge, inlineBridge].filter((value): value is ExtensionBridge => Boolean(value));
     const command = commandFiles.command(sessionCommand(session, prepared, prompt, bridges, commandFiles, directPrompt));
     let opened: HerdrCommandResult;
