@@ -185,6 +185,7 @@ void test("registers the workflow tool, command, and conditional skill", async (
   assert.ok(skillPath);
   assert.ok(existsSync(join(skillPath, "pi-extensible-workflows", "SKILL.md")));
   const skillSource = readFileSync(join(skillPath, "pi-extensible-workflows", "SKILL.md"), "utf8");
+  assert.match(skillSource, /Inspect tool `workflow_catalog` result at least once before creating the first workflow for a task/);
   const shellExample = /Example use of `shell`:[\s\S]*?```js\n([\s\S]*?)\n```/.exec(skillSource)?.[1];
   assert.ok(shellExample);
   assert.match(skillSource, /return \{ ok: true \};/);
