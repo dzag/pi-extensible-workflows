@@ -180,7 +180,6 @@ export interface PreparedAgentSession {
   readonly piRuntimeError?: string;
   readonly systemPrompt?: string;
   readonly systemPromptPath?: string;
-  readonly systemPromptSource?: string;
   readonly systemPromptAppend?: string;
   readonly extensionFactories?: readonly InlineExtension[];
   readonly additionalSkillPaths?: readonly string[];

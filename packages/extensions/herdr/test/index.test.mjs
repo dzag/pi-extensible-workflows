@@ -39,6 +39,13 @@ void test("registers session and live actions when enabled", () => {
   assert.equal(fullyInspectable.agentAttemptActions.openLiveSession.visible(context), false);
   assert.equal(fullyInspectable.agentAttemptActions.openSession.visible({ ...context, liveSession: undefined }), true);
 });
+void test("skips Herdr transport replacement during inspection", () => {
+  const herdr = createHerdrExtension({ agentDir: mkdtempSync(join(tmpdir(), "herdr-extension-inspection-")), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" } });
+  const original = { id: "local" };
+  const agent = { transport: original };
+  herdr.agentSetupHooks.fullyInspectable.setup(agent, { identity: { structuralPath: ["review"], callSite: "doctor", occurrence: 1 }, run: { runId: "doctor", workflow: { name: "doctor" } }, signal: new AbortController().signal, mode: "inspection" });
+  assert.equal(agent.transport, original);
+});
 
 void test("opens a completed session in a Herdr pane without taking ownership", async () => {
   const previousEnvironment = { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR, PI_CODING_AGENT_SESSION_DIR: process.env.PI_CODING_AGENT_SESSION_DIR };

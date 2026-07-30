@@ -33,12 +33,12 @@ export interface PiPromptInspection {
   readonly messages: readonly unknown[];
   readonly systemPromptOptions: unknown;
   readonly inputHandled: boolean;
-  readonly diagnostics: readonly { message: string; source?: string }[];
+  readonly diagnostics: readonly { type: "error"; message: string; source?: string }[];
 }
 export interface PiResourceInspection {
   readonly extensions: readonly string[];
   readonly skills: readonly string[];
-  readonly diagnostics: readonly { message: string; source?: string }[];
+  readonly diagnostics: readonly { type: "warning" | "error" | "collision"; message: string; source?: string }[];
   readonly systemPromptSource?: string;
 }
 import type { AgentIdentity, AgentResourceExclusions, AgentResourcePolicy, AgentSetup, AgentSetupSummary, AgentTransport, AgentTransportContext, ContextFileScope, JsonSchema, JsonValue, LiveSessionHandoff, ModelSpec, PiRuntimeLaunchInfo, PreparedAgentSession, RegisteredAgentSetupHook, SessionInput, WorkflowAgentMessage, WorkflowAgentSession, WorkflowAgentSessionEvent, WorkflowAgentSessionReference, WorkflowAgentSessionState, WorkflowAgentSessionStats, WorkflowAgentTurnResult, WorkflowRunContext } from "./types.js";
@@ -187,23 +187,16 @@ function filterContextFiles(base: readonly { path: string; content: string }[], 
     return scopes.some((scope) => scope === "global" ? resolvedPath === globalPath : scope === "cwd" ? resolvedPath === cwdPath : resolvedPath !== globalPath && resolvedPath !== cwdPath);
   });
 }
-function expandPromptTemplateForInspection(text: string, templates: readonly { name: string; content: string }[]): string {
-  if (!text.startsWith("/")) return text;
-  const match = /^\/([^\s]+)(?:\s+([\s\S]*))?$/.exec(text);
-  if (!match) return text;
-  const template = templates.find(({ name }) => name === match[1]);
-  if (!template) return text;
-  const args = (match[2] ?? "").match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((value) => value.replace(/^["']|["']$/g, "")) ?? [];
-  const allArgs = args.join(" ");
-  return template.content.replace(/\$\{(\d+|ARGUMENTS|@):-([^}]*)\}|\$\{@:(\d+)(?::(\d+))?\}|\$(ARGUMENTS|@|\d+)/g, (_match, defaultTarget: string | undefined, defaultValue: string | undefined, sliceStart: string | undefined, sliceLength: string | undefined, simple: string | undefined) => {
-    if (defaultTarget) { const value = defaultTarget === "@" || defaultTarget === "ARGUMENTS" ? allArgs : args[Number(defaultTarget) - 1]; return value || defaultValue || ""; }
-    if (sliceStart) { const start = Math.max(Number(sliceStart) - 1, 0); return args.slice(start, sliceLength ? start + Number(sliceLength) : undefined).join(" "); }
-    if (simple === "ARGUMENTS" || simple === "@") return allArgs;
-    return args[Number(simple) - 1] ?? "";
-  });
+type NativePromptTemplateModule = { expandPromptTemplate(text: string, templates: readonly { name: string; content: string }[]): string };
+let nativePromptTemplateModule: Promise<NativePromptTemplateModule> | undefined;
+function loadNativePromptTemplateModule(): Promise<NativePromptTemplateModule> {
+  return nativePromptTemplateModule ??= import(resolve(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "core/prompt-templates.js")).then((module) => module as unknown as NativePromptTemplateModule);
+}
+async function expandPromptTemplateForInspection(text: string, templates: readonly { name: string; content: string }[]): Promise<string> {
+  return (await loadNativePromptTemplateModule()).expandPromptTemplate(text, templates);
 }
 type NativePromptSession = PiSession & {
-  readonly _extensionRunner?: { hasHandlers(event: string): boolean; emitInput(text: string, images: undefined, source: "inspection"): Promise<unknown>; emitBeforeAgentStart(prompt: string, images: undefined, systemPrompt: string, options: unknown): Promise<unknown>; onError(listener: (error: unknown) => void): () => void };
+  readonly _extensionRunner?: { hasHandlers(event: string): boolean; emitInput(text: string, images: undefined, source: "interactive"): Promise<unknown>; emitBeforeAgentStart(prompt: string, images: undefined, systemPrompt: string, options: unknown): Promise<unknown>; onError(listener: (error: unknown) => void): () => void };
   readonly _baseSystemPrompt?: string;
   readonly _baseSystemPromptOptions?: unknown;
   readonly _expandSkillCommand?: (text: string) => string;
@@ -211,25 +204,38 @@ type NativePromptSession = PiSession & {
 };
 async function preparePiPrompt(native: PiSession, text: string): Promise<PiPromptInspection> {
   const session = native as NativePromptSession;
-  const diagnostics: Array<{ message: string; source?: string }> = [];
+  const diagnostics: Array<{ type: "error"; message: string; source?: string }> = [];
   const runner = session._extensionRunner;
+  const baseSystemPrompt = typeof session._baseSystemPrompt === "string" ? session._baseSystemPrompt : session.systemPrompt ?? "";
+  const baseOptions = session._baseSystemPromptOptions;
+  const expandSkillCommand = session._expandSkillCommand;
+  const templates = session.promptTemplates;
+  if (!runner) diagnostics.push({ type: "error", message: "Pi prompt inspection seam is unavailable: extension runner is missing", source: "Pi session" });
+  if (typeof session._baseSystemPrompt !== "string") diagnostics.push({ type: "error", message: "Pi prompt inspection seam is unavailable: base system prompt is missing", source: "Pi session" });
+  if (baseOptions === undefined) diagnostics.push({ type: "error", message: "Pi prompt inspection seam is unavailable: base system prompt options are missing", source: "Pi session" });
+  if (typeof expandSkillCommand !== "function") diagnostics.push({ type: "error", message: "Pi prompt inspection seam is unavailable: skill expansion is missing", source: "Pi session" });
+  if (!Array.isArray(templates)) diagnostics.push({ type: "error", message: "Pi prompt inspection seam is unavailable: prompt templates are missing", source: "Pi session" });
   const unsubscribe = runner?.onError((error) => {
     const value = error as { error?: unknown; extensionPath?: unknown };
-    diagnostics.push({ message: typeof value.error === "string" ? value.error : String(value.error ?? error), ...(typeof value.extensionPath === "string" ? { source: value.extensionPath } : {}) });
+    diagnostics.push({ type: "error", message: typeof value.error === "string" ? value.error : String(value.error ?? error), ...(typeof value.extensionPath === "string" ? { source: value.extensionPath } : {}) });
   });
   try {
     let current = text;
     let inputHandled = false;
     if (runner?.hasHandlers("input")) {
-      const result = await runner.emitInput(current, undefined, "inspection") as { action?: unknown; text?: unknown };
+      const result = await runner.emitInput(current, undefined, "interactive") as { action?: unknown; text?: unknown };
       if (result.action === "handled") inputHandled = true;
       else if (result.action === "transform" && typeof result.text === "string") current = result.text;
     }
-    const expandedPrompt = inputHandled ? current : expandPromptTemplateForInspection(session._expandSkillCommand ? session._expandSkillCommand(current) : current, session.promptTemplates ?? []);
-    const baseSystemPrompt = session._baseSystemPrompt ?? session.systemPrompt ?? "";
-    const result = inputHandled || !runner ? undefined : await runner.emitBeforeAgentStart(expandedPrompt, undefined, baseSystemPrompt, session._baseSystemPromptOptions);
+    let expandedPrompt = current;
+    if (!inputHandled) {
+      const skillExpanded = typeof expandSkillCommand === "function" ? expandSkillCommand(current) : current;
+      try { expandedPrompt = await expandPromptTemplateForInspection(skillExpanded, Array.isArray(templates) ? templates : []); }
+      catch (error) { diagnostics.push({ type: "error", message: `Pi prompt template expansion is unavailable: ${error instanceof Error ? error.message : String(error)}`, source: "Pi session" }); }
+    }
+    const result = !inputHandled && runner && baseOptions !== undefined ? await runner.emitBeforeAgentStart(expandedPrompt, undefined, baseSystemPrompt, baseOptions) : undefined;
     const prepared = result as { messages?: readonly unknown[]; systemPrompt?: unknown } | undefined;
-    return { prompt: text, expandedPrompt, systemPrompt: typeof prepared?.systemPrompt === "string" ? prepared.systemPrompt : baseSystemPrompt, systemPromptOptions: session._baseSystemPromptOptions, messages: prepared?.messages ?? [], inputHandled, diagnostics };
+    return { prompt: text, expandedPrompt, systemPrompt: typeof prepared?.systemPrompt === "string" ? prepared.systemPrompt : baseSystemPrompt, systemPromptOptions: baseOptions, messages: prepared?.messages ?? [], inputHandled, diagnostics };
   } finally { unsubscribe?.(); }
 }
 
@@ -293,7 +299,7 @@ export async function createLocalPiSession(input: SessionInput): Promise<PiSessi
   const resourceInspection = (): PiResourceInspection => {
     const extensions = resourceLoader?.getExtensions();
     const skills = resourceLoader?.getSkills();
-    const diagnostics = [...(extensions?.errors ?? []).map(({ path, error }) => ({ message: error, ...(path ? { source: path } : {}) })), ...(skills?.diagnostics ?? []).map(({ message }) => ({ message }))];
+    const diagnostics = [...(extensions?.errors ?? []).map(({ path, error }) => ({ type: "error" as const, message: error, source: path })), ...(skills?.diagnostics ?? []).map(({ type, path, message }) => ({ type, message, ...(path ? { source: path } : {}) }))];
     const systemSource = input.systemPromptSource ?? systemPromptSource;
     return { extensions: resourceLoader?.getExtensions().extensions.filter(({ path }) => !path.startsWith("<")).map(({ resolvedPath }) => canonicalSourcePath(resolvedPath)) ?? [], skills: skills?.skills.map(({ name }) => name) ?? [], diagnostics, ...(systemSource ? { systemPromptSource: systemSource } : resourceLoader?.getSystemPrompt() !== undefined ? { systemPromptSource: "Pi resource loader" } : {}) };
   };
@@ -320,7 +326,7 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
   const input: SessionInput = {
     cwd: prepared.cwd, model: { ...prepared.model }, tools: [...prepared.tools] as SessionInput["tools"], sessionLabel: prepared.sessionLabel,
     ...(prepared.agentDir ? { agentDir: prepared.agentDir } : {}), ...(prepared.customTools?.length ? { customTools: [...prepared.customTools] as NonNullable<SessionInput["customTools"]> } : {}),
-    ...(prepared.resultTool ? { resultTool: prepared.resultTool } : {}), ...(prepared.systemPrompt === undefined ? {} : { systemPrompt: prepared.systemPrompt }), ...(prepared.systemPromptSource === undefined ? {} : { systemPromptSource: prepared.systemPromptSource }),
+    ...(prepared.resultTool ? { resultTool: prepared.resultTool } : {}), ...(prepared.systemPrompt === undefined ? {} : { systemPrompt: prepared.systemPrompt }),
     ...(prepared.systemPromptAppend ? { systemPromptAppend: prepared.systemPromptAppend } : {}), ...(prepared.extensionFactories?.length ? { extensionFactories: [...prepared.extensionFactories] } : {}),
     ...(prepared.additionalSkillPaths?.length ? { additionalSkillPaths: [...prepared.additionalSkillPaths] } : {}), ...(prepared.contextFiles === undefined ? {} : { contextFiles: [...prepared.contextFiles] }), ...(prepared.resourcePolicy ? { resourcePolicy: structuredClone(prepared.resourcePolicy) } : {}), ...(prepared.options ? { options: { ...prepared.options } } : {}),
   };
@@ -476,7 +482,7 @@ function preparedAgentSession(input: SessionInput, initialPrompt?: string): Read
     cwd: input.cwd, model: Object.freeze({ ...input.model }), tools: Object.freeze([...input.tools]), sessionLabel: input.sessionLabel, ...(initialPrompt === undefined ? {} : { initialPrompt }),
     ...(input.agentDir ? { agentDir: input.agentDir } : {}), ...(input.customTools?.length ? { customTools: Object.freeze([...input.customTools]) } : {}), ...(input.resultTool ? { resultTool: input.resultTool } : {}), ...(input.options ? { options: Object.freeze(structuredClone(input.options)) } : {}),
     ...(piRuntime ? { piRuntime } : {}), ...(piRuntimeError ? { piRuntimeError } : {}),
-    ...(input.systemPrompt === undefined ? {} : { systemPrompt: input.systemPrompt }), ...(input.systemPromptSource === undefined ? {} : { systemPromptSource: input.systemPromptSource }), ...(systemPromptPath ? { systemPromptPath } : {}), ...(input.systemPromptAppend ? { systemPromptAppend: input.systemPromptAppend } : {}),
+    ...(input.systemPrompt === undefined ? {} : { systemPrompt: input.systemPrompt }), ...(systemPromptPath ? { systemPromptPath } : {}), ...(input.systemPromptAppend ? { systemPromptAppend: input.systemPromptAppend } : {}),
     ...(input.extensionFactories?.length ? { extensionFactories: Object.freeze([...input.extensionFactories]) } : {}), ...(input.additionalSkillPaths?.length ? { additionalSkillPaths: Object.freeze([...input.additionalSkillPaths]) } : {}), ...(input.contextFiles === undefined ? {} : { contextFiles: Object.freeze([...input.contextFiles]) }),
     ...(input.resourcePolicy ? { resourcePolicy: Object.freeze(structuredClone(input.resourcePolicy)) } : {}),
   };
@@ -486,8 +492,8 @@ function agentSetupSummary(setup: AgentSetup, hookNames: readonly string[]): Age
   const model = setup.sessionInput.model;
   return { hookNames: [...hookNames], model: { provider: model.provider, model: model.model, ...(model.thinking ? { thinking: model.thinking } : {}) }, tools: [...setup.sessionInput.tools], cwd: setup.sessionInput.cwd, ...(setup.sessionInput.resourcePolicy ? { disabledAgentResources: resourcePolicySummary(setup.sessionInput.resourcePolicy) } : {}) };
 }
-type PreparedAgentSetup = { setup: AgentSetup; summary: AgentSetupSummary; failure?: { error: unknown } };
-async function prepareAgentSetup(root: AgentExecutionRoot, transport: AgentTransport, task: string, options: AgentExecutionOptions, resolved: { model: ModelSpec; tools: readonly string[]; systemPrompt?: string; systemPromptAppend: string; contextFiles?: readonly ContextFileScope[] }, cwd: string, attempt: number, signal: AbortSignal | undefined, customTools: readonly ToolDefinition[], resultTool: ToolDefinition | undefined): Promise<PreparedAgentSetup> {
+export type PreparedAgentSetup = { setup: AgentSetup; summary: AgentSetupSummary; failure?: { error: unknown; hook?: string } };
+async function prepareAgentSetup(root: AgentExecutionRoot, transport: AgentTransport, task: string, options: AgentExecutionOptions, resolved: { model: ModelSpec; tools: readonly string[]; systemPrompt?: string; systemPromptAppend: string; contextFiles?: readonly ContextFileScope[] }, cwd: string, attempt: number, signal: AbortSignal | undefined, customTools: readonly ToolDefinition[], resultTool: ToolDefinition | undefined, inspection = false): Promise<PreparedAgentSetup> {
   const setupSignal = signal ?? root.runContext?.signal ?? new AbortController().signal;
   const baselineOptions = structuredClone(options.agentOptions ?? {});
   const baseResourcePolicy = await root.agentResourcePolicy?.();
@@ -497,13 +503,13 @@ async function prepareAgentSetup(root: AgentExecutionRoot, transport: AgentTrans
   const sessionInput: SessionInput = { cwd, model: { ...resolved.model }, tools: [...resolved.tools], sessionLabel: `${options.workflowName}:${options.label}:attempt-${String(attempt)}`, ...(root.agentDir ? { agentDir: root.agentDir } : {}), ...(root.additionalSkillPaths?.length ? { additionalSkillPaths: [...root.additionalSkillPaths] } : {}), ...(resolved.contextFiles === undefined ? {} : { contextFiles: [...resolved.contextFiles] }), ...(customTools.length ? { customTools: [...customTools] } : {}), ...(resultTool ? { resultTool } : {}), ...(resolved.systemPrompt !== undefined ? { systemPrompt: resolved.systemPrompt } : {}), systemPromptAppend: resolved.systemPromptAppend, ...(resourcePolicy ? { resourcePolicy } : {}), options: structuredClone(baselineOptions) };
   const setup = { prompt: task, options: sessionInput.options ?? {}, sessionInput, prepared: preparedAgentSession(sessionInput, task), transport };
   const base = fallbackSetupContext(root, options, setupSignal);
-  const context = Object.freeze({ run: base.run, identity: base.identity, attempt, signal: setupSignal, ...(base.tuiIndex === undefined ? {} : { tuiIndex: base.tuiIndex }), ...(base.tuiLabel === undefined ? {} : { tuiLabel: base.tuiLabel }) });
+  const context = Object.freeze({ run: base.run, identity: base.identity, attempt, signal: setupSignal, ...(base.tuiIndex === undefined ? {} : { tuiIndex: base.tuiIndex }), ...(base.tuiLabel === undefined ? {} : { tuiLabel: base.tuiLabel }), ...(inspection ? { mode: "inspection" as const } : {}) });
   const hookNames: string[] = [];
   for (const hook of [...(root.agentSetupHooks ?? [])].sort((left, right) => left.priority - right.priority || (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))) {
     if (setupSignal.aborted) return { setup, summary: agentSetupSummary(setup, hookNames), failure: { error: new WorkflowError("CANCELLED", "Agent cancelled") } };
     try { await hook.setup(setup, context); } catch (error) {
       setup.prepared = preparedAgentSession(setup.sessionInput, task);
-      return { setup, summary: agentSetupSummary(setup, hookNames), failure: { error: setupSignal.reason !== undefined ? new WorkflowError("CANCELLED", "Agent cancelled") : error } };
+      return { setup, summary: agentSetupSummary(setup, hookNames), failure: { error: setupSignal.reason !== undefined ? new WorkflowError("CANCELLED", "Agent cancelled") : error, hook: hook.name } };
     }
     setup.prepared = preparedAgentSession(setup.sessionInput, task);
     hookNames.push(hook.name);
@@ -526,6 +532,11 @@ async function prepareAgentSetup(root: AgentExecutionRoot, transport: AgentTrans
   }
   setup.prepared = preparedAgentSession(setup.sessionInput, task);
   return { setup, summary: agentSetupSummary(setup, hookNames) };
+}
+export async function prepareAgentSetupForInspection(root: AgentExecutionRoot, task: string, options: AgentExecutionOptions, transport: AgentTransport): Promise<PreparedAgentSetup> {
+  const executor = new WorkflowAgentExecutor(root);
+  const resolved = executor.resolve(options);
+  return prepareAgentSetup(root, transport, task, options, resolved, root.cwd, 1, root.runContext?.signal, [], undefined, true);
 }
 function attemptRecord(transport: string, attempt: number, session: WorkflowAgentSession, setup: AgentSetupSummary, stats: AgentAccounting, result?: JsonValue, error?: { code: string; message: string }): AgentAttempt {
   return { attempt, transport, session: session.reference, ...(result === undefined ? {} : { result }), ...(error ? { error } : {}), accounting: stats, setup };
