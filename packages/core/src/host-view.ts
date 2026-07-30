@@ -80,6 +80,14 @@ function formatWorkflowRuntime(durationMs: number): string {
   const remainingMinutes = minutes % 60;
   return `${String(hours)}h${remainingMinutes ? ` ${String(remainingMinutes)}m` : ""}`;
 }
+function formatShellActivity(run: Pick<PersistedRun, "activeShells" | "activeShellStartedAt">, spinner: string, styles: WorkflowProgressStyles, now: number): string | undefined {
+  const activeShells = run.activeShells ?? 0;
+  if (activeShells <= 0) return undefined;
+  const startedAt = run.activeShellStartedAt;
+  const started = startedAt !== undefined && Number.isFinite(startedAt) ? new Date(startedAt) : undefined;
+  const timing = started && startedAt !== undefined && !Number.isNaN(started.getTime()) ? ` ${styles.dim(`started=${started.toISOString()} elapsed=${formatWorkflowRuntime(Math.max(0, now - startedAt))}`)}` : "";
+  return `  ${styles.accent(spinner)} shell ${styles.accent("[running]")} ${styles.dim(`(${String(activeShells)} active)`)}${timing}`;
+}
 export function formatWorkflowProgress(run: PersistedRun, spinner = "◇", styles: WorkflowProgressStyles = PLAIN_WORKFLOW_PROGRESS_STYLES, now = Date.now()): string {
   const done = run.agents.filter((agent) => SETTLED_AGENT_STATES.has(agent.state)).length;
   const workflowIcon = runStateGlyph(run.state, spinner);
@@ -90,8 +98,8 @@ export function formatWorkflowProgress(run: PersistedRun, spinner = "◇", style
   const lines = [`${iconStyle(workflowIcon)} ${header} ${state}${runtime}`];
   const budgetWarning = run.state === "budget_exhausted" || (run.budgetEvents ?? []).some((event) => event.type === "hard_exhausted");
   lines.push(...formatCompactBudgetStatus(run).map((line) => `  ${budgetWarning ? styles.warning(line) : line}`));
-  const activeShells = run.activeShells ?? 0;
-  if (activeShells > 0) lines.push(`  ${styles.accent(spinner)} shell ${styles.accent("[running]")} ${styles.dim(`(${String(activeShells)} active)`)}`);
+  const shellActivity = formatShellActivity(run, spinner, styles, now);
+  if (shellActivity) lines.push(shellActivity);
   const byId = new Map(run.agents.map((agent) => [agent.id, agent]));
   const renderAgents = (agents: readonly AgentRecord[], offset: number, nested: boolean) => renderGroupedAgents(agents, ({ agent, index, depth }, grouped) => {
     const icon = agentStateGlyph(agent.state, spinner);
@@ -349,8 +357,8 @@ export function workflowProgressBlock(run: PersistedRun, theme: Theme, progress?
     },
     invalidate() {
       const displayed = currentRun();
-      if (!progress || !refresh || displayed.state !== "running" || !displayed.agents.some((agent) => agent.state === "running")) return;
       const now = Date.now();
+      if (!progress || !refresh || displayed.state !== "running" || (!displayed.agents.some((agent) => agent.state === "running") && (displayed.activeShells ?? 0) <= 0)) return;
       if (progress.refresh || now - progress.lastRefreshAt < WORKFLOW_PROGRESS_REFRESH_MS) return;
       progress.lastRefreshAt = now;
       const inputRun = progress.inputRun;
@@ -493,6 +501,8 @@ export function formatNavigatorDashboard(run: PersistedRun, checkpoints: readonl
   const runtime = run.usage ? `runtime=${formatWorkflowRuntime(run.usage.durationMs)}` : "";
   const meta = [run.state, run.phase ? `phase: ${run.phase}` : "", `${String(done)}/${String(run.agents.length)} agents`, runtime, hasAccounting ? formatAccounting(totalAccounting) : "", totalAccounting.cost > 0 ? `$${totalAccounting.cost.toFixed(2)}` : ""].filter(Boolean).join(" · ");
   const lines = [header, meta, ...formatCompactBudgetStatus(run)];
+  const shellActivity = formatShellActivity(run, "⠦", PLAIN_WORKFLOW_PROGRESS_STYLES, now);
+  if (shellActivity) lines.push(shellActivity);
   if (run.error) lines.push(`Error: ${run.error.code}: ${run.error.message}`);
   if (run.events?.length) lines.push(...run.events.map((event) => `Warning: ${event.message}`));
   lines.push("");
@@ -528,6 +538,8 @@ export function formatNavigatorRun(loaded: { run: PersistedRun; snapshot: Readon
     `Launch models: ${snapshot.models.join(", ") || "(none)"}`,
     `Settings: concurrency=${String(snapshot.settings.concurrency)}`,
   ];
+  const shellActivity = formatShellActivity(run, "⠦", PLAIN_WORKFLOW_PROGRESS_STYLES, now);
+  if (shellActivity) lines.push(shellActivity);
   if (run.error) lines.push(`Run error: ${run.error.code}: ${run.error.message}`);
   if (run.events?.length) lines.push(...run.events.map((event) => `Warning: ${event.message}`));
   const aliases = snapshot.modelAliases ?? snapshot.settings.modelAliases;
@@ -619,6 +631,8 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
   lines.push(`phase: ${run.phase ?? selectedPhase?.name ?? "none"}`, `Run state: ${run.state}${runtime}`, `Phases: ${statusSummary}`);
   for (const event of run.events ?? []) lines.push(styles.warning(`Warning: ${event.message}`));
   lines.push(...formatCompactBudgetStatus(run));
+  const shellActivity = formatShellActivity(run, "⠦", styles, now);
+  if (shellActivity) lines.push(shellActivity);
   const renderTree = (limit: number): string[] => [styles.bold("Tree"), ...(visibleNodes.length ? visibleNodes.flatMap((node) => wrap(treeLine(node), limit)) : [styles.muted("(empty)")])];
   const actionRows = (): string[] => {
     const actions = selection.actions;

@@ -169,7 +169,14 @@ void test("phase dashboard shows workflow and selected agent durations", () => {
   assert.match(render(live), /Duration: 12s/);
   assert.match(render(completed), /Duration: 1m 5s/);
 });
-
+void test("phase dashboard shows active shell start and elapsed time", () => {
+  const now = 65_432;
+  const current = { ...run("running"), activeShells: 1, activeShellStartedAt: 0 };
+  const rendered = formatWorkflowPhaseDashboard(current, snapshot(), 120, {}, undefined, now).join("\n");
+  assert.match(rendered, /shell \[running\] \(1 active\)/);
+  assert.match(rendered, /started=1970-01-01T00:00:00\.000Z/);
+  assert.match(rendered, /elapsed=1m 5s/);
+});
 void test("phase and agent selections survive read-model polling", () => {
   const before = buildWorkflowPhaseModel(run("running", [agent("one")], [{ phase: "build", afterAgent: 0 }]), ["build", "review"]);
   const selected = preserveWorkflowPhaseSelection(before, { phaseId: "build#1", agentId: "one" });

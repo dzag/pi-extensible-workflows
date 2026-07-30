@@ -407,7 +407,11 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const path = shellIdentityPath(identity);
       const replayed = await store.replay(path);
       if (replayed) return readShellResult(replayed.value);
-      const started = await persistRunState(store, metadata, (current) => ({ ...current, activeShells: (current.activeShells ?? 0) + 1 }));
+      const shellStartedAt = Date.now();
+      const started = await persistRunState(store, metadata, (current) => {
+        const activeShells = current.activeShells ?? 0;
+        return { ...current, activeShells: activeShells + 1, ...(activeShells > 0 && current.activeShellStartedAt !== undefined ? {} : { activeShellStartedAt: shellStartedAt }) };
+      });
       runs.get(store.runId)?.update?.(workflowToolUpdate(withLiveActivities(started)));
       try {
         const cwd = identity.worktreeOwner ? (await persistWorktree(store, metadata, identity.worktreeOwner)).cwd : store.cwd;
@@ -420,6 +424,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           if (activeShells > 0) return { ...current, activeShells };
           const next = { ...current };
           delete next.activeShells;
+          delete next.activeShellStartedAt;
           return next;
         });
         runs.get(store.runId)?.update?.(workflowToolUpdate(withLiveActivities(stopped)));
@@ -825,16 +830,18 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           if (["completed", "failed", "stopped", "interrupted", "budget_exhausted"].includes(current.state)) return current;
           const next = { ...current, state: "interrupted" as const };
           delete next.activeShells;
+          delete next.activeShellStartedAt;
           return next;
         });
         loaded = { ...loaded, run: (await store.load()).run };
         await eventPublisher.runState(store, loaded.snapshot.metadata, previousState, "interrupted", "session_shutdown");
         loaded = { ...loaded, run: (await store.load()).run };
-      } else if (loaded.run.activeShells !== undefined) {
+      } else if (loaded.run.activeShells !== undefined || loaded.run.activeShellStartedAt !== undefined) {
         await store.updateState((current) => {
           if (["completed", "failed", "stopped"].includes(current.state)) return current;
           const next = { ...current };
           delete next.activeShells;
+          delete next.activeShellStartedAt;
           return next;
         });
         loaded = { ...loaded, run: (await store.load()).run };

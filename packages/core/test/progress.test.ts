@@ -62,13 +62,18 @@ void test("inline workflow progress rebases runtime after pause and resume", () 
     Date.now = previousNow;
   }
 });
-void test("workflow progress shows active shell operations without command contents", () => {
-  const run = { id: "run", workflowName: "shell-progress", cwd: "/repo", sessionId: "session", state: "running" as const, agents: [], agentSessions: [], activeShells: 2 } as Parameters<typeof formatWorkflowProgress>[0];
-  const progress = formatWorkflowProgress(run);
+void test("workflow progress shows active shell operations with start and elapsed time", () => {
+  const now = 65_432;
+  const run = { id: "run", workflowName: "shell-progress", cwd: "/repo", sessionId: "session", state: "running" as const, agents: [], agentSessions: [], activeShells: 2, activeShellStartedAt: 0 } as Parameters<typeof formatWorkflowProgress>[0];
+  const progress = formatWorkflowProgress(run, "◇", undefined, now);
   assert.match(progress, /shell \[running\] \(2 active\)/);
+  assert.match(progress, /started=1970-01-01T00:00:00\.000Z/);
+  assert.match(progress, /elapsed=1m 5s/);
+  assert.match(formatNavigatorDashboard(run, [], [], now), /started=1970-01-01T00:00:00\.000Z.*elapsed=1m 5s/);
   assert.doesNotMatch(progress, /command-secret/);
   const legacy = { ...run };
   delete legacy.activeShells;
+  delete legacy.activeShellStartedAt;
   assert.doesNotMatch(formatWorkflowProgress(legacy), /shell \[running\]/);
 });
 void test("navigator keeps agent rows compact while preserving identity and state", () => {
@@ -178,10 +183,14 @@ void test("foreground workflow progress reports a shell waiting after agents set
   const live = updates.find(({ activeShells }) => activeShells === 1);
   assert.ok(live);
   assert.equal(live.agents.every((agent) => agent.state === "completed"), true);
+  const shellStartedAt = live.activeShellStartedAt;
+  assert.equal(typeof shellStartedAt, "number");
+  assert.ok(typeof shellStartedAt === "number" && shellStartedAt <= Date.now());
   assert.match(formatWorkflowProgress(live), /shell \[running\] \(1 active\)/);
   writeFileSync(releasePath, "release");
   const result = await running as { details: { run: PersistedRun } };
   assert.equal(result.details.run.activeShells, undefined);
+  assert.equal(result.details.run.activeShellStartedAt, undefined);
   assert.equal(updates.some(({ activeShells }) => activeShells === undefined), true);
 });
 

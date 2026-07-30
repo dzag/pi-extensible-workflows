@@ -98,10 +98,11 @@ export function createWorkflowRecovery(deps: WorkflowRecoveryDependencies) {
   const coldResumeRun = async (run: WorkflowRunRecord, hasUI: boolean, ui: { select?: (prompt: string, options: string[]) => Promise<string | undefined> }, trustedProject: boolean, context?: { model: { provider: string; id: string } | undefined; modelRegistry: WorkflowRecoveryContext["modelRegistry"]; signal?: AbortSignal | undefined; resolvedAliases?: Readonly<Record<string, string>>; blockedAliases?: ReadonlySet<string>; blockedAliasTargets?: Readonly<Record<string, string>> }, modeOverride?: boolean, waitForCompletion = true): Promise<ColdResumeResult | undefined> => {
     const loaded = await run.store.load();
     const foreground = modeOverride ?? loaded.snapshot.launchMode === "foreground";
-    if (loaded.run.activeShells !== undefined) {
+    if (loaded.run.activeShells !== undefined || loaded.run.activeShellStartedAt !== undefined) {
       await persistRunState(run.store, run.metadata, (current) => {
         const next = { ...current };
         delete next.activeShells;
+        delete next.activeShellStartedAt;
         return next;
       });
     }
