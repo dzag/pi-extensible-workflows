@@ -12,7 +12,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_SETTINGS,
+  createLocalPiSession,
   loadSettings,
+  mergeAgentResourceExclusions,
   resolveAgentResourcePolicy,
   resolveWorkflowSettings,
   resolveModelReference,
@@ -25,12 +27,15 @@ import {
   workflowSettingsPath,
   type AgentResourceExclusions,
   type AgentResourcePolicy,
+  type AgentSetup,
+  type AgentSetupContext,
   type WorkflowCatalogModelAlias,
   type WorkflowExtensionMetadata,
   type WorkflowFunction,
   type WorkflowRoleDirectoryRegistration,
   type WorkflowSettings,
   type WorkflowSettingsSources,
+  type SessionInput,
 } from "pi-extensible-workflows";
 import type { AgentDefinition } from "pi-extensible-workflows";
 import { loadingRegistry, type WorkflowRegistryApi } from "pi-extensible-workflows";
@@ -41,6 +46,15 @@ export interface DoctorDiagnostic { severity: DoctorSeverity; code: string; mess
 export interface DoctorRole { name: string; path: string; scope: "extension" | "global" | "project"; active: boolean; overrides?: string; overriddenBy?: string; extension?: WorkflowExtensionMetadata }
 export interface DoctorFunction { name: string; description: string; valid: boolean }
 export interface DoctorTrust { required: boolean; trusted: boolean; source: string }
+export interface DoctorRoleInspection {
+  role: string;
+  path: string;
+  model: { provider: string; model: string; thinking?: string };
+  tools: readonly string[];
+  resources: { skills: readonly string[]; extensions: readonly string[]; excludedSkills: readonly string[]; excludedExtensions: readonly string[]; unmatchedSkills: readonly string[]; unmatchedExtensions: readonly string[] };
+  systemPrompt: { probe: string; expandedProbe: string; text: string; source?: string };
+  setup: { hooks: readonly string[]; diagnostics: readonly DoctorDiagnostic[] };
+}
 export interface DoctorPiState {
   trust: DoctorTrust;
   activeTools: readonly string[];
@@ -63,12 +77,15 @@ export interface DoctorReport {
   functions: readonly DoctorFunction[];
   resourcePolicy: AgentResourcePolicy;
   modelAliases: readonly WorkflowCatalogModelAlias[];
+  roleInspection?: DoctorRoleInspection;
   diagnostics: readonly DoctorDiagnostic[];
 }
 export interface DoctorOptions {
   cwd?: string;
   agentDir?: string;
   settingsPath?: string;
+  role?: string;
+  prompt?: string;
   discoverPi?: (cwd: string, agentDir: string) => Promise<DoctorPiState>;
   activeTools?: readonly string[];
   registry?: WorkflowRegistryApi;
@@ -228,6 +245,36 @@ function matchResourcePolicy(policy: AgentResourcePolicy, pi: DoctorPiState): Ag
   const skills = [...new Set(pi.skills ?? [])];
   return { ...policy, excludedSkills: disabledResources(policy.effective.skills, skills), excludedExtensions: disabledResources(policy.effective.extensions, extensions), unmatchedSkills: unmatchedResourcePatterns(policy.effective.skills, skills), unmatchedExtensions: unmatchedResourcePatterns(policy.effective.extensions, extensions) };
 }
+function roleModel(value: string, aliases: Readonly<Record<string, string>>, known: ReadonlySet<string>, settingsPath: string): { provider: string; model: string; thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" } {
+  return resolveModelReference(value, aliases, known, settingsPath);
+}
+async function inspectRoleSession(cwd: string, agentDir: string, definition: AgentDefinition, rolePath: string, basePolicy: AgentResourcePolicy, model: { provider: string; model: string; thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" }, tools: readonly string[], prompt: string, hooks: readonly { name: string; priority: number; setup: (agent: AgentSetup, context: Readonly<AgentSetupContext>) => void | Promise<void> }[], diagnostics: DoctorDiagnostic[]): Promise<DoctorRoleInspection | undefined> {
+  const setupDiagnostics: DoctorDiagnostic[] = [];
+  const policy = structuredClone({ ...basePolicy, effective: mergeAgentResourceExclusions(basePolicy.effective, definition.disabledAgentResources), excludedSkills: [], excludedExtensions: [], unmatchedSkills: [], unmatchedExtensions: [] }) as AgentResourcePolicy;
+  const sessionInput: SessionInput = { cwd, model: { ...model }, tools: [...tools], sessionLabel: `doctor:${basename(rolePath, ".md")}`, agentDir, ...(definition.overrideSystemPrompt ? { systemPrompt: definition.prompt ?? "" } : { systemPromptAppend: definition.prompt ?? "" }), systemPromptSource: rolePath, ...(definition.contextFiles === undefined ? {} : { contextFiles: [...definition.contextFiles] }), resourcePolicy: policy };
+  const prepared = { cwd, model: { ...model }, tools: [...tools], sessionLabel: sessionInput.sessionLabel, initialPrompt: prompt, agentDir, ...(sessionInput.systemPrompt === undefined ? {} : { systemPrompt: sessionInput.systemPrompt }), ...(sessionInput.systemPromptAppend ? { systemPromptAppend: sessionInput.systemPromptAppend } : {}), resourcePolicy: policy } as AgentSetup["prepared"];
+  const transport = { id: "doctor-local", createSession: async () => { throw new Error("Doctor inspection does not create transport sessions"); } };
+  const setup: AgentSetup = { prompt, options: {}, sessionInput, prepared, transport };
+  const signal = new AbortController().signal;
+  const run = { cwd, sessionId: "doctor", runId: "doctor", workflow: { name: "doctor" }, args: null, signal };
+  const identity = { structuralPath: ["doctor", basename(rolePath, ".md")], callSite: "doctor", occurrence: 1 };
+  const appliedHooks: string[] = [];
+  for (const hook of hooks) {
+    try { await hook.setup(setup, { run, identity, attempt: 1, signal, mode: "inspection" }); appliedHooks.push(hook.name); }
+    catch (error) { setupDiagnostics.push(diagnostic("error", "ROLE_SETUP_HOOK", `Role setup hook ${hook.name} failed: ${error instanceof Error ? error.message : String(error)}`, hook.name)); continue; }
+  }
+  const session = await (async () => { try { return await createLocalPiSession({ ...setup.sessionInput, sessionManager: SessionManager.inMemory() }); } catch (error) { setupDiagnostics.push(diagnostic("error", "ROLE_INSPECTION", error instanceof Error ? error.message : String(error), rolePath)); return undefined; } })();
+  if (!session) { diagnostics.push(...setupDiagnostics); return undefined; }
+  try {
+    const promptResult = await session.preparePrompt(prompt);
+    const resources = session.getResourceInspection();
+    const state = session.agent?.state;
+    const actualModel = session.model?.provider && (session.model.model ?? session.model.id) ? { provider: session.model.provider, model: session.model.model ?? session.model.id ?? model.model, ...(session.thinkingLevel ? { thinking: session.thinkingLevel } : {}) } : model;
+    for (const item of [...resources.diagnostics, ...promptResult.diagnostics]) setupDiagnostics.push(diagnostic("error", "ROLE_INSPECTION", item.message, item.source));
+    return { role: basename(rolePath, ".md"), path: rolePath, model: actualModel, tools: state?.tools.map(({ name }) => name) ?? [...tools], resources: { skills: resources.skills, extensions: resources.extensions, excludedSkills: policy.excludedSkills ?? [], excludedExtensions: policy.excludedExtensions ?? [], unmatchedSkills: policy.unmatchedSkills, unmatchedExtensions: policy.unmatchedExtensions }, systemPrompt: { probe: prompt, expandedProbe: promptResult.expandedPrompt, text: promptResult.systemPrompt, ...(resources.systemPromptSource ? { source: resources.systemPromptSource } : {}) }, setup: { hooks: appliedHooks, diagnostics: setupDiagnostics } };
+  } catch (error) { setupDiagnostics.push(diagnostic("error", "ROLE_INSPECTION", error instanceof Error ? error.message : String(error), rolePath)); diagnostics.push(...setupDiagnostics); return undefined; }
+  finally { session.dispose(); }
+}
 function resourcePolicySource(settingsSource: string): string { return settingsSource; }
 export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport> {
   const cwd = canonical(options.cwd ?? process.cwd());
@@ -336,6 +383,32 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
     const definition = inspectRole(path, activeTools, knownModels, availableModels, diagnostics, aliases, dynamicAliases, settingsPath);
     if (definition) definitions.set(name, definition); else definitions.delete(name);
   }
+  let roleInspection: DoctorRoleInspection | undefined;
+  if (options.role !== undefined) {
+    const activeRole = roles.find(({ name, active }) => name === options.role && active);
+    const definition = activeRole ? definitions.get(options.role) : undefined;
+    if (!activeRole || !definition) diagnostics.push(diagnostic("error", "ROLE_NOT_FOUND", `Active role not found: ${options.role}`, options.role));
+    else {
+      const rootReference = pi.availableModels[0] ?? pi.knownModels[0];
+      if (!rootReference) diagnostics.push(diagnostic("error", "ROLE_INSPECTION_MODEL", "Cannot inspect a role because Pi has no registered model"));
+      else {
+        let roleAliases = aliases;
+        if (definition.model && isDynamicModelAlias(definition.model, dynamicAliases)) {
+          try {
+            const rootModel = roleModel(rootReference, aliases, knownModels, settingsPath);
+            const dynamic = await registry.resolveModelAliases({ cwd, projectTrusted: pi.trust.trusted, rootModel, knownModels, availableModels, signal: new AbortController().signal });
+            roleAliases = { ...aliases, ...dynamic };
+          } catch (error) { diagnostics.push(diagnostic("error", "ROLE_INSPECTION_MODEL", error instanceof Error ? error.message : String(error), activeRole.path)); }
+        }
+        try {
+          const parsedModel = roleModel(definition.model ?? rootReference, roleAliases, knownModels, settingsPath);
+          const model = parsedModel.thinking === undefined && definition.thinking ? { ...parsedModel, thinking: definition.thinking } : parsedModel;
+          roleInspection = await inspectRoleSession(cwd, agentDir, definition, activeRole.path, resourcePolicy, model, definition.tools ?? [...activeTools], options.prompt ?? "", registry.agentSetupHooks(), diagnostics);
+          if (roleInspection) diagnostics.push(...roleInspection.setup.diagnostics);
+        } catch (error) { diagnostics.push(diagnostic("error", "ROLE_INSPECTION_MODEL", error instanceof Error ? error.message : String(error), activeRole.path)); }
+      }
+    }
+  }
 
   const functions: DoctorFunction[] = [];
   for (const [name, fn] of Object.entries(pi.functions).sort(([left], [right]) => left.localeCompare(right))) {
@@ -345,7 +418,7 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
   const severityOrder: Record<DoctorSeverity, number> = { error: 0, warning: 1 };
   diagnostics.sort((left, right) => severityOrder[left.severity] - severityOrder[right.severity] || (left.source ?? "").localeCompare(right.source ?? "") || left.code.localeCompare(right.code) || left.message.localeCompare(right.message));
   roles.sort((left, right) => left.name.localeCompare(right.name) || left.scope.localeCompare(right.scope));
-  return { cwd, agentDir, settingsPath, settings, settingsSources, trust: pi.trust, activeTools: [...activeTools].sort(), roles, functions, modelAliases, resourcePolicy, diagnostics };
+  return { cwd, agentDir, settingsPath, settings, settingsSources, trust: pi.trust, activeTools: [...activeTools].sort(), roles, functions, modelAliases, resourcePolicy, ...(roleInspection ? { roleInspection } : {}), diagnostics };
 }
 
 function count(report: DoctorReport, severity: DoctorSeverity): number { return report.diagnostics.filter((item) => item.severity === severity).length; }
@@ -386,6 +459,28 @@ export function formatDoctorReport(report: DoctorReport): string {
     "",
     "## Roles",
     ...(report.roles.length ? report.roles.map((role) => `- \`${role.name}\` (${role.scope}, ${role.active ? "active" : role.overriddenBy ? `overridden by ${role.overriddenBy}` : "inactive: project untrusted"}) - \`${role.path}\`${role.extension ? `; ${extensionLabel(role.extension)} role directory "${dirname(role.path)}"` : ""}${role.overrides ? `; overrides \`${role.overrides}\`` : ""}`) : ["- None found"]),
+    "",
+    ...(report.roleInspection ? [
+      "## Role inspection",
+      `- Role: \`${report.roleInspection.role}\` - \`${report.roleInspection.path}\``,
+      `- Model: \`${report.roleInspection.model.provider}/${report.roleInspection.model.model}\` (${report.roleInspection.model.thinking ?? "off"})`,
+      `- Tools: ${report.roleInspection.tools.join(", ") || "(none)"}`,
+      `- Effective skills: ${report.roleInspection.resources.skills.join(", ") || "(none)"}`,
+      `- Effective extensions: ${report.roleInspection.resources.extensions.join(", ") || "(none)"}`,
+      `- Excluded skills: ${report.roleInspection.resources.excludedSkills.join(", ") || "(none)"}`,
+      `- Excluded extensions: ${report.roleInspection.resources.excludedExtensions.join(", ") || "(none)"}`,
+      `- Unmatched skills: ${report.roleInspection.resources.unmatchedSkills.join(", ") || "(none)"}`,
+      `- Unmatched extensions: ${report.roleInspection.resources.unmatchedExtensions.join(", ") || "(none)"}`,
+      `- Prompt probe: ${report.roleInspection.systemPrompt.probe ? JSON.stringify(report.roleInspection.systemPrompt.probe) : "empty"}`,
+      `- Expanded probe: ${JSON.stringify(report.roleInspection.systemPrompt.expandedProbe)}`,
+      `- System prompt source: ${report.roleInspection.systemPrompt.source ?? "(none)"}`,
+      "### Final system prompt",
+      "```",
+      report.roleInspection.systemPrompt.text,
+      "```",
+      `- Applied setup hooks: ${report.roleInspection.setup.hooks.join(", ") || "(none)"}`,
+      `- Setup diagnostics: ${String(report.roleInspection.setup.diagnostics.length)}`,
+    ] : []),
     "",
     "## Model aliases",
     ...(report.modelAliases.length ? report.modelAliases.map((alias) => `- [${alias.kind}] \`${alias.name}\`${alias.kind === "static" ? ` -> ${report.settings.modelAliases?.[alias.name] ?? "(unresolved)"}` : ""} (${alias.provenance})`) : ["- None registered"]),

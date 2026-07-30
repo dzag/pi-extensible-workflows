@@ -7,28 +7,46 @@ import { Value } from "typebox/value";
 import { createAgentSession, DefaultPackageManager, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 type AgentMessage = { role: string; content?: unknown; stopReason?: string; errorMessage?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: { total: number } } };
-type PiSession = {
+export interface PiSession {
   readonly sessionId: string;
   readonly sessionFile: string | undefined;
   readonly messages: readonly AgentMessage[];
   getSessionStats(): { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number }; cost: number };
   readonly systemPrompt?: string;
   readonly model?: { provider: string; model?: string; id?: string };
+  readonly thinkingLevel?: string;
   readonly agent?: { state: { tools: readonly { name: string }[] }; subscribe?(listener: (event: unknown) => void | Promise<void>): () => void };
   readonly herdrResourcePaths?: { extensions: readonly string[]; skills: readonly string[] };
   readonly herdrContextFiles?: readonly import("./types.js").ContextFile[];
+  preparePrompt(text: string): Promise<PiPromptInspection>;
+  getResourceInspection(): PiResourceInspection;
   subscribe?(listener: (event: unknown) => void): () => void;
   prompt(text: string): Promise<void>;
   steer?(text: string): Promise<void>;
   abort?(): Promise<void>;
   dispose(): void;
 };
+export interface PiPromptInspection {
+  readonly prompt: string;
+  readonly expandedPrompt: string;
+  readonly systemPrompt: string;
+  readonly messages: readonly unknown[];
+  readonly systemPromptOptions: unknown;
+  readonly inputHandled: boolean;
+  readonly diagnostics: readonly { message: string; source?: string }[];
+}
+export interface PiResourceInspection {
+  readonly extensions: readonly string[];
+  readonly skills: readonly string[];
+  readonly diagnostics: readonly { message: string; source?: string }[];
+  readonly systemPromptSource?: string;
+}
 import type { AgentIdentity, AgentResourceExclusions, AgentResourcePolicy, AgentSetup, AgentSetupSummary, AgentTransport, AgentTransportContext, ContextFileScope, JsonSchema, JsonValue, LiveSessionHandoff, ModelSpec, PiRuntimeLaunchInfo, PreparedAgentSession, RegisteredAgentSetupHook, SessionInput, WorkflowAgentMessage, WorkflowAgentSession, WorkflowAgentSessionEvent, WorkflowAgentSessionReference, WorkflowAgentSessionState, WorkflowAgentSessionStats, WorkflowAgentTurnResult, WorkflowRunContext } from "./types.js";
 import { deepFreeze, jsonObject, disabledResources, mergeAgentResourceExclusions, modelAliasName, modelCapability, resolveModelReference, unmatchedResourcePatterns } from "./utils.js";
 import { WorkflowError } from "./types.js";
 import { createLiveSessionHandoff } from "./session-handoff.js";
 import type { RunStore } from "./persistence.js";
-export type { AgentSetup, AgentSetupContext, AgentSetupHook, AgentTransport, AgentTransportContext, PiRuntimeLaunchInfo, PreparedAgentSession, RegisteredAgentSetupHook, SessionInput, WorkflowAgentMessage, WorkflowAgentSession, WorkflowAgentSessionEvent, WorkflowAgentSessionReference, WorkflowAgentSessionState, WorkflowAgentSessionStats, WorkflowAgentTurnResult } from "./types.js";
+export type { AgentInspectionMode, AgentSetup, AgentSetupContext, AgentSetupHook, AgentTransport, AgentTransportContext, PiRuntimeLaunchInfo, PreparedAgentSession, RegisteredAgentSetupHook, SessionInput, WorkflowAgentMessage, WorkflowAgentSession, WorkflowAgentSessionEvent, WorkflowAgentSessionReference, WorkflowAgentSessionState, WorkflowAgentSessionStats, WorkflowAgentTurnResult } from "./types.js";
 export interface AgentBudgetHooks {
   beforeAttempt(): void;
   beforeTurn(): void;
@@ -169,13 +187,58 @@ function filterContextFiles(base: readonly { path: string; content: string }[], 
     return scopes.some((scope) => scope === "global" ? resolvedPath === globalPath : scope === "cwd" ? resolvedPath === cwdPath : resolvedPath !== globalPath && resolvedPath !== cwdPath);
   });
 }
+function expandPromptTemplateForInspection(text: string, templates: readonly { name: string; content: string }[]): string {
+  if (!text.startsWith("/")) return text;
+  const match = /^\/([^\s]+)(?:\s+([\s\S]*))?$/.exec(text);
+  if (!match) return text;
+  const template = templates.find(({ name }) => name === match[1]);
+  if (!template) return text;
+  const args = (match[2] ?? "").match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((value) => value.replace(/^["']|["']$/g, "")) ?? [];
+  const allArgs = args.join(" ");
+  return template.content.replace(/\$\{(\d+|ARGUMENTS|@):-([^}]*)\}|\$\{@:(\d+)(?::(\d+))?\}|\$(ARGUMENTS|@|\d+)/g, (_match, defaultTarget: string | undefined, defaultValue: string | undefined, sliceStart: string | undefined, sliceLength: string | undefined, simple: string | undefined) => {
+    if (defaultTarget) { const value = defaultTarget === "@" || defaultTarget === "ARGUMENTS" ? allArgs : args[Number(defaultTarget) - 1]; return value || defaultValue || ""; }
+    if (sliceStart) { const start = Math.max(Number(sliceStart) - 1, 0); return args.slice(start, sliceLength ? start + Number(sliceLength) : undefined).join(" "); }
+    if (simple === "ARGUMENTS" || simple === "@") return allArgs;
+    return args[Number(simple) - 1] ?? "";
+  });
+}
+type NativePromptSession = PiSession & {
+  readonly _extensionRunner?: { hasHandlers(event: string): boolean; emitInput(text: string, images: undefined, source: "inspection"): Promise<unknown>; emitBeforeAgentStart(prompt: string, images: undefined, systemPrompt: string, options: unknown): Promise<unknown>; onError(listener: (error: unknown) => void): () => void };
+  readonly _baseSystemPrompt?: string;
+  readonly _baseSystemPromptOptions?: unknown;
+  readonly _expandSkillCommand?: (text: string) => string;
+  readonly promptTemplates?: readonly { name: string; content: string }[];
+};
+async function preparePiPrompt(native: PiSession, text: string): Promise<PiPromptInspection> {
+  const session = native as NativePromptSession;
+  const diagnostics: Array<{ message: string; source?: string }> = [];
+  const runner = session._extensionRunner;
+  const unsubscribe = runner?.onError((error) => {
+    const value = error as { error?: unknown; extensionPath?: unknown };
+    diagnostics.push({ message: typeof value.error === "string" ? value.error : String(value.error ?? error), ...(typeof value.extensionPath === "string" ? { source: value.extensionPath } : {}) });
+  });
+  try {
+    let current = text;
+    let inputHandled = false;
+    if (runner?.hasHandlers("input")) {
+      const result = await runner.emitInput(current, undefined, "inspection") as { action?: unknown; text?: unknown };
+      if (result.action === "handled") inputHandled = true;
+      else if (result.action === "transform" && typeof result.text === "string") current = result.text;
+    }
+    const expandedPrompt = inputHandled ? current : expandPromptTemplateForInspection(session._expandSkillCommand ? session._expandSkillCommand(current) : current, session.promptTemplates ?? []);
+    const baseSystemPrompt = session._baseSystemPrompt ?? session.systemPrompt ?? "";
+    const result = inputHandled || !runner ? undefined : await runner.emitBeforeAgentStart(expandedPrompt, undefined, baseSystemPrompt, session._baseSystemPromptOptions);
+    const prepared = result as { messages?: readonly unknown[]; systemPrompt?: unknown } | undefined;
+    return { prompt: text, expandedPrompt, systemPrompt: typeof prepared?.systemPrompt === "string" ? prepared.systemPrompt : baseSystemPrompt, systemPromptOptions: session._baseSystemPromptOptions, messages: prepared?.messages ?? [], inputHandled, diagnostics };
+  } finally { unsubscribe?.(); }
+}
 
 export async function createLocalPiSession(input: SessionInput): Promise<PiSession> {
   const agentDir = input.agentDir ?? getAgentDir();
   const systemPromptSource = workflowSystemPromptPath(input.cwd, agentDir, input.resourcePolicy?.projectTrusted ?? true);
   const systemPromptOptions = input.systemPrompt !== undefined ? { systemPromptOverride: () => input.systemPrompt } : systemPromptSource !== undefined ? { systemPrompt: systemPromptSource } : {};
   const contextFilesOverride = input.contextFiles === undefined ? undefined : (base: { agentsFiles: Array<{ path: string; content: string }> }) => ({ ...base, agentsFiles: filterContextFiles(base.agentsFiles, input.contextFiles ?? [], input.cwd, agentDir) });
-  const manager = input.sessionPath ? SessionManager.open(input.sessionPath, join(agentDir, "sessions"), input.cwd) : input.agentDir ? SessionManager.create(input.cwd, join(agentDir, "sessions")) : SessionManager.create(input.cwd);
+  const manager = input.sessionManager ?? (input.sessionPath ? SessionManager.open(input.sessionPath, join(agentDir, "sessions"), input.cwd) : input.agentDir ? SessionManager.create(input.cwd, join(agentDir, "sessions")) : SessionManager.create(input.cwd));
   if (!input.sessionPath) manager.appendSessionInfo(input.sessionLabel);
   const modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") });
   const model = modelRuntime.getModel(input.model.provider, input.model.model);
@@ -227,9 +290,18 @@ export async function createLocalPiSession(input: SessionInput): Promise<PiSessi
   }
   const { session } = await createAgentSession({ ...(input.options ?? {}), cwd: input.cwd, agentDir, modelRuntime, model, ...(settingsManager ? { settingsManager } : {}), ...(input.model.thinking ? { thinkingLevel: input.model.thinking } : {}), tools, ...(customTools.length ? { customTools } : {}), ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}), ...(resourceLoader ? { resourceLoader } : {}), sessionManager: manager });
   const resourcePaths = resourceLoader ? { extensions: resourceLoader.getExtensions().extensions.filter(({ path }) => !path.startsWith("<")).map(({ resolvedPath }) => canonicalSourcePath(resolvedPath)), skills: resourceLoader.getSkills().skills.map(({ filePath }) => canonicalSourcePath(filePath)) } : undefined;
+  const resourceInspection = (): PiResourceInspection => {
+    const extensions = resourceLoader?.getExtensions();
+    const skills = resourceLoader?.getSkills();
+    const diagnostics = [...(extensions?.errors ?? []).map(({ path, error }) => ({ message: error, ...(path ? { source: path } : {}) })), ...(skills?.diagnostics ?? []).map(({ message }) => ({ message }))];
+    const systemSource = input.systemPromptSource ?? systemPromptSource;
+    return { extensions: resourceLoader?.getExtensions().extensions.filter(({ path }) => !path.startsWith("<")).map(({ resolvedPath }) => canonicalSourcePath(resolvedPath)) ?? [], skills: skills?.skills.map(({ name }) => name) ?? [], diagnostics, ...(systemSource ? { systemPromptSource: systemSource } : resourceLoader?.getSystemPrompt() !== undefined ? { systemPromptSource: "Pi resource loader" } : {}) };
+  };
   return Object.assign(session, {
     getLeafId: () => manager.getLeafId(),
     getToolDefinitions: () => session.getAllTools().map(({ name, description, parameters, promptGuidelines }) => ({ name, description, parameters, ...(promptGuidelines ? { promptGuidelines } : {}) })),
+    preparePrompt: (text: string) => preparePiPrompt(session as unknown as PiSession, text),
+    getResourceInspection: resourceInspection,
     ...(resourcePaths ? { herdrResourcePaths: resourcePaths } : {}),
     ...(resourceLoader ? { herdrContextFiles: resourceLoader.getAgentsFiles().agentsFiles } : {}),
   }) as unknown as PiSession;
@@ -248,7 +320,7 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
   const input: SessionInput = {
     cwd: prepared.cwd, model: { ...prepared.model }, tools: [...prepared.tools] as SessionInput["tools"], sessionLabel: prepared.sessionLabel,
     ...(prepared.agentDir ? { agentDir: prepared.agentDir } : {}), ...(prepared.customTools?.length ? { customTools: [...prepared.customTools] as NonNullable<SessionInput["customTools"]> } : {}),
-    ...(prepared.resultTool ? { resultTool: prepared.resultTool } : {}), ...(prepared.systemPrompt === undefined ? {} : { systemPrompt: prepared.systemPrompt }),
+    ...(prepared.resultTool ? { resultTool: prepared.resultTool } : {}), ...(prepared.systemPrompt === undefined ? {} : { systemPrompt: prepared.systemPrompt }), ...(prepared.systemPromptSource === undefined ? {} : { systemPromptSource: prepared.systemPromptSource }),
     ...(prepared.systemPromptAppend ? { systemPromptAppend: prepared.systemPromptAppend } : {}), ...(prepared.extensionFactories?.length ? { extensionFactories: [...prepared.extensionFactories] } : {}),
     ...(prepared.additionalSkillPaths?.length ? { additionalSkillPaths: [...prepared.additionalSkillPaths] } : {}), ...(prepared.contextFiles === undefined ? {} : { contextFiles: [...prepared.contextFiles] }), ...(prepared.resourcePolicy ? { resourcePolicy: structuredClone(prepared.resourcePolicy) } : {}), ...(prepared.options ? { options: { ...prepared.options } } : {}),
   };
@@ -404,7 +476,7 @@ function preparedAgentSession(input: SessionInput, initialPrompt?: string): Read
     cwd: input.cwd, model: Object.freeze({ ...input.model }), tools: Object.freeze([...input.tools]), sessionLabel: input.sessionLabel, ...(initialPrompt === undefined ? {} : { initialPrompt }),
     ...(input.agentDir ? { agentDir: input.agentDir } : {}), ...(input.customTools?.length ? { customTools: Object.freeze([...input.customTools]) } : {}), ...(input.resultTool ? { resultTool: input.resultTool } : {}), ...(input.options ? { options: Object.freeze(structuredClone(input.options)) } : {}),
     ...(piRuntime ? { piRuntime } : {}), ...(piRuntimeError ? { piRuntimeError } : {}),
-    ...(input.systemPrompt === undefined ? {} : { systemPrompt: input.systemPrompt }), ...(systemPromptPath ? { systemPromptPath } : {}), ...(input.systemPromptAppend ? { systemPromptAppend: input.systemPromptAppend } : {}),
+    ...(input.systemPrompt === undefined ? {} : { systemPrompt: input.systemPrompt }), ...(input.systemPromptSource === undefined ? {} : { systemPromptSource: input.systemPromptSource }), ...(systemPromptPath ? { systemPromptPath } : {}), ...(input.systemPromptAppend ? { systemPromptAppend: input.systemPromptAppend } : {}),
     ...(input.extensionFactories?.length ? { extensionFactories: Object.freeze([...input.extensionFactories]) } : {}), ...(input.additionalSkillPaths?.length ? { additionalSkillPaths: Object.freeze([...input.additionalSkillPaths]) } : {}), ...(input.contextFiles === undefined ? {} : { contextFiles: Object.freeze([...input.contextFiles]) }),
     ...(input.resourcePolicy ? { resourcePolicy: Object.freeze(structuredClone(input.resourcePolicy)) } : {}),
   };

@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { doctor, doctorExitCode, formatDoctorReport, type DoctorPiState } from "../src/doctor.js";
 import { writePortableWorkflowBundle } from "../src/bundles.js";
-import { formatWorkflowCliHelp, parseDoctorCleanupArgs, parseWorkflowCliArgs, runCli } from "../src/cli.js";
+import { formatWorkflowCliHelp, parseDoctorArgs, parseDoctorCleanupArgs, parseWorkflowCliArgs, runCli } from "../src/cli.js";
 import { registerWorkflowExtension, WorkflowRegistry, type JsonValue, type WorkflowExtension } from "pi-extensible-workflows";
 
 function pi(overrides: Partial<DoctorPiState> = {}): DoctorPiState {
@@ -224,6 +224,31 @@ void test("doctor reports registered functions without model availability probes
   const report = await withHome(paths.root, () => doctor({ ...paths, discoverPi: async () => pi({ availableModels: [], functions }) }));
   assert.equal(report.functions.find(({ name }) => name === "unavailable")?.valid, true);
 });
+void test("role-targeted doctor inspects effective resources and prepares hooks without provider execution", async () => {
+  const paths = fixture();
+  writeFileSync(join(paths.cwd, ".pi", "settings.json"), "{}");
+  writeFileSync(join(paths.agentDir, "auth.json"), JSON.stringify({ fixture: { type: "api_key", key: "local-fixture" } }));
+  writeFileSync(join(paths.agentDir, "models.json"), JSON.stringify({ providers: { fixture: { baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "fixture", models: [{ id: "fixture-model", name: "Fixture model", reasoning: true, input: ["text"], contextWindow: 1_024, maxTokens: 128 }] } } }));
+  writeFileSync(join(paths.agentDir, "trust.json"), JSON.stringify({ [realpathSync(paths.cwd)]: true }));
+  mkdirSync(join(paths.agentDir, "skills", "review-skill"), { recursive: true });
+  writeFileSync(join(paths.agentDir, "skills", "review-skill", "SKILL.md"), "---\nname: review-skill\ndescription: Review\n---\nReview skill");
+  mkdirSync(join(paths.agentDir, "extensions"), { recursive: true });
+  writeFileSync(join(paths.agentDir, "extensions", "doctor-hook.ts"), "export default (pi) => { pi.on('before_agent_start', (event) => ({ systemPrompt: event.systemPrompt + '\\nHOOK:' + event.prompt })); };\n");
+  writeFileSync(join(paths.cwd, ".pi", "pi-extensible-workflows", "roles", "reviewer.md"), "---\nmodel: fixture/fixture-model\nthinking: high\ntools: [read]\ndisabledAgentResources:\n  skills: [review-skill]\n  extensions: [missing-extension]\n---\nReview role");
+  const report = await withHomeAndCwd(paths.root, paths.cwd, () => doctor({ ...paths, role: "reviewer" }));
+  const inspection = report.roleInspection;
+  assert.ok(inspection);
+  assert.equal(inspection.model.model, "fixture-model");
+  assert.equal(inspection.model.thinking, "high");
+  assert.deepEqual(inspection.tools, ["read"]);
+  assert.deepEqual(inspection.resources.skills, []);
+  assert.ok(inspection.resources.excludedSkills.includes("review-skill"));
+  assert.deepEqual(inspection.resources.unmatchedExtensions, [join(paths.cwd, ".pi", "pi-extensible-workflows", "roles", "missing-extension")]);
+  assert.match(inspection.systemPrompt.text, /HOOK:/);
+  assert.match(inspection.systemPrompt.text, /Review role/);
+  assert.equal(report.diagnostics.some(({ code }) => code === "ROLE_INSPECTION"), false);
+  assert.match(formatDoctorReport(report), /## Role inspection/);
+});
 
 void test("doctor respects untrusted projects and does not mutate fixtures", async () => {
   const paths = fixture();
@@ -297,13 +322,18 @@ void test("package bin and CLI expose doctor and inspector commands", async () =
   assert.equal(inspected, "session-a");
   output = "";
   assert.equal(await runCli([], {}, (text) => { output += text; }), 1);
-  assert.equal(output, "Usage: piewf doctor | inspect [session-id] [--json|--summary] [--failed] | transcript <session-file> | bundle <workflow-name> [--name <command>] [--output <path>] [--force] | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force] [--bundle]\n");
+  assert.equal(output, "Usage: piewf doctor [role] [--role <role>] [--prompt <text>] | inspect [session-id] [--json|--summary] [--failed] | transcript <session-file> | bundle <workflow-name> [--name <command>] [--output <path>] [--force] | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force] [--bundle]\n");
   const bin = join(paths.root, "bin", "piewf");
   mkdirSync(join(paths.root, "bin"), { recursive: true });
   symlinkSync(join(process.cwd(), "dist", "src", "cli.js"), bin);
   const linkedOutput = execFileSync(bin, ["doctor"], { cwd: paths.cwd, env: { ...process.env, HOME: paths.root }, encoding: "utf8" });
   assert.match(linkedOutput, /^# pi-extensible-workflows doctor/m);
   assert.equal(existsSync(join(paths.root, ".pi", "agent", "auth.json")), false);
+});
+void test("doctor parser accepts role and prompt probes", () => {
+  assert.deepEqual(parseDoctorArgs(["--role", "reviewer", "--prompt=check this"]), { role: "reviewer", prompt: "check this" });
+  assert.deepEqual(parseDoctorArgs(["reviewer"]), { role: "reviewer" });
+  assert.throws(() => parseDoctorArgs(["--role", "reviewer", "other"]), /Unexpected argument/);
 });
 void test("CLI workflow arguments cover schema types, defaults, enums, and missing values", () => {
   const schema = { type: "object", properties: { issue: { type: "integer", description: "Issue number" }, label: { type: "string" }, ratio: { type: "number" }, mode: { type: "string", enum: ["fast", "safe"] }, verbose: { type: "boolean", default: false }, format: { type: "string", default: "plain" }, tags: { type: "array", items: { type: "string", enum: ["one", "two"] } }, scores: { type: "array", items: { type: "number" } } }, required: ["issue"], additionalProperties: false };

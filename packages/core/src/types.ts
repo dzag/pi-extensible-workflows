@@ -1,4 +1,4 @@
-import type { CreateAgentSessionOptions, InlineExtension, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { CreateAgentSessionOptions, InlineExtension, SessionManager, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { Static, TSchema } from "typebox";
 export const RUN_STATES = ["queued", "running", "pausing", "paused", "awaiting_input", "completed", "failed", "stopped", "interrupted", "budget_exhausted"] as const;
 export const AGENT_STATES = ["queued", "running", "waiting_for_child", "paused", "retrying", "completed", "failed", "cancelled"] as const;
@@ -149,10 +149,12 @@ export interface SessionInput {
   tools: SessionTools;
   sessionLabel: string;
   sessionPath?: string;
+  sessionManager?: SessionManager;
   agentDir?: string;
   customTools?: SessionCustomTools;
   resultTool?: ToolDefinition;
   systemPrompt?: string;
+  systemPromptSource?: string;
   systemPromptAppend?: string;
   extensionFactories?: InlineExtension[];
   additionalSkillPaths?: readonly string[];
@@ -178,16 +180,19 @@ export interface PreparedAgentSession {
   readonly piRuntimeError?: string;
   readonly systemPrompt?: string;
   readonly systemPromptPath?: string;
+  readonly systemPromptSource?: string;
   readonly systemPromptAppend?: string;
   readonly extensionFactories?: readonly InlineExtension[];
   readonly additionalSkillPaths?: readonly string[];
   readonly contextFiles?: readonly ContextFileScope[];
   readonly resourcePolicy?: Readonly<AgentResourcePolicy>;
 }
+export type AgentInspectionMode = "execution" | "inspection";
 export interface AgentTransportContext { readonly run: Readonly<WorkflowRunContext>; readonly identity: Readonly<AgentIdentity>; readonly attempt: number; readonly signal: AbortSignal; readonly tuiIndex?: number; readonly tuiLabel?: string }
 export interface AgentTransport { readonly id: string; createSession(prepared: Readonly<PreparedAgentSession>, context: Readonly<AgentTransportContext>): Promise<WorkflowAgentSession> }
 export interface AgentSetup { prompt: string; options: AgentOptions; sessionInput: SessionInput; prepared: Readonly<PreparedAgentSession>; transport: AgentTransport }
-export interface AgentSetupContext { readonly run: Readonly<WorkflowRunContext>; readonly identity: Readonly<AgentIdentity>; readonly attempt: number; readonly signal: AbortSignal; readonly tuiIndex?: number; readonly tuiLabel?: string }
+export interface AgentSetupContext { readonly run: Readonly<WorkflowRunContext>; readonly identity: Readonly<AgentIdentity>; readonly attempt: number; readonly signal: AbortSignal; readonly tuiIndex?: number; readonly tuiLabel?: string; readonly mode?: AgentInspectionMode }
+
 export interface AgentSetupHook { priority?: number; setup: (agent: AgentSetup, context: Readonly<AgentSetupContext>) => void | Promise<void> }
 export interface RegisteredAgentSetupHook { name: string; priority: number; setup: AgentSetupHook["setup"] }
 export interface WorkflowExtensionMetadata { version: string; headline: string; description: string }

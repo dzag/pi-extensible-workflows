@@ -548,7 +548,7 @@ export function createHerdrExtension(options: HerdrExtensionOptions = {}): Herdr
     agentSetupHooks: {
       fullyInspectable: {
         setup(agent, context) {
-          if (!fullyInspectable || !herdrAvailable(env)) return;
+          if (context.mode === "inspection" || !fullyInspectable || !herdrAvailable(env)) return;
           agent.transport = herdrTransport(agent, context, runner, true, env, workspaces);
         },
       },

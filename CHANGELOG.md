@@ -1,6 +1,6 @@
 # Changelog
 ## Unreleased
-
+ - Added role-targeted `piewf doctor --role` inspection of effective agent resources and prepared prompts without provider execution ([#181](https://github.com/vekexasia/pi-extensible-workflows/issues/181)).
  - Added `/workflow background` to move an attached foreground workflow to background delivery without restarting it ([#182](https://github.com/vekexasia/pi-extensible-workflows/issues/182)).
 
 ## [5.0.0] - 2026-07-29
