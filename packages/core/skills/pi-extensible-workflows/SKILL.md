@@ -114,6 +114,10 @@ const result = await withWorktree("issue", async ({ path, branch }) => {
 });
 ```
 
+Pass an optional options object to choose where the checkout lives: `withWorktree("issue", { path: ".worktrees/issue" }, callback)`. The path may be absolute or relative to the workflow launch cwd, and must not already exist as a non-empty directory. A path inside the repository working tree is allowed (for example `.worktree/<branch>`); gitignoring it keeps the parent repo status clean, and non-ignored nested worktrees are only ever snapshotted as gitlinks. A path that would contain the repository working tree is always rejected. Without it, the worktree is created inside the run directory.
+
+By default agents leave the worktree dirty: no commit is made between agents, so each agent sees the previous agent's uncommitted edits and the completion message still reports the worktree as changed. Pass `commit: true` (for example `withWorktree("issue", { commit: true }, callback)`) to commit a `pi-extensible-workflows runtime snapshot` after every agent attempt, which gives per-agent history and durable retry checkpoints.
+
 Entering the scope materializes its worktree before the callback. The callback receives a frozen reference containing only the real string `path` and `branch`; callbacks may ignore the argument, and their bare return value is preserved. Concurrent agents share mutable files, so assign non-conflicting work or coordinate explicitly.
 
 Branches may call any workflow function, not only `agent()`. Use separate named scopes when parallel branches need isolated worktrees:

@@ -1,6 +1,10 @@
 # Changelog
 ## Unreleased
 
+### Added
+
+- `withWorktree(name, { path }, callback)` accepts an optional options object that chooses where the scope's worktree is created. The path may be absolute or relative to the workflow launch cwd, must resolve outside the repository working tree, and must not already exist as a non-empty directory. Omitting it keeps the previous run-directory location, and the chosen location is persisted and validated across replay, resume, and retry.
+
 ## [5.0.0] - 2026-07-29
 
 ### Breaking changes

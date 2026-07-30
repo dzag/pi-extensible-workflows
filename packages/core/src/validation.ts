@@ -617,11 +617,20 @@ function validateStaticShellOptions(call: WorkflowCall): void {
 
 function validateStaticWithWorktree(call: WorkflowCall, compatibility: boolean): void {
   if (call.arguments.some((argument) => argument.type === "SpreadElement")) return;
-  if (call.arguments.length !== 2) fail(compatibility ? "RESUME_INCOMPATIBLE" : "INVALID_METADATA", "withWorktree requires a name and callback");
-  const callback = call.arguments[1];
+  if (call.arguments.length !== 2 && call.arguments.length !== 3) fail(compatibility ? "RESUME_INCOMPATIBLE" : "INVALID_METADATA", "withWorktree requires a name, optional options, and callback");
+  const callback = call.arguments[call.arguments.length - 1];
   if (staticValue(callback).known) fail("INVALID_METADATA", "withWorktree callback must be a function");
   const name = staticValue(callArgument(call, 0));
   if (name.known && (typeof name.value !== "string" || !name.value.trim())) fail("INVALID_METADATA", "withWorktree name must be a non-empty string");
+  if (call.arguments.length === 3) {
+    const options = staticValue(callArgument(call, 1));
+    if (options.known && !object(options.value)) fail("INVALID_METADATA", "withWorktree options must be an object");
+    if (options.known && object(options.value) && Object.keys(options.value).some((key) => key !== "path" && key !== "commit")) fail("INVALID_METADATA", "withWorktree options support only path and commit");
+    const location = staticValue(propertyNode(callArgument(call, 1), "path"));
+    if (location.known && location.value !== undefined && (typeof location.value !== "string" || !location.value.trim())) fail("INVALID_METADATA", "withWorktree path must be a non-empty string");
+    const commit = staticValue(propertyNode(callArgument(call, 1), "commit"));
+    if (commit.known && commit.value !== undefined && typeof commit.value !== "boolean") fail("INVALID_METADATA", "withWorktree commit must be a boolean");
+  }
 }
 
 

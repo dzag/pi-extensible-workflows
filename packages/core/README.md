@@ -35,7 +35,7 @@ return await agent(
 );
 ```
 
-**Advanced capabilities:** Use registered functions, `outputSchema`, budgets, checkpoints, worktrees, retry/resume, CLI export, and `pipeline(...)` when the task requires them. They remain available without complicating the basic inline path. Workflow worktree scopes always use the explicit `withWorktree(name, callback)` form.
+**Advanced capabilities:** Use registered functions, `outputSchema`, budgets, checkpoints, worktrees, retry/resume, CLI export, and `pipeline(...)` when the task requires them. They remain available without complicating the basic inline path. Workflow worktree scopes always use the explicit `withWorktree(name, callback)` form, optionally with a location or commit policy: `withWorktree(name, { path, commit }, callback)`. Worktrees stay dirty between agents unless `commit: true` is set.
 
 The main Pi agent writes these scripts on the fly for each task; an external review or approval flow can write one to a JavaScript file and launch it with `scriptPath`. Extensions can add reusable functions, and completed workflows can resume without rerunning completed work.
 

@@ -103,7 +103,7 @@
             <tr><td><code>prompt(template, values)</code></td><td>Interpolates a plain object of JSON values into a prompt. Await agent results before passing them here.</td></tr>
             <tr><td><code>parallel(name, tasks)</code></td><td>Runs stable keyed tasks concurrently and returns an object of bare values.</td></tr>
             <tr><td><code>pipeline(name, items, stages)</code></td><td>Runs ordered named stages for each keyed item and returns an object of final values.</td></tr>
-            <tr><td><code>withWorktree(name, callback)</code></td><td>Creates or reuses one deterministic named worktree scope. The callback receives a frozen <code>{ path, branch }</code> reference.</td></tr>
+            <tr><td><code>withWorktree(name, options?, callback)</code></td><td>Creates or reuses one deterministic named worktree scope. The optional options object accepts <code>path</code> to choose the checkout location. The callback receives a frozen <code>{ path, branch }</code> reference.</td></tr>
             <tr><td><code>checkpoint(input)</code></td><td>Waits for a decision described by <code>{ name, prompt, context }</code> and returns a boolean. The prompt and context have the same size limits as the workflow primitive.</td></tr>
             <tr><td><code>phase(name)</code></td><td>Records a progress phase. It returns no workflow value.</td></tr>
             <tr><td><code>log(message)</code></td><td>Adds a bounded TUI-only transcript entry.</td></tr>

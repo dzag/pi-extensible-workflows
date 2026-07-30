@@ -187,15 +187,21 @@ function publicWorktreeReference(reference: WorkflowWorktreeReference): Readonly
   if (!object(reference) || typeof reference.path !== "string" || typeof reference.branch !== "string") fail("WORKTREE_FAILED", "Worktree reference is invalid");
   return Object.freeze({ path: reference.path, branch: reference.branch });
 }
-async function hostWithWorktree(args: readonly unknown[], resolveWorktree: ((owner: string, signal: AbortSignal) => Promise<Readonly<WorkflowWorktreeReference>>) | undefined, signal: AbortSignal): Promise<JsonValue> {
-  if (args.length !== 2) fail("INVALID_METADATA", "withWorktree requires a name and callback");
+async function hostWithWorktree(args: readonly unknown[], resolveWorktree: ((owner: string, signal: AbortSignal, location?: string, commit?: boolean) => Promise<Readonly<WorkflowWorktreeReference>>) | undefined, signal: AbortSignal): Promise<JsonValue> {
+  if (args.length !== 2 && args.length !== 3) fail("INVALID_METADATA", "withWorktree requires a name, optional options, and callback");
   const name = args[0];
-  const callback = args[1];
+  const options = args.length === 3 ? args[1] : undefined;
+  const callback = args.length === 3 ? args[2] : args[1];
   if (typeof name !== "string" || !name.trim()) fail("INVALID_METADATA", "withWorktree name must be a non-empty string");
+  if (options !== undefined && !object(options)) fail("INVALID_METADATA", "withWorktree options must be an object");
+  const location = object(options) && options.path !== undefined ? options.path : undefined;
+  if (location !== undefined && (typeof location !== "string" || !location.trim())) fail("INVALID_METADATA", "withWorktree path must be a non-empty string");
+  const commit = object(options) && options.commit !== undefined ? options.commit : false;
+  if (typeof commit !== "boolean") fail("INVALID_METADATA", "withWorktree commit must be a boolean");
   if (typeof callback !== "function") fail("INVALID_METADATA", "withWorktree callback must be a function");
   if (!resolveWorktree) fail("WORKTREE_FAILED", "No worktree bridge is available");
   const owner = operationPath("worktree", "named", name.trim());
-  const reference = publicWorktreeReference(await resolveWorktree(owner, signal));
+  const reference = publicWorktreeReference(await resolveWorktree(owner, signal, typeof location === "string" ? location : undefined, commit));
   return inheritedHostWorktreeOwner.run(owner, async () => await (callback as (reference: Readonly<WorkflowWorktreeReference>) => unknown)(reference)) as Promise<JsonValue>;
 }
 export function workflowRunContext(cwd: string, sessionId: string, runId: string, workflow: WorkflowMetadata, args: JsonValue, signal: AbortSignal): Readonly<WorkflowRunContext> {

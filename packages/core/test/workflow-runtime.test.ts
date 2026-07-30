@@ -344,11 +344,20 @@ void test("withWorktree requires explicit named scopes", async () => {
   assert.deepEqual(await runWorkflow(`return await withWorktree("empty", async () => ({ ok: true }));`, null, { worktree: materialize }).result, { ok: true });
   assert.deepEqual(materializedOwners, ["worktree/named/empty"]);
   assert.deepEqual(inspectWorkflowScript(`withWorktree("shared", async () => agent("x"));`).map(({ kind, name }) => ({ kind, name })), [{ kind: "withWorktree", name: "shared" }, { kind: "agent", name: null }]);
-  for (const source of [`withWorktree(() => 1)`, `withWorktree("", () => 1)`, `withWorktree(1, () => 1)`, `withWorktree("shared", 1)`, `withWorktree("shared", () => 1, 2)`]) assert.throws(() => preflight(source, capabilities), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  for (const source of [`withWorktree(() => 1)`, `withWorktree("", () => 1)`, `withWorktree(1, () => 1)`, `withWorktree("shared", 1)`, `withWorktree("shared", () => 1, 2)`, `withWorktree("shared", { path: "" }, () => 1)`, `withWorktree("shared", { path: 1 }, () => 1)`, `withWorktree("shared", { root: "/tmp/x" }, () => 1)`, `withWorktree("shared", "/tmp/x", () => 1)`, `withWorktree("shared", { path: "/tmp/x" }, () => 1, 2)`]) assert.throws(() => preflight(source, capabilities), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   assert.throws(() => preflight(`const alias = withWorktree; alias(() => 1);`, capabilities), /direct withWorktree.*aliases.*unsupported/i);
-  await assert.rejects(runWorkflow(`return await withWorktree(() => agent("same"));`).result, /withWorktree requires a name and callback/i);
+  await assert.rejects(runWorkflow(`return await withWorktree(() => agent("same"));`).result, /withWorktree requires a name, optional options, and callback/i);
   await assert.rejects(runWorkflow(`return await withWorktree("scope", 1);`).result, /withWorktree callback must be a function/i);
   await assert.rejects(runWorkflow(`const alias = withWorktree; return alias(() => 1);`).result, /direct withWorktree.*aliases.*unsupported/i);
+});
+void test("withWorktree forwards an explicit worktree location to the host bridge", async () => {
+  const requested: Array<{ owner: string; location?: string }> = [];
+  const materialize = async (owner: string, _signal: AbortSignal, location?: string) => { requested.push({ owner, ...(location === undefined ? {} : { location }) }); return { path: location ?? "/worktrees/default", branch: "branch" }; };
+  assert.deepEqual(await runWorkflow(`return await withWorktree("api", { path: "/tmp/custom-worktree" }, async (reference) => reference.path);`, null, { worktree: materialize }).result, "/tmp/custom-worktree");
+  assert.deepEqual(await runWorkflow(`return await withWorktree("ui", async (reference) => reference.path);`, null, { worktree: materialize }).result, "/worktrees/default");
+  assert.deepEqual(requested, [{ owner: "worktree/named/api", location: "/tmp/custom-worktree" }, { owner: "worktree/named/ui" }]);
+  assert.ok(preflight(`withWorktree("api", { path: "/tmp/custom-worktree" }, async () => agent("x"));`, capabilities));
+  await assert.rejects(runWorkflow(`return await withWorktree("api", { path: "  " }, async () => 1);`, null, { worktree: materialize }).result, /withWorktree path must be a non-empty string/i);
 });
 void test("parallel identities do not depend on completion order", async () => {
   const resolvers = new Map<string, () => void>();

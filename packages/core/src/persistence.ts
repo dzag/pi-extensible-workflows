@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { renameSync, rmSync, writeFileSync } from "node:fs";
 import { access, link, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
 import type { BudgetApprovalRequest, JsonValue, LaunchSnapshot, RunRecord, WorkflowBudgetUsage, WorkflowRunEvent } from "./types.js";
@@ -36,7 +36,7 @@ function summaryFromRun(run: PersistedRun, directory: string, journal: Journal, 
   const incompletePaths = [...new Set([...(run.retry?.incompletePaths ?? []), ...(failedAt ? [failedAt] : [])])];
   return { schemaVersion: 1, runId: run.id, sessionId: run.sessionId, workflowName: run.workflowName, state: run.state, createdAt, updatedAt: now, ...(previous?.terminalAt || TERMINAL_SUMMARY_STATES.has(run.state) ? { terminalAt: previous?.terminalAt ?? now } : {}), usage: { ...EMPTY_USAGE, ...(run.usage ?? {}) }, agents: run.agents.map(({ id, name, label, state, role, attempts }) => ({ id, name, ...(label ? { label } : {}), state, ...(role ? { role } : {}), attempts })), ...(run.error ? { error: run.error } : {}), ...(failedAt ? { failedAt } : {}), replayablePaths, incompletePaths, artifacts: summaryArtifacts(directory) };
 }
-export interface WorktreeReference { owner: string; path: string; branch: string; cwd: string; base: string }
+export interface WorktreeReference { owner: string; path: string; branch: string; cwd: string; base: string; location?: string; commit?: boolean }
 export interface BorrowedWorktreeBinding { name: string; sourceRunId: string; owner: string }
 
 const execute = promisify(execFile);
@@ -524,14 +524,43 @@ export class RunStore {
     });
   }
 
-  private expectedWorktree(owner: string): Pick<WorktreeReference, "path" | "branch"> {
-    const key = createHash("sha256").update(`${this.sessionId}\0${this.runId}\0${owner}`).digest("hex").slice(0, 16);
-    return { path: join(this.directory, "worktrees", key), branch: `pi-extensible-workflows/${safePart(this.runId)}/${key}` };
+  private worktreeKey(owner: string): string {
+    return createHash("sha256").update(`${this.sessionId}\0${this.runId}\0${owner}`).digest("hex").slice(0, 16);
+  }
+
+  private expectedWorktree(owner: string, location?: string): Pick<WorktreeReference, "path" | "branch"> {
+    const key = this.worktreeKey(owner);
+    const branch = `pi-extensible-workflows/${safePart(this.runId)}/${key}`;
+    if (location === undefined) return { path: join(this.directory, "worktrees", key), branch };
+    return { path: this.resolveWorktreeLocation(location), branch };
+  }
+
+  /** Resolves a caller-supplied worktree location against the launch cwd and rejects unusable targets. */
+  private resolveWorktreeLocation(location: string): string {
+    if (typeof location !== "string" || !location.trim()) throw new WorkflowError("WORKTREE_FAILED", "Worktree path must be a non-empty string");
+    if (location.includes("\0")) throw new WorkflowError("WORKTREE_FAILED", "Worktree path must not contain null bytes");
+    return resolve(this.cwd, location);
+  }
+
+  /** Rejects locations that would swallow the repository working tree or reuse a non-empty directory. */
+  private async assertUsableWorktreeLocation(path: string): Promise<void> {
+    const root = (await git(this.cwd, ["rev-parse", "--show-toplevel"])).trim();
+    const canonicalRoot = await realpath(root);
+    const canonicalParent = await realpath(dirname(path)).catch(() => dirname(path));
+    const target = join(canonicalParent, basename(path));
+    const inside = (parent: string, child: string): boolean => {
+      const relation = relative(parent, child);
+      return relation === "" || (relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation));
+    };
+    if (inside(target, canonicalRoot)) throw new WorkflowError("WORKTREE_FAILED", `Worktree path must not contain the repository working tree: ${path}`);
+    // In-repo locations such as <repo>/.worktree/<branch> are allowed: git records
+    // nested working trees as gitlinks in the `git add -A` snapshot, never as content.
+    const entries = await readdir(path).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw new WorkflowError("WORKTREE_FAILED", `Worktree path is unusable: ${path}`); });
+    if (entries && entries.length) throw new WorkflowError("WORKTREE_FAILED", `Worktree path already exists and is not empty: ${path}`);
   }
 
   private markerPath(owner: string): string {
-    const key = createHash("sha256").update(`${this.sessionId}\0${this.runId}\0${owner}`).digest("hex").slice(0, 16);
-    return join(this.directory, `worktree-${key}.creating`);
+    return join(this.directory, `worktree-${this.worktreeKey(owner)}.creating`);
   }
 
   private namedWorktreeOwner(name: string): string {
@@ -555,8 +584,11 @@ export class RunStore {
   private structuralWorktree(owner: string, record: unknown): WorktreeReference {
     if (!record || typeof record !== "object") throw new Error(`Invalid worktree record for ${owner}`);
     const candidate = record as Partial<WorktreeReference>;
-    const expected = this.expectedWorktree(owner);
-    const relativePath = typeof candidate.path === "string" ? relative(this.directory, candidate.path) : "..";
+    if (candidate.location !== undefined && (typeof candidate.location !== "string" || !candidate.location.trim())) throw new Error(`Invalid worktree record for ${owner}`);
+    if (candidate.commit !== undefined && typeof candidate.commit !== "boolean") throw new Error(`Invalid worktree record for ${owner}`);
+    const expected = this.expectedWorktree(owner, candidate.location);
+    // Custom locations live outside the run directory on purpose, so only default records are containment checked.
+    const relativePath = candidate.location !== undefined ? "." : typeof candidate.path === "string" ? relative(this.directory, candidate.path) : "..";
     const relativeCwd = typeof candidate.path === "string" && typeof candidate.cwd === "string" ? relative(candidate.path, candidate.cwd) : "..";
     if (candidate.owner !== owner || typeof candidate.path !== "string" || typeof candidate.branch !== "string" || typeof candidate.cwd !== "string" || typeof candidate.base !== "string" || resolve(candidate.path) !== expected.path || candidate.branch !== expected.branch || relativePath === ".." || relativePath.startsWith(`..${sep}`) || relativeCwd === ".." || relativeCwd.startsWith(`..${sep}`)) throw new Error(`Invalid worktree record for ${owner}`);
     return candidate as WorktreeReference;
@@ -724,10 +756,12 @@ export class RunStore {
   }
 
   private async cleanupMarker(markerPath: string): Promise<void> {
-    let marker: Partial<{ owner: string; path: string; branch: string; base: string }>;
+    let marker: Partial<{ owner: string; path: string; branch: string; base: string; location: string }>;
     try { marker = await json(markerPath); } catch { return; }
     if (typeof marker.owner !== "string" || typeof marker.base !== "string") return;
-    const expected = this.expectedWorktree(marker.owner);
+    if (marker.location !== undefined && (typeof marker.location !== "string" || !marker.location.trim())) return;
+    let expected: Pick<WorktreeReference, "path" | "branch">;
+    try { expected = this.expectedWorktree(marker.owner, marker.location); } catch { return; }
     if (marker.path !== expected.path || marker.branch !== expected.branch) return;
     const root = await git(this.cwd, ["rev-parse", "--show-toplevel"]).then((value) => value.trim()).catch(() => "");
     if (!root) return;
@@ -760,7 +794,8 @@ export class RunStore {
     }
   }
 
-  async worktree(owner: string): Promise<WorktreeReference> {
+  /** Agent snapshots are opt-in: without `commit`, the worktree simply stays dirty between agents. */
+  async worktree(owner: string, location?: string, commit?: boolean): Promise<WorktreeReference> {
     const write = this.worktreeWrite.then(async () => {
       const loaded = await this.load();
       const recordsPath = join(this.directory, "worktrees.json");
@@ -777,9 +812,14 @@ export class RunStore {
       }
       if (name && Array.isArray(loaded.run.retry?.namedWorktrees) && loaded.run.retry.namedWorktrees.includes(name)) throw new WorkflowError("WORKTREE_FAILED", `Missing inherited named worktree ${name}`);
       const existing = records.find((record) => record.owner === owner);
-      if (existing) return this.validateWorktree(owner);
-      const { path, branch } = this.expectedWorktree(owner);
-      const index = join(this.directory, `index-${basename(path)}`);
+      if (existing) {
+        const resolvedExisting = await this.validateWorktree(owner);
+        if (location !== undefined && resolve(resolvedExisting.path) !== this.resolveWorktreeLocation(location)) throw new WorkflowError("WORKTREE_FAILED", `Worktree ${owner} already exists at ${resolvedExisting.path}`);
+        return resolvedExisting;
+      }
+      const { path, branch } = this.expectedWorktree(owner, location);
+      if (location !== undefined) await this.assertUsableWorktreeLocation(path);
+      const index = join(this.directory, `index-${this.worktreeKey(owner)}`);
       const markerPath = this.markerPath(owner);
       let branchCreated = false;
       let worktreeCreated = false;
@@ -793,10 +833,10 @@ export class RunStore {
         await git(root, ["read-tree", "HEAD"], { GIT_INDEX_FILE: index });
         await git(root, ["add", "-A"], { GIT_INDEX_FILE: index });
         const tree = (await git(root, ["write-tree"], { GIT_INDEX_FILE: index })).trim();
-        const commit = (await git(root, ["commit-tree", tree, "-p", "HEAD", "-m", "pi-extensible-workflows runtime snapshot"], { GIT_INDEX_FILE: index, ...gitIdentity })).trim();
-        const record = { owner, path, branch, cwd: join(path, launchRelative), base: commit };
-        await atomicJson(markerPath, { owner, path, branch, base: commit });
-        await git(root, ["branch", branch, commit]);
+        const snapshotCommit = (await git(root, ["commit-tree", tree, "-p", "HEAD", "-m", "pi-extensible-workflows runtime snapshot"], { GIT_INDEX_FILE: index, ...gitIdentity })).trim();
+        const record = { owner, path, branch, cwd: join(path, launchRelative), base: snapshotCommit, ...(location === undefined ? {} : { location }), ...(commit ? { commit: true } : {}) };
+        await atomicJson(markerPath, { owner, path, branch, base: snapshotCommit, ...(location === undefined ? {} : { location }) });
+        await git(root, ["branch", branch, snapshotCommit]);
         branchCreated = true;
         await git(root, ["worktree", "add", "--no-checkout", path, branch]);
         worktreeCreated = true;
@@ -845,6 +885,7 @@ export class RunStore {
     try {
       const write = this.snapshotWrite.then(async () => {
         const record = await this.worktree(owner);
+        if (!record.commit) return (await git(record.path, ["rev-parse", "HEAD"])).trim();
         for (let attempt = 0; attempt < 3; attempt += 1) {
           await git(record.path, ["add", "-A"]);
           if (!(await git(record.path, ["status", "--porcelain"])).trim()) break;
@@ -894,9 +935,11 @@ export class RunStore {
     }
     return [...names];
   }
+  /** Uncommitted work counts as a change so `commit: false` worktrees are still reported. */
   async changedWorktrees(): Promise<readonly WorktreeReference[]> {
     const changed: WorktreeReference[] = [];
     for (const valid of await this.worktrees()) {
+      if ((await git(valid.path, ["status", "--porcelain"]).catch(() => "")).trim()) { changed.push(valid); continue; }
       try { await git(valid.path, ["diff", "--quiet", valid.base, "HEAD"]); }
       catch { changed.push(valid); }
     }

@@ -86,13 +86,19 @@ const rejectAgent = () => { throw workError("INVALID_METADATA", "Workflow agent 
 const rejectShell = () => { throw workError("INVALID_METADATA", "Workflow shell calls must use a direct shell(...) call; aliases and indirect calls are unsupported"); };
 const rejectWorktree = () => { throw workError("INVALID_METADATA", "withWorktree calls must use a direct withWorktree(...) call; aliases and indirect calls are unsupported"); };
 const internalWithWorktree = async (...values) => {
-  if (values.length !== 2) throw workError("INVALID_METADATA", "withWorktree requires a name and callback");
+  if (values.length !== 2 && values.length !== 3) throw workError("INVALID_METADATA", "withWorktree requires a name, optional options, and callback");
   const name = values[0];
-  const callback = values[1];
+  const options = values.length === 3 ? values[1] : undefined;
+  const callback = values.length === 3 ? values[2] : values[1];
   if (typeof name !== "string" || !name.trim()) throw workError("INVALID_METADATA", "withWorktree name must be a non-empty string");
+  if (options !== undefined && (typeof options !== "object" || options === null || Array.isArray(options))) throw workError("INVALID_METADATA", "withWorktree options must be an object");
+  const location = options === undefined || options.path === undefined ? undefined : options.path;
+  if (location !== undefined && (typeof location !== "string" || !location.trim())) throw workError("INVALID_METADATA", "withWorktree path must be a non-empty string");
+  const commit = options === undefined || options.commit === undefined ? false : options.commit;
+  if (typeof commit !== "boolean") throw workError("INVALID_METADATA", "withWorktree commit must be a boolean");
   if (typeof callback !== "function") throw workError("INVALID_METADATA", "withWorktree callback must be a function");
   const owner = path("worktree", "named", name.trim());
-  const reference = await rpc("worktree", [owner]);
+  const reference = await rpc("worktree", [owner, location === undefined ? null : location, commit]);
   if (!reference || typeof reference !== "object" || typeof reference.path !== "string" || typeof reference.branch !== "string") throw workError("WORKTREE_FAILED", "Worktree reference is invalid");
   return await worktreeOwners.run(owner, () => callback(Object.freeze({ path: reference.path, branch: reference.branch })));
 };
@@ -503,7 +509,9 @@ export function runWorkflow(script: string, args: JsonValue = null, bridge: Work
         }
       } else if (method === "worktree") {
         if (!bridge.worktree || typeof values[0] !== "string" || !values[0]) fail("INTERNAL_ERROR", "worktree requires an active host bridge and scope");
-        value = await bridge.worktree(values[0], controller.signal);
+        if (values[1] !== undefined && values[1] !== null && (typeof values[1] !== "string" || !values[1])) fail("INTERNAL_ERROR", "worktree location is invalid");
+        if (values[2] !== undefined && typeof values[2] !== "boolean") fail("INTERNAL_ERROR", "worktree commit flag is invalid");
+        value = await bridge.worktree(values[0], controller.signal, typeof values[1] === "string" ? values[1] : undefined, values[2] === true);
       } else if (method === "phase") {
         if (typeof values[0] !== "string") fail("INTERNAL_ERROR", "phase name must be a string");
         await bridge.phase?.(values[0]);

@@ -386,18 +386,18 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       } finally { await lifecycle.leave(); }
     };
   };
-  const persistWorktree = async (store: RunStore, metadata: WorkflowMetadata, owner: string): Promise<WorktreeReference> => {
+  const persistWorktree = async (store: RunStore, metadata: WorkflowMetadata, owner: string, location?: string, commit?: boolean): Promise<WorktreeReference> => {
     const existing = (await store.worktrees()).some((worktree) => worktree.owner === owner);
-    const worktree = await store.worktree(owner);
+    const worktree = await store.worktree(owner, location, commit);
     if (!existing && await store.ownsWorktree(owner)) await eventPublisher.worktree(store, metadata, worktree);
     return worktree;
   };
-  const resolveWorktree = async (store: RunStore, metadata: WorkflowMetadata, owner: string): Promise<Readonly<WorkflowWorktreeReference>> => {
+  const resolveWorktree = async (store: RunStore, metadata: WorkflowMetadata, owner: string, location?: string, commit?: boolean): Promise<Readonly<WorkflowWorktreeReference>> => {
     const run = runs.get(store.runId);
     if (!run) fail("INTERNAL_ERROR", `Unknown production run: ${store.runId}`);
     await run.lifecycle.enter();
     try {
-      const worktree = await persistWorktree(store, metadata, owner);
+      const worktree = await persistWorktree(store, metadata, owner, location, commit);
       return { path: worktree.path, branch: worktree.branch };
     } finally { await run.lifecycle.leave(); }
   };
@@ -945,7 +945,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       runs.set(runId, { executor, store, metadata: checked.metadata, model: rootModel, lifecycle, budget: budgetRuntime, abortController: runController, projectTrusted: () => projectTrusted(ctx), checkpointResolvers: new Map(), ...(providerErrorRecovery ? { providerErrorRecovery } : {}), ...(params.foreground && onUpdate ? { update: onUpdate } : {}) });
       if (params.foreground && onUpdate) onUpdate(workflowToolUpdate((await store.load()).run));
       scheduler.addRun(runId, settings.concurrency, () => runs.get(runId)?.budget.checkAgentLaunch());
-      const execution = runWorkflow(script, args, withWorkflowFunctions({ shell: (command, options, signal, identity) => shellForRun(store, checked.metadata, lifecycle, command, options, signal, identity), agent: workflowAgentHandler(store, checked.metadata, lifecycle, executor, ctx.cwd, runId, captureRole), worktree: async (owner) => resolveWorktree(store, checked.metadata, owner), checkpoint: checkpointBridge(runId, store, checked.metadata, Boolean(params.foreground), params.foreground && ctx.hasUI ? ctx.ui : undefined, headless), phase: phaseBridge(store, checked.metadata, lifecycle), log: logBridge(lifecycle, checked.metadata.name) }, store, runContext, registry), runController.signal);
+      const execution = runWorkflow(script, args, withWorkflowFunctions({ shell: (command, options, signal, identity) => shellForRun(store, checked.metadata, lifecycle, command, options, signal, identity), agent: workflowAgentHandler(store, checked.metadata, lifecycle, executor, ctx.cwd, runId, captureRole), worktree: async (owner, _signal, location, commit) => resolveWorktree(store, checked.metadata, owner, location, commit), checkpoint: checkpointBridge(runId, store, checked.metadata, Boolean(params.foreground), params.foreground && ctx.hasUI ? ctx.ui : undefined, headless), phase: phaseBridge(store, checked.metadata, lifecycle), log: logBridge(lifecycle, checked.metadata.name) }, store, runContext, registry), runController.signal);
       (runs.get(runId) as NonNullable<ReturnType<typeof runs.get>>).execution = execution;
       await eventPublisher.runStarted(store, checked.metadata);
       const finish = execution.result.then(async (value) => {
