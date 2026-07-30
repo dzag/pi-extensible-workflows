@@ -97,7 +97,7 @@ export function createWorkflowRecovery(deps: WorkflowRecoveryDependencies) {
   type ColdResumeResult = { value: JsonValue; resultPath: string };
   const coldResumeRun = async (run: WorkflowRunRecord, hasUI: boolean, ui: { select?: (prompt: string, options: string[]) => Promise<string | undefined> }, trustedProject: boolean, context?: { model: { provider: string; id: string } | undefined; modelRegistry: WorkflowRecoveryContext["modelRegistry"]; signal?: AbortSignal | undefined; resolvedAliases?: Readonly<Record<string, string>>; blockedAliases?: ReadonlySet<string>; blockedAliasTargets?: Readonly<Record<string, string>> }, modeOverride?: boolean, waitForCompletion = true): Promise<ColdResumeResult | undefined> => {
     const loaded = await run.store.load();
-    const foreground = modeOverride ?? (loaded.run.delivery?.mode === "foreground" ? true : loaded.run.delivery?.mode === "background" ? false : loaded.snapshot.launchMode === "foreground");
+    const foreground = modeOverride ?? (loaded.run.delivery?.mode === "foreground" || (loaded.run.delivery?.mode === "background" && loaded.run.delivery.toolCallId !== undefined) || (loaded.run.delivery === undefined && loaded.snapshot.launchMode === "foreground"));
     if (loaded.run.activeShells !== undefined || loaded.run.activeShellStartedAt !== undefined) {
       await persistRunState(run.store, run.metadata, (current) => {
         const next = { ...current };
@@ -119,7 +119,7 @@ export function createWorkflowRecovery(deps: WorkflowRecoveryDependencies) {
     run.abortController = controller;
     const { settingsPath, currentPolicy, previousAliases, knownModels, availableModels, currentAliases, blockedAliases, blockedAliasTargets, snapshot, script } = await resolveLaunchPrologue({ snapshot: loaded.snapshot, cwd: run.store.cwd, trustedProject, rootModel, ...(context?.modelRegistry ? { modelRegistry: context.modelRegistry } : {}), signal: controller.signal, ...(context?.resolvedAliases ? { resolvedAliases: context.resolvedAliases } : {}), ...(context?.blockedAliases ? { blockedAliases: context.blockedAliases } : {}), ...(context?.blockedAliasTargets ? { blockedAliasTargets: context.blockedAliasTargets } : {}), withPreflight: true });
     if (!script) throw new WorkflowError("INTERNAL_ERROR", "Resume preflight did not produce a launch script");
-    const persistedSnapshot = modeOverride === undefined && loaded.run.delivery?.mode === "background" && snapshot.launchMode === "foreground" ? createLaunchSnapshot({ ...snapshot, launchMode: "background" }) : modeOverride === undefined ? snapshot : createLaunchSnapshot({ ...snapshot, launchMode: foreground ? "foreground" : "background" });
+    const persistedSnapshot = modeOverride === undefined ? snapshot : createLaunchSnapshot({ ...snapshot, launchMode: foreground ? "foreground" : "background" });
     await run.store.saveSnapshot(persistedSnapshot);
     scheduler.updateRunLimit(run.store.runId, snapshot.settings.concurrency);
     run.executor = createAgentExecutor({ cwd: run.store.cwd, model: rootModel, tools: activeSnapshotTools(snapshot.tools, "session"), availableModels, knownModels, modelAliases: currentAliases, blockedAliases, blockedAliasTargets, settingsPath, agentDefinitions: snapshot.roles ?? {}, runStore: run.store, providerPause: async () => { deliver(`Workflow ${snapshot.metadata.name} paused: provider limit.`); await run.lifecycle.providerPause(); }, agentResourcePolicy: frozenResourcePolicy(currentPolicy) });

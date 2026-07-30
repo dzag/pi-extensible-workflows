@@ -607,21 +607,29 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     if (!silent) deliver(pi, `Workflow ${run.metadata.name} checkpoint ${name}: ${approved ? "Approved" : "Rejected"}.`);
     return true;
   };
-  const checkpointBridge = (runId: string, store: RunStore, metadata: WorkflowMetadata, foreground: boolean, ui?: { select?: (prompt: string, options: string[]) => Promise<string | undefined> }, headless = false) => {
+  const backgroundCheckpointDeliveries = new Set<string>();
+  const deliverBackgroundCheckpoint = (workflowName: string, runId: string, checkpoint: { path: string; name: string; prompt: string; context: JsonValue }): void => {
+    const key = `${runId}:${checkpoint.path}`;
+    if (backgroundCheckpointDeliveries.has(key)) return;
+    backgroundCheckpointDeliveries.add(key);
+    deliver(pi, `Workflow ${workflowName} checkpoint ${checkpoint.name}: ${checkpoint.prompt}\nContext: ${JSON.stringify(checkpoint.context)}\nRespond with workflow_respond.`);
+  };
+  const checkpointBridge = (runId: string, store: RunStore, metadata: WorkflowMetadata, foreground: boolean | (() => boolean), ui?: { select?: (prompt: string, options: string[]) => Promise<string | undefined> }, headless = false) => {
     const checkpointCounters = new Map<string, number>();
+    const isForeground = () => typeof foreground === "function" ? foreground() : foreground;
     return async (raw: Readonly<Record<string, JsonValue>>, signal: AbortSignal): Promise<boolean> => {
       const input = validateCheckpoint(raw);
       const label = nextNamedOccurrence(checkpointCounters, input.name);
       const path = operationPath("checkpoint", label);
       if (headless) fail("RESUME_INCOMPATIBLE", "Headless CLI checkpoints are unsupported");
-      if (foreground && !ui?.select) fail("RESUME_INCOMPATIBLE", "Foreground checkpoints require UI");
+      if (isForeground() && !ui?.select) fail("RESUME_INCOMPATIBLE", "Foreground checkpoints require UI");
       const alreadyAwaiting = (await store.awaitingCheckpoints()).some((checkpoint) => checkpoint.path === path);
       const replayed = await store.awaitCheckpoint({ ...input, name: label, path });
       if (replayed !== undefined) return replayed;
       if (!alreadyAwaiting) await eventPublisher.checkpoint(store, metadata, label, "awaiting");
       const run = runs.get(runId);
       await run?.lifecycle.enterAwaitingInput();
-      if (!alreadyAwaiting && !ui?.select) deliver(pi, `Workflow ${metadata.name} checkpoint ${label}: ${input.prompt}\nContext: ${JSON.stringify(input.context)}\nRespond with workflow_respond.`);
+      if (!alreadyAwaiting && (!isForeground() || !ui?.select)) deliverBackgroundCheckpoint(metadata.name, runId, { ...input, name: label, path });
       const decision = new Promise<boolean>((resolve, reject) => {
         run?.checkpointResolvers.set(path, resolve);
         if (signal.aborted) reject(new WorkflowError("CANCELLED", "Workflow cancelled"));
@@ -633,16 +641,17 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         run?.checkpointResolvers.get(path)?.(answered);
         run?.checkpointResolvers.delete(path);
       }
-      if (ui?.select) void (async () => {
+      if (ui?.select && isForeground()) void (async () => {
         while (!signal.aborted && run?.checkpointResolvers.has(path)) {
           const choice = await ui.select?.(input.prompt, ["Approve", "Reject"]);
           if (!choice) {
-            if (foreground) continue; // foreground: retry until answered
-            deliver(pi, `Workflow ${metadata.name} checkpoint ${label}: ${input.prompt}\nContext: ${JSON.stringify(input.context)}\nRespond with workflow_respond.`);
+            if (isForeground()) continue;
+            deliverBackgroundCheckpoint(metadata.name, runId, { ...input, name: label, path });
             return;
           }
           if (await answerCheckpoint(runId, label, choice === "Approve", true)) return;
         }
+        if (!isForeground() && !signal.aborted && run?.checkpointResolvers.has(path)) deliverBackgroundCheckpoint(metadata.name, runId, { ...input, name: label, path });
       })().catch(() => undefined);
       return decision;
     };
@@ -918,6 +927,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const launchCwd = typeof ctx.cwd === "string" ? ctx.cwd : process.cwd();
       const launch = workflowLaunchSettings(launchCwd, trustedProject, settingsPath, params.concurrency);
       const runController = new AbortController();
+      let foregroundAttached = Boolean(params.foreground);
       const onForegroundAbort = () => { runController.abort(); };
       if (signal?.aborted) runController.abort(); else signal?.addEventListener("abort", onForegroundAbort, { once: true });
       let resolveDetached!: (result: ForegroundDetachResult) => void;
@@ -962,12 +972,17 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           detach: async () => {
             let moved: boolean | undefined;
             await store.updateState((current) => {
-              if (current.state !== "running" || current.delivery?.mode !== "foreground" || current.delivery.state !== "attached") return current;
+              if (["completed", "failed", "stopped"].includes(current.state) || current.delivery?.mode !== "foreground" || current.delivery.state !== "attached") return current;
               moved = true;
               return { ...current, delivery: { mode: "background", state: "pending" } };
             });
             if (moved !== true) throw new WorkflowError("RESUME_INCOMPATIBLE", `Workflow ${runId} is no longer an attached foreground run`);
+            foregroundAttached = false;
             delivery.detached = true;
+            const activeRun = runs.get(runId);
+            if (activeRun) delete activeRun.update;
+            await store.saveSnapshot(createLaunchSnapshot({ ...persistedSnapshot, launchMode: "background" }));
+            for (const checkpoint of await store.awaitingCheckpoints()) deliverBackgroundCheckpoint(checked.metadata.name, runId, checkpoint);
             signal?.removeEventListener("abort", onForegroundAbort);
             if (delivery.timer) clearTimeout(delivery.timer);
             resolveDetached({ runId, state: "running", detached: true });
@@ -977,14 +992,14 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         foregroundDeliveries.set(toolCallId, delivery);
       }
       const lifecycle = lifecycleFor(store, "running", budgetRuntime, checked.metadata);
-      const background = !params.foreground;
-      const providerPause = async () => { if (background) deliver(pi, `Workflow ${checked.metadata.name} paused: provider limit.`); await lifecycle.providerPause(); };
+      const backgroundLaunch = !params.foreground;
+      const providerPause = async () => { if (!foregroundAttached) deliver(pi, `Workflow ${checked.metadata.name} paused: provider limit.`); await lifecycle.providerPause(); };
       const providerErrorRecovery = createProviderErrorRecovery(ctx, availableModels, () => { runController.abort(); });
       const executor = createAgentExecutor({ cwd: ctx.cwd, model: rootModel, tools: new Set(rootTools), availableModels, knownModels, modelAliases, settingsPath, agentDefinitions, runStore: store, providerPause, agentResourcePolicy: frozenResourcePolicy(launch.resourcePolicy), runContext });
       runs.set(runId, { executor, store, metadata: checked.metadata, model: rootModel, lifecycle, budget: budgetRuntime, abortController: runController, projectTrusted: () => projectTrusted(ctx), checkpointResolvers: new Map(), ...(providerErrorRecovery ? { providerErrorRecovery } : {}), ...(params.foreground && onUpdate ? { update: onUpdate } : {}) });
       if (params.foreground && onUpdate) onUpdate(workflowToolUpdate((await store.load()).run));
       scheduler.addRun(runId, settings.concurrency, () => runs.get(runId)?.budget.checkAgentLaunch());
-      const execution = runWorkflow(script, args, withWorkflowFunctions({ shell: (command, options, signal, identity) => shellForRun(store, checked.metadata, lifecycle, command, options, signal, identity), agent: workflowAgentHandler(store, checked.metadata, lifecycle, executor, ctx.cwd, runId, captureRole), worktree: async (owner) => resolveWorktree(store, checked.metadata, owner), checkpoint: checkpointBridge(runId, store, checked.metadata, Boolean(params.foreground), params.foreground && ctx.hasUI ? ctx.ui : undefined, headless), phase: phaseBridge(store, checked.metadata, lifecycle), log: logBridge(lifecycle, checked.metadata.name) }, store, runContext, registry), runController.signal);
+      const execution = runWorkflow(script, args, withWorkflowFunctions({ shell: (command, options, signal, identity) => shellForRun(store, checked.metadata, lifecycle, command, options, signal, identity), agent: workflowAgentHandler(store, checked.metadata, lifecycle, executor, ctx.cwd, runId, captureRole), worktree: async (owner) => resolveWorktree(store, checked.metadata, owner), checkpoint: checkpointBridge(runId, store, checked.metadata, () => foregroundAttached, params.foreground && ctx.hasUI ? ctx.ui : undefined, headless), phase: phaseBridge(store, checked.metadata, lifecycle), log: logBridge(lifecycle, checked.metadata.name) }, store, runContext, registry), runController.signal);
       (runs.get(runId) as NonNullable<ReturnType<typeof runs.get>>).execution = execution;
       await eventPublisher.runStarted(store, checked.metadata);
       const finish = execution.result.then(async (value) => {
@@ -1032,7 +1047,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           await deliverTerminal(store, content, failure);
         });
       };
-      if (background) {
+      if (backgroundLaunch) {
         void completion.then(async ({ value, resultPath }) => {
           await deliverTerminal(store, completionDelivery(checked.metadata.name, value, resultPath, await store.changedWorktrees()));
         }, async (error: unknown) => {

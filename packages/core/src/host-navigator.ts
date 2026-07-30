@@ -162,7 +162,8 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
           ctx.ui.notify(usage, "warning");
           return "done";
         } catch (error) {
-          if (!keepContext) throw error;
+          if (!keepContext && action !== "background") throw error;
+          if (!keepContext && action === "background") { ctx.ui.notify(usage, "warning"); return "done"; }
           const message = error instanceof Error ? error.message : String(error);
           if (action === "stop") status(`Could not stop workflow ${runId ?? ""}: ${message}`);
           ctx.ui.notify(`Cannot ${action ?? "workflow action"}${runId ? ` for ${runId}` : ""}: ${message}`, "warning");

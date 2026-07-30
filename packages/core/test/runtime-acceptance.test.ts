@@ -905,7 +905,7 @@ void test("recovery inherits persisted launch mode for resume and retry", { time
   const foregroundRetry = new RunStore(cwd, sessionId, "foreground-retry", home);
   const backgroundRetry = new RunStore(cwd, sessionId, "background-retry", home);
   const overriddenResume = new RunStore(cwd, sessionId, "overridden-resume", home);
-  await foregroundResume.create({ id: "foreground-resume", workflowName: "foreground-resume", cwd, sessionId, state: "budget_exhausted", agents: [], agentSessions: [] }, snapshot("foreground-resume", "foreground"));
+  await foregroundResume.create({ id: "foreground-resume", workflowName: "foreground-resume", cwd, sessionId, state: "budget_exhausted", agents: [], agentSessions: [], delivery: { mode: "background", state: "pending", toolCallId: "foreground-resume-call" } }, snapshot("foreground-resume", "foreground"));
   await backgroundResume.create({ id: "background-resume", workflowName: "background-resume", cwd, sessionId, state: "budget_exhausted", agents: [], agentSessions: [] }, snapshot("background-resume", "background"));
   await legacyResume.create({ id: "legacy-resume", workflowName: "legacy-resume", cwd, sessionId, state: "budget_exhausted", agents: [], agentSessions: [] }, snapshot("legacy-resume"));
   await foregroundRetry.create({ id: "foreground-retry", workflowName: "foreground-retry", cwd, sessionId, state: "failed", agents: [], agentSessions: [] }, snapshot("foreground-retry", "foreground"));

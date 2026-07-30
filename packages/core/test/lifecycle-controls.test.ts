@@ -719,6 +719,46 @@ void test("moves an attached foreground workflow to background without restartin
   await waitForIssue105(async () => (await store.load()).run.delivery?.state === "delivered");
   assert.deepEqual(messages.filter((message) => message.startsWith("Workflow background-command completed:")), [messages.find((message) => message.startsWith("Workflow background-command completed:"))]);
 });
+void test("detaching a checkpointed foreground workflow switches future prompts to follow-up delivery", { timeout: 10_000 }, async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-background-checkpoint-"));
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
+  const messages: string[] = [];
+  let selectStarted = false;
+  let releaseSelect!: () => void;
+  const selectGate = new Promise<void>((resolve) => { releaseSelect = resolve; });
+  const createSession = async (): Promise<TestPiSession> => ({
+    sessionId: "checkpoint-background-session", sessionFile: "/sessions/checkpoint-background.jsonl",
+    messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
+    prompt: async () => {}, abort: async () => { releaseSelect(); }, steer: async () => {}, dispose() {},
+  });
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
+  const workflow = tools.find(({ name }) => name === "workflow");
+  const respond = tools.find(({ name }) => name === "workflow_respond");
+  const command = commands[0]?.handler;
+  assert.ok(workflow && respond && command);
+  const context = { cwd: home, hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {}, select: async () => { selectStarted = true; await selectGate; return undefined; } } };
+  const execution = workflow.execute("checkpoint-call", { name: "background-checkpoint", script: `return await checkpoint({name:"ship", prompt:"Approve ship", context:null});`, foreground: true }, new AbortController().signal, undefined, context);
+  await waitForIssue105(() => selectStarted);
+  const runId = (await listRunIds(home, "session", home))[0];
+  assert.ok(runId);
+  const store = new RunStore(home, "session", runId, home);
+  t.after(() => { releaseSelect(); });
+  await waitForIssue105(async () => (await store.load()).run.state === "awaiting_input");
+  await command("background", context);
+  const detached = await execution as { details: { runId: string; state: string; detached: boolean } };
+  assert.deepEqual({ runId: detached.details.runId, state: detached.details.state, detached: detached.details.detached }, { runId, state: "running", detached: true });
+  assert.deepEqual((await store.load()).run.delivery, { mode: "background", state: "pending" });
+  assert.equal((await store.load()).snapshot.launchMode, "background");
+  await waitForIssue105(() => messages.some((message) => message.includes("Workflow background-checkpoint checkpoint ship") && message.includes("Respond with workflow_respond")));
+  await command("background", context);
+  await command("background unknown-run", context);
+  releaseSelect();
+  await waitForIssue105(() => messages.some((message) => message.includes("Workflow background-checkpoint checkpoint ship") && message.includes("Respond with workflow_respond")));
+  await respond.execute("respond", { runId, name: "ship", approved: true }, undefined, undefined, context);
+  await waitForIssue105(async () => (await store.load()).run.delivery?.state === "delivered");
+  assert.equal(messages.filter((message) => message.startsWith("Workflow background-checkpoint completed:")).length, 1);
+});
 void test("interrupted lifecycle can cold-resume while completed and failed cannot", async () => {
   const interrupted = new RunLifecycle("interrupted");
   await interrupted.resume();
