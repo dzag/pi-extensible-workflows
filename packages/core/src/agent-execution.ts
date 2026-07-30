@@ -229,7 +229,7 @@ async function preparePiPrompt(native: PiSession, text: string): Promise<PiPromp
     }
     let expandedPrompt = current;
     if (!inputHandled) {
-      const skillExpanded = typeof expandSkillCommand === "function" ? expandSkillCommand(current) : current;
+      const skillExpanded = typeof expandSkillCommand === "function" ? expandSkillCommand.call(session, current) : current;
       try { expandedPrompt = await expandPromptTemplateForInspection(skillExpanded, Array.isArray(templates) ? templates : []); }
       catch (error) { diagnostics.push({ type: "error", message: `Pi prompt template expansion is unavailable: ${error instanceof Error ? error.message : String(error)}`, source: "Pi session" }); }
     }
@@ -300,7 +300,7 @@ export async function createLocalPiSession(input: SessionInput): Promise<PiSessi
     const extensions = resourceLoader?.getExtensions();
     const skills = resourceLoader?.getSkills();
     const diagnostics = [...(extensions?.errors ?? []).map(({ path, error }) => ({ type: "error" as const, message: error, source: path })), ...(skills?.diagnostics ?? []).map(({ type, path, message }) => ({ type, message, ...(path ? { source: path } : {}) }))];
-    const systemSource = input.systemPromptSource ?? systemPromptSource;
+    const systemSource = systemPromptSource;
     return { extensions: resourceLoader?.getExtensions().extensions.filter(({ path }) => !path.startsWith("<")).map(({ resolvedPath }) => canonicalSourcePath(resolvedPath)) ?? [], skills: skills?.skills.map(({ name }) => name) ?? [], diagnostics, ...(systemSource ? { systemPromptSource: systemSource } : resourceLoader?.getSystemPrompt() !== undefined ? { systemPromptSource: "Pi resource loader" } : {}) };
   };
   return Object.assign(session, {

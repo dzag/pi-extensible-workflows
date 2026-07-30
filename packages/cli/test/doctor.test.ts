@@ -228,7 +228,7 @@ void test("role-targeted doctor inspects effective resources and prepares hooks 
   const paths = fixture();
   writeFileSync(join(paths.cwd, ".pi", "settings.json"), "{}");
   writeFileSync(join(paths.agentDir, "auth.json"), JSON.stringify({ fixture: { type: "api_key", key: "local-fixture" } }));
-  writeFileSync(join(paths.agentDir, "models.json"), JSON.stringify({ providers: { fixture: { baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "fixture", models: [{ id: "fixture-model", name: "Fixture model", reasoning: true, input: ["text"], contextWindow: 1_024, maxTokens: 128 }] } } }));
+  writeFileSync(join(paths.agentDir, "models.json"), JSON.stringify({ providers: { fixture: { baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "fixture", models: [{ id: "fixture-model", name: "Fixture model", reasoning: true, input: ["text"], contextWindow: 1_024, maxTokens: 128 }, { id: "override-model", name: "Override model", reasoning: true, input: ["text"], contextWindow: 1_024, maxTokens: 128 }] } } }));
   writeFileSync(join(paths.agentDir, "trust.json"), JSON.stringify({ [realpathSync(paths.cwd)]: true }));
   mkdirSync(join(paths.agentDir, "skills", "review-skill"), { recursive: true });
   writeFileSync(join(paths.agentDir, "skills", "review-skill", "SKILL.md"), "---\nname: review-skill\ndescription: Review\n---\nReview skill");
@@ -236,13 +236,14 @@ void test("role-targeted doctor inspects effective resources and prepares hooks 
   writeFileSync(join(paths.agentDir, "skills", "invalid_skill", "SKILL.md"), "---\ndescription: Invalid name fixture\n---\nInvalid skill");
   mkdirSync(join(paths.agentDir, "extensions"), { recursive: true });
   writeFileSync(join(paths.agentDir, "extensions", "doctor-hook.ts"), "export default (pi) => { pi.on('before_agent_start', (event) => ({ systemPrompt: event.systemPrompt + '\\nHOOK:' + event.prompt })); };\n");
-  writeFileSync(join(paths.cwd, ".pi", "pi-extensible-workflows", "roles", "reviewer.md"), "---\nmodel: fixture/fixture-model:medium\nthinking: high\ntools: [read, grep]\ndisabledAgentResources:\n  skills: [review-skill]\n  extensions: [missing-extension]\n---\nReview role");
+  writeFileSync(join(paths.cwd, ".pi", "pi-extensible-workflows", "roles", "reviewer.md"), "---\nthinking: high\ntools: [read, grep]\ndisabledAgentResources:\n  skills: [review-skill]\n  extensions: [missing-extension]\n---\nReview role");
   const registry = new WorkflowRegistry();
-  registry.register({ version: "1.0.0", headline: "Doctor setup", description: "Doctor setup hook", agentSetupHooks: { adjust: { setup(agent, context) { assert.equal(context.mode, "inspection"); assert.equal(agent.prepared.model.model, "fixture-model"); assert.equal(agent.prepared.model.thinking, "high"); agent.options.model = "fixture/fixture-model"; agent.options.thinking = "low"; agent.options.tools = ["grep"]; } } } });
-  const report = await withHomeAndCwd(paths.root, paths.cwd, () => doctor({ ...paths, role: "reviewer", registry, discoverPi: async () => pi({ activeTools: ["read", "grep"], knownModels: ["fixture/fixture-model"], availableModels: ["fixture/fixture-model"], model: { provider: "fixture", model: "fixture-model", thinking: "medium" } }) }));
+  registry.register({ version: "1.0.0", headline: "Doctor setup", description: "Doctor setup hook", agentSetupHooks: { adjust: { setup(agent, context) { assert.equal(context.mode, "inspection"); assert.equal(agent.prepared.model.model, "fixture-model"); assert.equal(agent.prepared.model.thinking, "high"); agent.options.model = "fixture/override-model"; agent.options.thinking = "low"; agent.options.tools = ["grep"]; } } } });
+  const report = await withHomeAndCwd(paths.root, paths.cwd, () => doctor({ ...paths, role: "reviewer", registry, discoverPi: async () => pi({ activeTools: ["read", "grep"], knownModels: ["fixture/fixture-model", "fixture/override-model"], availableModels: ["fixture/fixture-model", "fixture/override-model"], model: { provider: "fixture", model: "fixture-model", thinking: "medium" } }) }));
   const inspection = report.roleInspection;
   assert.ok(inspection);
-  assert.equal(inspection.model.model, "fixture-model");
+  assert.equal(inspection.model.model, "override-model");
+  assert.notEqual(inspection.model.inherited, true);
   assert.equal(inspection.model.thinking, "low");
   assert.ok(inspection.resources.skills.includes("invalid_skill"));
   const invalidSkillDiagnostic = report.diagnostics.find(({ message }) => message.includes("invalid characters"));

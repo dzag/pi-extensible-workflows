@@ -1569,6 +1569,9 @@ void test("filters disabled native extensions before factories and skills before
   assert.doesNotMatch(session.systemPrompt ?? "", /disabled-skill/);
   const commands = (session as unknown as { _extensionRunner: { runtime: { getCommands(): Array<{ name: string }> } } })._extensionRunner.runtime.getCommands();
   assert.ok(commands.some(({ name }) => name === "skill:kept-skill"));
+  const preparedPrompt = await session.preparePrompt("/skill:kept-skill");
+  assert.equal(preparedPrompt.diagnostics.length, 0);
+  assert.match(preparedPrompt.expandedPrompt, /Kept/);
   assert.equal(commands.some(({ name }) => name === "skill:disabled-skill"), false);
   assert.deepEqual(resourcePolicy.unmatchedSkills, []);
   assert.deepEqual(resourcePolicy.unmatchedExtensions, []);

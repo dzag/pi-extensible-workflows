@@ -154,7 +154,6 @@ export interface SessionInput {
   customTools?: SessionCustomTools;
   resultTool?: ToolDefinition;
   systemPrompt?: string;
-  systemPromptSource?: string;
   systemPromptAppend?: string;
   extensionFactories?: InlineExtension[];
   additionalSkillPaths?: readonly string[];
