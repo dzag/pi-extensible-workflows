@@ -1,7 +1,7 @@
 import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Value } from "typebox/value";
-import type { AgentAttemptAction, JsonValue, RegisteredAgentSetupHook, WorkflowCatalog, WorkflowCatalogContext, WorkflowCatalogError, WorkflowCatalogFunction, WorkflowCatalogIndex, WorkflowCatalogModelAlias, WorkflowExtension, WorkflowFunction, WorkflowFunctionContext, WorkflowJournal, WorkflowModelAlias, WorkflowModelAliasResolverContext, WorkflowRoleDirectoryRegistration } from "./types.js";
+import type { AgentAttemptAction, JsonSchema, JsonValue, RegisteredAgentSetupHook, WorkflowCatalog, WorkflowCatalogContext, WorkflowCatalogError, WorkflowCatalogFunction, WorkflowCatalogIndex, WorkflowCatalogModelAlias, WorkflowExtension, WorkflowFunction, WorkflowFunctionContext, WorkflowJournal, WorkflowModelAlias, WorkflowModelAliasResolverContext, WorkflowRoleDirectoryRegistration } from "./types.js";
 import { deepFreeze, fail, jsonValue, object } from "./utils.js";
 import { loadSettings, resolveWorkflowSettings, validateSchema } from "./validation.js";
 
@@ -97,7 +97,7 @@ export class WorkflowRegistry {
   catalog(context?: WorkflowCatalogContext): WorkflowCatalog {
     const functions: WorkflowCatalogFunction[] = [];
     for (const extension of this.#extensions) {
-      for (const [name, fn] of Object.entries(extension.functions ?? {})) functions.push({ name, version: extension.version, headline: extension.headline, extensionDescription: extension.description, description: fn.description, input: structuredClone(fn.input), output: structuredClone(fn.output) });
+      for (const [name, fn] of Object.entries(extension.functions ?? {})) functions.push({ name, version: extension.version, headline: extension.headline, extensionDescription: extension.description, description: fn.description, input: structuredClone(fn.input) as JsonSchema, output: structuredClone(fn.output) as JsonSchema });
     }
     let aliases: Readonly<Record<string, string>> | undefined;
     let settings: WorkflowCatalog["settings"];

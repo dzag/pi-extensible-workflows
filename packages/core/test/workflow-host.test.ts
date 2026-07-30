@@ -5,8 +5,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import type { InlineExtension, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Type, type Static } from "typebox";
 import { WORKFLOW_TOOL_DESCRIPTION, WORKFLOW_TOOL_PARAMETERS, WORKFLOW_TOOL_PROMPT_SNIPPET, navigatorAttentionSort } from "../src/host.js";
-import workflowExtension, { createLaunchSnapshot, DEFAULT_SETTINGS, formatWorkflowPreview, preflight, registerWorkflowExtension, RunStore, structuralPath, WorkflowError, WorkflowRegistry, type AgentOptions, type PersistedRun, type WorkflowExtension, type WorkflowOrchestrationContext } from "../src/index.js";
+import workflowExtension, { createLaunchSnapshot, DEFAULT_SETTINGS, defineWorkflowFunction, formatWorkflowPreview, preflight, registerWorkflowExtension, RunStore, structuralPath, WorkflowError, WorkflowRegistry, type AgentOptions, type PersistedRun, type WorkflowExtension, type WorkflowOrchestrationContext } from "../src/index.js";
 import { loadingRegistry } from "../src/registry.js";
 import type { SessionInput } from "../src/agent-execution.js";
 import { listRunIds } from "../src/persistence.js";
@@ -25,6 +26,25 @@ const typeCheckAgentContext = (context: WorkflowOrchestrationContext): void => {
   void context.agent("prompt");
   void context.agent("prompt", { advisor: true, nested: { enabled: true } });
   void context.agent("prompt", { model: "openai/gpt", tools: ["read"] });
+  const outputSchema = Type.Object({ answer: Type.String(), count: Type.Integer() });
+  const typedResult: Promise<Static<typeof outputSchema>> = context.agent("prompt", { outputSchema, advisor: true, nested: { enabled: true } });
+  void typedResult;
+  const worktreeResult: Promise<Static<typeof outputSchema>> = context.withWorktree("scope", () => context.agent("prompt", { outputSchema }));
+  void worktreeResult;
+  const parallelResult: Promise<{ first: Static<typeof outputSchema>; second: number }> = context.parallel("batch", { first: () => context.agent("prompt", { outputSchema }), second: () => 2 });
+  void parallelResult;
+  const inputSchema = Type.Object({ value: Type.String() });
+  const functionOutputSchema = Type.Object({ value: Type.String() });
+  const typedFunction = defineWorkflowFunction({ description: "typed", input: inputSchema, output: functionOutputSchema, run: async (input) => ({ value: input.value }) });
+  const exactRun: (input: Static<typeof inputSchema>) => Promise<Static<typeof functionOutputSchema>> = typedFunction.run;
+  void exactRun;
+  const typeCheckExtension: WorkflowExtension = { version: "1.0.0", headline: "Typed", description: "Typed function", functions: { typed: typedFunction } };
+  void typeCheckExtension;
+  void defineWorkflowFunction({
+    description: "wrong output", input: inputSchema, output: functionOutputSchema,
+    // @ts-expect-error function output must match its schema
+    run: async (input) => ({ value: input.value.length }),
+  });
   const options: Readonly<AgentOptions> = { advisor: true };
   void context.agent("prompt", options);
   // @ts-expect-error agent requires a prompt
@@ -35,6 +55,8 @@ const typeCheckAgentContext = (context: WorkflowOrchestrationContext): void => {
   void context.agent("prompt", { model: 42 });
   // @ts-expect-error extension agent options must be JSON-compatible
   void context.agent("prompt", { advisor: () => true });
+  // @ts-expect-error outputSchema must not allow non-JSON extension options
+  void context.agent("prompt", { outputSchema, advisor: () => true });
 };
 void typeCheckAgentContext;
 const typeCheckAgentSetupHook: WorkflowExtension = {

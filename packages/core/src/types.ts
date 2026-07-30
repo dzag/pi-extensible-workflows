@@ -1,4 +1,5 @@
 import type { CreateAgentSessionOptions, InlineExtension, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { Static, TSchema } from "typebox";
 export const RUN_STATES = ["queued", "running", "pausing", "paused", "awaiting_input", "completed", "failed", "stopped", "interrupted", "budget_exhausted"] as const;
 export const AGENT_STATES = ["queued", "running", "waiting_for_child", "paused", "retrying", "completed", "failed", "cancelled"] as const;
 export const WORKFLOW_CALL_KINDS = ["agent", "parallel", "pipeline", "checkpoint", "phase", "withWorktree", "shell"] as const;
@@ -24,17 +25,20 @@ export type AgentState = (typeof AGENT_STATES)[number];
 export type WorkflowErrorCode = (typeof ERROR_CODES)[number];
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export type JsonSchema = { [key: string]: JsonValue };
-export interface AgentOptions {
+type WorkflowSchema = JsonSchema | TSchema;
+export interface AgentOptions<Schema extends TSchema = never> {
   label?: string;
   model?: string;
   thinking?: NonNullable<ModelSpec["thinking"]>;
   tools?: string[];
   role?: string;
-  outputSchema?: JsonSchema;
+  outputSchema?: JsonSchema | Schema;
   retries?: number;
   timeoutMs?: number | null;
-  [key: string]: JsonValue;
+  [key: string]: JsonValue | NoInfer<Schema>;
 }
+export type ParallelTasks = Record<string, () => JsonValue | Promise<JsonValue>>;
+export type ParallelResult<Tasks extends ParallelTasks> = { [Key in keyof Tasks]: Awaited<ReturnType<Tasks[Key]>> };
 export interface ShellOptions { timeoutMs?: number; env?: Record<string, string> }
 export interface ShellResult { exitCode: number | null; stdout: string; stderr: string }
 export type BudgetDimension = "tokens" | "costUsd" | "durationMs" | "agentLaunches";
@@ -91,11 +95,19 @@ export interface AgentDefinition { prompt?: string; description?: string; model?
 export interface LaunchSnapshot { identityVersion?: number; launchMode?: WorkflowLaunchMode; script: string; args: JsonValue; metadata: WorkflowMetadata; settings: WorkflowSettings; settingsSources?: WorkflowSettingsSources; budget?: WorkflowBudget; settingsPath?: string; modelAliases?: Readonly<Record<string, string>>; phases?: readonly string[]; models: readonly string[]; tools: readonly string[]; agentTypes: readonly string[]; roles?: Readonly<Record<string, AgentDefinition>>; projectRoles?: readonly string[]; schemas: readonly JsonSchema[] }
 export interface PreflightCapabilities { models: ReadonlySet<string>; tools: ReadonlySet<string>; agentTypes: ReadonlySet<string>; modelAliases?: Readonly<Record<string, string>>; knownModels?: ReadonlySet<string>; settingsPath?: string; skipModelAvailability?: boolean }
 export interface PreflightResult { metadata: WorkflowMetadata; referenced: { phases: readonly string[]; models: readonly string[]; tools: readonly string[]; agentTypes: readonly string[] }; schemas: readonly JsonSchema[]; dynamicAgentRoles: boolean }
-export interface WorkflowOrchestrationContext { agent: (prompt: string, options?: Readonly<AgentOptions>) => Promise<JsonValue>; shell: (command: string, options?: ShellOptions) => Promise<ShellResult>; prompt: (template: string, values: Readonly<Record<string, JsonValue>>) => string; parallel: (...args: readonly unknown[]) => Promise<JsonValue>; pipeline: (...args: readonly unknown[]) => Promise<JsonValue>; withWorktree: (name: string, callback: WorkflowWorktreeCallback) => Promise<JsonValue>; checkpoint: (...args: readonly unknown[]) => Promise<boolean>; phase: (name: string) => void; log: (message: string) => void }
+export interface WorkflowOrchestrationContext { agent: { <Schema extends TSchema>(prompt: string, options: Readonly<AgentOptions<Schema> & { outputSchema: Schema }>): Promise<Static<Schema>>; (prompt: string, options?: Readonly<AgentOptions>): Promise<JsonValue> }; shell: (command: string, options?: ShellOptions) => Promise<ShellResult>; prompt: (template: string, values: Readonly<Record<string, JsonValue>>) => string; parallel: <Tasks extends ParallelTasks>(operationName: string, tasks: Tasks) => Promise<ParallelResult<Tasks>>; pipeline: (...args: readonly unknown[]) => Promise<JsonValue>; withWorktree: <Result extends JsonValue>(name: string, callback: WorkflowWorktreeCallback<Result>) => Promise<Result>; checkpoint: (...args: readonly unknown[]) => Promise<boolean>; phase: (name: string) => void; log: (message: string) => void }
 export interface WorkflowRunContext { cwd: string; sessionId: string; runId: string; workflow: Readonly<WorkflowMetadata>; args: JsonValue; signal: AbortSignal }
 export interface WorkflowFunctionContext extends WorkflowOrchestrationContext { run: Readonly<WorkflowRunContext>; invoke: (name: string, input: Readonly<Record<string, JsonValue>>) => Promise<JsonValue> }
-export type WorkflowWorktreeCallback = (reference: Readonly<WorkflowWorktreeReference>) => JsonValue | Promise<JsonValue>;
-export interface WorkflowFunction { description: string; input: JsonSchema; output: JsonSchema; run: (input: Readonly<Record<string, JsonValue>>, context: Readonly<WorkflowFunctionContext>) => Promise<JsonValue> | JsonValue }
+export type WorkflowWorktreeCallback<Result extends JsonValue = JsonValue> = (reference: Readonly<WorkflowWorktreeReference>) => Result | Promise<Result>;
+export interface WorkflowFunction { description: string; input: WorkflowSchema; output: WorkflowSchema; run(input: Readonly<Record<string, JsonValue>>, context: Readonly<WorkflowFunctionContext>): unknown }
+type TypedWorkflowFunction<InputSchema extends TSchema, OutputSchema extends TSchema> = {
+  description: string;
+  input: InputSchema;
+  output: OutputSchema;
+  run: (input: Readonly<Static<NoInfer<InputSchema>>>, context: Readonly<WorkflowFunctionContext>) => Promise<Static<NoInfer<OutputSchema>>> | Static<NoInfer<OutputSchema>>;
+};
+type DefinedWorkflowFunction<InputSchema extends TSchema, OutputSchema extends TSchema, Run extends TypedWorkflowFunction<InputSchema, OutputSchema>["run"]> = Omit<TypedWorkflowFunction<InputSchema, OutputSchema>, "run"> & { run: Run };
+export function defineWorkflowFunction<InputSchema extends TSchema, OutputSchema extends TSchema, Run extends TypedWorkflowFunction<InputSchema, OutputSchema>["run"]>(workflowFunction: DefinedWorkflowFunction<InputSchema, OutputSchema, Run>): DefinedWorkflowFunction<InputSchema, OutputSchema, Run> { return workflowFunction; }
 export interface WorkflowAgentSessionReference { readonly transport: string; readonly sessionId: string; readonly locator?: JsonValue }
 export interface WorkflowAgentSessionStats { readonly tokens: { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number; readonly total: number }; readonly cost: number }
 export interface WorkflowAgentMessage { readonly role: string; readonly content?: unknown; readonly stopReason?: string; readonly errorMessage?: string; readonly usage?: { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number; readonly cost: { readonly total: number } } }

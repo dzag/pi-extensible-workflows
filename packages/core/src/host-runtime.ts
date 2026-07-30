@@ -4,7 +4,7 @@ import { type PersistedRun, type RunStore, type WorktreeReference } from "./pers
 import { fail, deepFreeze, errorCode, jsonValue, object } from "./utils.js";
 import { validateAgentOptions, validateShellOptions, workflowPrompt } from "./validation.js";
 import { type WorkflowRegistryApi } from "./registry.js";
-import { ERROR_CODES, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentOptions, type AgentRecord, type BudgetEvent, type JsonValue, type ModelSpec, type RunState, type WorkflowBridge, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowExecution, type WorkflowFunctionContext, type WorkflowMetadata, type WorkflowRunContext, type WorkflowWorktreeReference } from "./types.js";
+import { ERROR_CODES, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentOptions, type AgentRecord, type BudgetEvent, type JsonValue, type ModelSpec, type ParallelResult, type ParallelTasks, type RunState, type WorkflowBridge, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowExecution, type WorkflowFunctionContext, type WorkflowMetadata, type WorkflowRunContext, type WorkflowWorktreeCallback, type WorkflowWorktreeReference } from "./types.js";
 import { structuralPath as operationPath } from "./persistence.js";
 
 const HARD_TERMINAL_RUN_STATES: ReadonlySet<string> = new Set(["completed", "failed", "stopped"]);
@@ -187,22 +187,19 @@ function publicWorktreeReference(reference: WorkflowWorktreeReference): Readonly
   if (!object(reference) || typeof reference.path !== "string" || typeof reference.branch !== "string") fail("WORKTREE_FAILED", "Worktree reference is invalid");
   return Object.freeze({ path: reference.path, branch: reference.branch });
 }
-async function hostWithWorktree(args: readonly unknown[], resolveWorktree: ((owner: string, signal: AbortSignal) => Promise<Readonly<WorkflowWorktreeReference>>) | undefined, signal: AbortSignal): Promise<JsonValue> {
-  if (args.length !== 2) fail("INVALID_METADATA", "withWorktree requires a name and callback");
-  const name = args[0];
-  const callback = args[1];
+async function hostWithWorktree<Result extends JsonValue>(name: string, callback: WorkflowWorktreeCallback<Result>, resolveWorktree: ((owner: string, signal: AbortSignal) => Promise<Readonly<WorkflowWorktreeReference>>) | undefined, signal: AbortSignal): Promise<Result> {
   if (typeof name !== "string" || !name.trim()) fail("INVALID_METADATA", "withWorktree name must be a non-empty string");
   if (typeof callback !== "function") fail("INVALID_METADATA", "withWorktree callback must be a function");
   if (!resolveWorktree) fail("WORKTREE_FAILED", "No worktree bridge is available");
   const owner = operationPath("worktree", "named", name.trim());
   const reference = publicWorktreeReference(await resolveWorktree(owner, signal));
-  return inheritedHostWorktreeOwner.run(owner, async () => await (callback as (reference: Readonly<WorkflowWorktreeReference>) => unknown)(reference)) as Promise<JsonValue>;
+  return inheritedHostWorktreeOwner.run(owner, () => callback(reference));
 }
 export function workflowRunContext(cwd: string, sessionId: string, runId: string, workflow: WorkflowMetadata, args: JsonValue, signal: AbortSignal): Readonly<WorkflowRunContext> {
   return Object.freeze({ cwd, sessionId, runId, workflow: deepFreeze(structuredClone(workflow)), args: deepFreeze(structuredClone(args)), signal });
 }
 
-async function hostParallel(rawOperation: unknown, rawTasks: unknown): Promise<JsonValue> {
+async function hostParallel<Tasks extends ParallelTasks>(rawOperation: unknown, rawTasks: unknown): Promise<ParallelResult<Tasks>> {
   if (typeof rawOperation !== "string" || !rawOperation.trim()) fail("INVALID_METADATA", "parallel requires a stable explicit name");
   const tasks = namedRecord(rawTasks, "parallel tasks");
   for (const [name, run] of tasks) {
@@ -221,7 +218,7 @@ async function hostParallel(rawOperation: unknown, rawTasks: unknown): Promise<J
   }));
   const failure = results.find((result) => result.error);
   if (failure?.error) throw failure.error;
-  return Object.fromEntries(results.map((result) => [result.name, result.value as JsonValue]));
+  return Object.fromEntries(results.map((result) => [result.name, result.value as JsonValue])) as ParallelResult<Tasks>;
 }
 
 async function hostPipeline(rawOperation: unknown, rawItems: unknown, rawStages: unknown): Promise<JsonValue> {
@@ -301,9 +298,9 @@ export function withWorkflowFunctions(bridge: WorkflowBridge, store: RunStore, r
         return bridge.shell(args[0], options, signal, { structuralPath: [...inherited], callSite: `function:${path}`, occurrence, ...(scopedWorktreeOwner ? { worktreeOwner: scopedWorktreeOwner } : {}) });
       },
       prompt: workflowPrompt,
-      parallel: (...args: readonly unknown[]) => hostParallel(args[0], args[1]),
+      parallel: <Tasks extends ParallelTasks>(operationName: string, tasks: Tasks) => hostParallel<Tasks>(operationName, tasks),
       pipeline: (...args: readonly unknown[]) => hostPipeline(args[0], args[1], args[2]),
-      withWorktree: (...args: readonly unknown[]) => hostWithWorktree(args, bridge.worktree, signal),
+      withWorktree: <Result extends JsonValue>(name: string, callback: WorkflowWorktreeCallback<Result>) => hostWithWorktree(name, callback, bridge.worktree, signal),
       checkpoint: async (...args: readonly unknown[]) => {
         if (!bridge.checkpoint || !object(args[0]) || !jsonValue(args[0])) fail("INTERNAL_ERROR", "No checkpoint bridge is available");
         return bridge.checkpoint(args[0], signal);
