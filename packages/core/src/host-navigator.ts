@@ -64,6 +64,8 @@ export type WorkflowNavigatorDependencies = {
   answerCheckpoint: (runId: string, name: string, approved: boolean, silent?: boolean) => Promise<boolean>;
   recovery: ReturnType<typeof createWorkflowRecovery>;
   stopWorkflowRun: (runId: string) => Promise<{ runId: string; state: string; stopped: boolean; reason?: "unknown_run" | "already_terminal" }>;
+  moveForegroundToBackground: (runId?: string) => Promise<{ runId: string; state: "running"; detached: true }>;
+  isForegroundAttached: (runId: string) => boolean;
   withLiveActivities: (run: PersistedRun) => PersistedRun;
   liveAgentSessions: Map<string, import("./types.js").WorkflowAgentSession>;
   liveAgentPrepared: Map<string, Readonly<import("./types.js").PreparedAgentSession>>;
@@ -74,7 +76,7 @@ export type WorkflowNavigatorDependencies = {
 };
 
 export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): void {
-  const { pi, home, clipboard, extensionAgentDir, runs, terminalRunStates, hardTerminalRunStates, ensureSessionLease, answerCheckpoint, recovery, stopWorkflowRun, withLiveActivities, liveAgentSessions, liveAgentPrepared, liveAgentHandoffs, registry, projectTrusted, resumeHostContext } = deps;
+  const { pi, home, clipboard, extensionAgentDir, runs, terminalRunStates, hardTerminalRunStates, ensureSessionLease, answerCheckpoint, recovery, stopWorkflowRun, moveForegroundToBackground, isForegroundAttached, withLiveActivities, liveAgentSessions, liveAgentPrepared, liveAgentHandoffs, registry, projectTrusted, resumeHostContext } = deps;
   pi.registerCommand("workflow", {
     description: "Inspect and control workflows for this Pi session",
     handler: async (args, ctx) => {
@@ -94,7 +96,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
         return entries.filter((entry): entry is { store: RunStore; loaded: { run: PersistedRun; snapshot: Readonly<LaunchSnapshot> }; resolvedAt: number | undefined } => entry !== undefined);
       };
       let stores = await loadStores();
-      const usage = "Usage: /workflow [model-aliases], or /workflow pause|resume|stop|approve|reject|delete <run-id> [checkpoint-name]. Approve/reject are for checkpoints only; use workflow_respond with a proposalId or the navigator's budget controls for budget decisions. Use workflow_resume for budget patches."
+      const usage = "Usage: /workflow [model-aliases], or /workflow background [run-id], pause|resume|stop|approve|reject|delete <run-id> [checkpoint-name]. Approve/reject are for checkpoints only; use workflow_respond with a proposalId or the navigator's budget controls for budget decisions. Use workflow_resume for budget patches."
       const setWorkflowStatus = (text: string | undefined) => {
         const setStatus = uiHostCapabilities(ctx.ui)?.setStatus;
         setStatus?.call(ctx.ui, "workflow-stop", text);
@@ -105,6 +107,11 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
           const run = runId ? runs.get(runId) : undefined;
           const storedEntry = runId ? stores.find(({ store }) => store.runId === runId) : undefined;
           const stored = storedEntry ? { store: storedEntry.store, loaded: await storedEntry.store.load() } : undefined;
+          if (action === "background") {
+            const result = await moveForegroundToBackground(runId);
+            ctx.ui.notify(`Moved workflow ${result.runId} to background.`, "info");
+            return keepContext ? "dashboard" : "done";
+          }
           if ((action === "approve" || action === "reject") && runId && rest.length) {
             const accepted = await answerCheckpoint(runId, rest.join(" "), action === "approve", true);
             ctx.ui.notify(accepted ? `${action === "approve" ? "Approved" : "Rejected"} checkpoint ${rest.join(" ")}.` : "Checkpoint is not awaiting a response.", accepted ? "info" : "warning");
@@ -300,6 +307,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
               actions.set(`Approve budget ${id}`, `budget-approve ${store.runId} ${decision.proposalId}`);
               actions.set(`Reject budget ${id}`, `budget-reject ${store.runId} ${decision.proposalId}`);
             }
+            if (isForegroundAttached(store.runId)) actions.set("Move to background", `background ${store.runId}`);
             if (!terminalStates.has(liveRun.state)) add("Stop", "stop");
             for (const cp of checkpoints) {
               if (ctx.mode === "tui") {

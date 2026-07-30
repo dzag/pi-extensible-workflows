@@ -682,6 +682,43 @@ void test("registered workflow command controls reject races and cancel queued w
   assert.deepEqual(starts, ["first", startedAfterResume]);
   assert.equal(stopped.run.agents.find((agent) => agent.name === queued)?.state, "cancelled");
 });
+void test("moves an attached foreground workflow to background without restarting it", { timeout: 10_000 }, async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-background-command-"));
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
+  const messages: string[] = [];
+  const starts: string[] = [];
+  let toolResultHandler: ((event: { toolName: string; toolCallId: string; isError: boolean }) => Promise<unknown>) | undefined;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const createSession = async (): Promise<TestPiSession> => ({
+    sessionId: "background-command-session", sessionFile: "/sessions/background-command.jsonl",
+    messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
+    prompt: async () => { starts.push("first"); await gate; }, abort: async () => { release(); }, steer: async () => {}, dispose() {},
+  });
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as typeof toolResultHandler; }, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
+  const workflow = tools.find(({ name }) => name === "workflow");
+  const command = commands[0]?.handler;
+  assert.ok(workflow && command);
+  const context = { cwd: home, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
+  const controller = new AbortController();
+  const execution = workflow.execute("foreground-call", { name: "background-command", script: `return await agent("first", {label:"first"});`, foreground: true }, controller.signal, undefined, context);
+  await waitForIssue105(() => starts.includes("first"));
+  const runId = (await listRunIds(home, "session", home))[0];
+  assert.ok(runId);
+  const store = new RunStore(home, "session", runId, home);
+  t.after(async () => { release(); await execution.catch(() => {}); });
+  await command("background", context);
+  await toolResultHandler?.({ toolName: "workflow", toolCallId: "foreground-call", isError: false });
+  controller.abort();
+  const detached = await execution as { details: { runId: string; state: string; detached: boolean; preview?: string } };
+  assert.deepEqual({ runId: detached.details.runId, state: detached.details.state, detached: detached.details.detached }, { runId, state: "running", detached: true });
+  assert.match(detached.details.preview ?? "", /Moved workflow .* to background/);
+  assert.deepEqual((await store.load()).run.delivery, { mode: "background", state: "pending" });
+  release();
+  await waitForIssue105(async () => (await store.load()).run.delivery?.state === "delivered");
+  assert.deepEqual(messages.filter((message) => message.startsWith("Workflow background-command completed:")), [messages.find((message) => message.startsWith("Workflow background-command completed:"))]);
+});
 void test("interrupted lifecycle can cold-resume while completed and failed cannot", async () => {
   const interrupted = new RunLifecycle("interrupted");
   await interrupted.resume();

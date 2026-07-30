@@ -1,6 +1,8 @@
 # Changelog
 ## Unreleased
 
+ - Added `/workflow background` to move an attached foreground workflow to background delivery without restarting it ([#182](https://github.com/vekexasia/pi-extensible-workflows/issues/182)).
+
 ## [5.0.0] - 2026-07-29
 
 ### Breaking changes

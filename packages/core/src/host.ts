@@ -110,7 +110,7 @@ export function formatWorkflowPreview(args: { script?: unknown; scriptPath?: unk
 }
 export const WORKFLOW_TOOL_LABEL = "Workflow";
 export const WORKFLOW_TOOL_DESCRIPTION = "Run a deterministic JavaScript workflow with a named inline or file-backed parallel-to-summary path by default"
-export const WORKFLOW_TOOL_PROMPT_SNIPPET = "Run a deterministic, resumable JavaScript workflow. Prefer a named inline script that fans out independent work with parallel(...), awaits the keyed results before interpolating them into one summarizing agent(...), and returns. Provide exactly one of script or scriptPath and a non-empty name. Registered catalog functions are available as globals inside the script; call them there, for example return await someFunction(args). Advanced controls include registered functions, outputSchema, budgets, checkpoints, worktrees, retry/resume, CLI export, and pipelines. Use workflow_retry with an explicit failed run ID; parentRunId only reuses named worktrees. Runs are in the background by default; completion arrives as a follow-up message. Set foreground: true when the caller must wait for the final value. If a foreground call detaches before its result is accepted, its terminal success or failure is promoted to one follow-up message. Foreground results include the completed run ID. Recovery inherits the source launch mode; legacy snapshots without launchMode recover in the background. Set foreground: true or false on workflow_resume/workflow_retry to override it; foreground recovery waits for terminal value and run details, while background recovery returns immediately and delivers completion or failure as a follow-up. After failure follow-ups, especially CANCELLED or interrupted runs, call workflow_status({ runId }) before recovery or replacement work, then pass its state as expectedState to workflow_retry/workflow_resume so recovery cannot act on a state that changed. Recovery map: agent(..., { retries }) reruns one agent call in the same run for transient failures; workflow_retry({ runId, expectedState?, foreground? }) replays a failed run into a child; workflow_resume({ runId, expectedState?, budget?, foreground? }) continues a budget_exhausted run; parentRunId on a new launch only borrows named worktrees and never replays or resumes."
+export const WORKFLOW_TOOL_PROMPT_SNIPPET = "Run a deterministic, resumable JavaScript workflow. Prefer a named inline script that fans out independent work with parallel(...), awaits the keyed results before interpolating them into one summarizing agent(...), and returns. Provide exactly one of script or scriptPath and a non-empty name. Registered catalog functions are available as globals inside the script; call them there, for example return await someFunction(args). Advanced controls include registered functions, outputSchema, budgets, checkpoints, worktrees, retry/resume, CLI export, and pipelines. Use workflow_retry with an explicit failed run ID; parentRunId only reuses named worktrees. Runs are in the background by default; completion arrives as a follow-up message. Set foreground: true when the caller must wait for the final value. Use /workflow background to detach the sole attached foreground run, or provide its run ID when multiple runs are attached. If a foreground call detaches before its result is accepted, its terminal success or failure is promoted to one follow-up message. Foreground results include the completed run ID. Recovery inherits the source launch mode; legacy snapshots without launchMode recover in the background. Set foreground: true or false on workflow_resume/workflow_retry to override it; foreground recovery waits for terminal value and run details, while background recovery returns immediately and delivers completion or failure as a follow-up. After failure follow-ups, especially CANCELLED or interrupted runs, call workflow_status({ runId }) before recovery or replacement work, then pass its state as expectedState to workflow_retry/workflow_resume so recovery cannot act on a state that changed. Recovery map: agent(..., { retries }) reruns one agent call in the same run for transient failures; workflow_retry({ runId, expectedState?, foreground? }) replays a failed run into a child; workflow_resume({ runId, expectedState?, budget?, foreground? }) continues a budget_exhausted run; parentRunId on a new launch only borrows named worktrees and never replays or resumes.";
 export const WORKFLOW_TOOL_PARAMETERS = Type.Object({
   name: Type.String({ description: "Required non-empty workflow name" }),
   description: Type.Optional(Type.String({ description: "Optional human-readable workflow description" })),
@@ -260,8 +260,10 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       }
     });
   };
+  type ForegroundDetachResult = { runId: string; state: "running"; detached: true };
+  type ForegroundDelivery = { store: RunStore; inline: boolean; detached: boolean; detach: () => Promise<ForegroundDetachResult>; timer?: ReturnType<typeof setTimeout> };
   const pendingFailureDiagnostics = new Map<string, WorkflowFailureDiagnostics>();
-  const foregroundDeliveries = new Map<string, { store: RunStore; inline: boolean; timer?: ReturnType<typeof setTimeout> }>();
+  const foregroundDeliveries = new Map<string, ForegroundDelivery>();
   const terminalDeliveryQueues = new WeakMap<RunStore, Promise<void>>();
   const liveActivities = new Map<string, Map<string, AgentActivity>>();
   const liveEventTimes = new Map<string, Map<string, number>>();
@@ -322,7 +324,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
   };
   pi.on("tool_result", async (event) => {
     const delivery = event.toolName === "workflow" ? foregroundDeliveries.get(event.toolCallId) : undefined;
-    if (delivery) {
+    if (delivery && !delivery.detached) {
       if (delivery.timer) clearTimeout(delivery.timer);
       delivery.inline = true;
       await delivery.store.updateState((current) => {
@@ -367,6 +369,14 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       void send().finally(() => foregroundDeliveries.delete(toolCallId));
     }, 0);
   };
+  const foregroundDeliveryCandidates = (runId?: string): Array<[string, ForegroundDelivery]> => [...foregroundDeliveries.entries()].filter(([, delivery]) => runs.has(delivery.store.runId) && !delivery.inline && !delivery.detached && (runId === undefined || delivery.store.runId === runId));
+  const moveForegroundToBackground = async (runId?: string): Promise<ForegroundDetachResult> => {
+    const candidates = foregroundDeliveryCandidates(runId);
+    if (!candidates.length) throw new WorkflowError("RUN_NOT_FOUND", runId ? `No attached foreground workflow ${runId}` : "No attached foreground workflow is running");
+    if (runId === undefined && candidates.length > 1) throw new WorkflowError("RESUME_INCOMPATIBLE", "Multiple foreground workflows are attached; specify a run ID");
+    return candidates[0]?.[1].detach() ?? fail("RUN_NOT_FOUND", "No attached foreground workflow is running");
+  };
+  const isForegroundAttached = (runId: string): boolean => foregroundDeliveryCandidates(runId).length > 0;
   const phaseBridge = (store: RunStore, metadata: WorkflowMetadata, lifecycle: RunLifecycle) => {
     let cursor = 0;
     return async (phase: string): Promise<void> => {
@@ -908,7 +918,10 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const launchCwd = typeof ctx.cwd === "string" ? ctx.cwd : process.cwd();
       const launch = workflowLaunchSettings(launchCwd, trustedProject, settingsPath, params.concurrency);
       const runController = new AbortController();
-      if (signal?.aborted) runController.abort(); else signal?.addEventListener("abort", () => { runController.abort(); }, { once: true });
+      const onForegroundAbort = () => { runController.abort(); };
+      if (signal?.aborted) runController.abort(); else signal?.addEventListener("abort", onForegroundAbort, { once: true });
+      let resolveDetached!: (result: ForegroundDetachResult) => void;
+      const detachedResult = params.foreground ? new Promise<ForegroundDetachResult>((resolve) => { resolveDetached = resolve; }) : undefined;
       const resolvedAliases = await resolveLaunchAliases(registry, launch.settings.modelAliases ?? {}, { cwd: launchCwd, projectTrusted: trustedProject, rootModel, knownModels, availableModels, signal: runController.signal }, availableModels, knownModels, settingsPath);
       const modelAliases = resolvedAliases.aliases;
       const settings = Object.freeze({ ...launch.settings, ...(Object.keys(modelAliases).length ? { modelAliases } : {}) });
@@ -943,7 +956,26 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const budgetRuntime = new WorkflowBudgetRuntime(budget);
       const initialBudget = budgetRuntime.snapshot();
       await store.create({ id: runId, workflowName: checked.metadata.name, cwd: ctx.cwd, sessionId: ctx.sessionManager.getSessionId(), state: "running", ...(parentRunId !== undefined ? { parentRunId } : {}), agents: [], agentSessions: [], delivery: params.foreground ? { mode: "foreground", state: "attached", toolCallId } : { mode: "background", state: "pending" }, ...(budget ? { budget } : {}), budgetVersion: 1, ...initialBudget }, snapshot);
-      if (params.foreground) foregroundDeliveries.set(toolCallId, { store, inline: false });
+      if (params.foreground) {
+        const delivery: ForegroundDelivery = {
+          store, inline: false, detached: false,
+          detach: async () => {
+            let moved: boolean | undefined;
+            await store.updateState((current) => {
+              if (current.state !== "running" || current.delivery?.mode !== "foreground" || current.delivery.state !== "attached") return current;
+              moved = true;
+              return { ...current, delivery: { mode: "background", state: "pending" } };
+            });
+            if (moved !== true) throw new WorkflowError("RESUME_INCOMPATIBLE", `Workflow ${runId} is no longer an attached foreground run`);
+            delivery.detached = true;
+            signal?.removeEventListener("abort", onForegroundAbort);
+            if (delivery.timer) clearTimeout(delivery.timer);
+            resolveDetached({ runId, state: "running", detached: true });
+            return { runId, state: "running", detached: true };
+          },
+        };
+        foregroundDeliveries.set(toolCallId, delivery);
+      }
       const lifecycle = lifecycleFor(store, "running", budgetRuntime, checked.metadata);
       const background = !params.foreground;
       const providerPause = async () => { if (background) deliver(pi, `Workflow ${checked.metadata.name} paused: provider limit.`); await lifecycle.providerPause(); };
@@ -983,13 +1015,19 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const queueForegroundDelivery = async (content: string, failure = false): Promise<void> => {
         const delivery = foregroundDeliveries.get(toolCallId);
         if (!delivery) return;
+        if (delivery.detached) {
+          pendingFailureDiagnostics.delete(toolCallId);
+          await deliverTerminal(store, content, failure);
+          foregroundDeliveries.delete(toolCallId);
+          return;
+        }
         await store.updateState((current) => {
           if (!current.delivery || current.delivery.state === "delivered") return current;
           return { ...current, delivery: { ...current.delivery, mode: "background", state: "pending" } };
         });
         if (delivery.inline) return;
         scheduleForegroundDelivery(toolCallId, async () => {
-          if (delivery.inline) return;
+          if (delivery.inline || delivery.detached) return;
           pendingFailureDiagnostics.delete(toolCallId);
           await deliverTerminal(store, content, failure);
         });
@@ -1007,7 +1045,14 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       }, async (error: unknown) => {
         await queueForegroundDelivery(deliverFailureContent(error), true);
       });
-      const { value } = await completion;
+      const outcome = detachedResult === undefined
+        ? { kind: "completed" as const, result: await completion }
+        : await Promise.race([
+          completion.then((result) => ({ kind: "completed" as const, result })),
+          detachedResult.then((result) => ({ kind: "detached" as const, result })),
+        ]);
+      if (outcome.kind === "detached") return { content: [{ type: "text" as const, text: JSON.stringify(outcome.result) }], details: { ...outcome.result, preview: `Moved workflow ${runId} to background.` } };
+      const { value } = outcome.result;
       const run = (await store.load()).run;
       return { content: [{ type: "text" as const, text: JSON.stringify(value) }, { type: "text" as const, text: `Workflow run ID: ${runId}` }], details: { runId, value, run } };
       } catch (error) {
@@ -1064,7 +1109,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       return textBlock(isPartial ? "Workflow starting..." : runDetails?.preview ?? (content?.type === "text" ? content.text : "Workflow finished"));
     },
   });
-  registerWorkflowNavigator({ pi, home, clipboard, extensionAgentDir, runs, terminalRunStates, hardTerminalRunStates: HARD_TERMINAL_RUN_STATES, ensureSessionLease, answerCheckpoint, recovery, stopWorkflowRun, withLiveActivities, liveAgentSessions, liveAgentPrepared, liveAgentHandoffs, registry, projectTrusted, resumeHostContext });
+  registerWorkflowNavigator({ pi, home, clipboard, extensionAgentDir, runs, terminalRunStates, hardTerminalRunStates: HARD_TERMINAL_RUN_STATES, ensureSessionLease, answerCheckpoint, recovery, stopWorkflowRun, moveForegroundToBackground, isForegroundAttached, withLiveActivities, liveAgentSessions, liveAgentPrepared, liveAgentHandoffs, registry, projectTrusted, resumeHostContext });
   pi.on("session_shutdown", async () => {
     try {
       await Promise.all([...runs.entries()].map(async ([runId, run]) => {
