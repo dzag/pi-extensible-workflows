@@ -31,6 +31,10 @@ const typeCheckAgentContext = (context: WorkflowOrchestrationContext): void => {
   void context.agent();
   // @ts-expect-error agent prompt must be a string
   void context.agent(42);
+  // @ts-expect-error core agent options must use their declared types
+  void context.agent("prompt", { model: 42 });
+  // @ts-expect-error extension agent options must be JSON-compatible
+  void context.agent("prompt", { advisor: () => true });
 };
 void typeCheckAgentContext;
 const typeCheckAgentSetupHook: WorkflowExtension = {

@@ -52,7 +52,7 @@ void test("preflight rejects every static boundary before run creation", () => {
 
 void test("host rejects malformed dynamic agent options before launching", async () => {
   let launched = false;
-  for (const options of ["{label:' '}", "{tools:1}", "{timeoutMs:0}", "{retries:-1}", "{role:'reviewer',model:'openai/gpt'}", "{role:'reviewer',thinking:'low'}", "{role:'reviewer',tools:[]}"]) {
+  for (const options of ["null", "{label:' '}", "{tools:1}", "{timeoutMs:0}", "{retries:-1}", "{role:'reviewer',model:'openai/gpt'}", "{role:'reviewer',thinking:'low'}", "{role:'reviewer',tools:[]}"]) {
     await assert.rejects(runWorkflow(`return agent('a',${options});`, null, { agent: async () => { launched = true; return null; } }).result, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   }
   assert.equal(launched, false);

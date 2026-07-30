@@ -279,9 +279,9 @@ export function withWorkflowFunctions(bridge: WorkflowBridge, store: RunStore, r
         const nestedPath = operationPath("function", "nested", path, ...inherited, targetName, `occurrence:${String(occurrence)}`);
         return invokeFunction(targetName, targetInput, nestedPath, signal, scopedWorktreeOwner, inherited, `${functionBreadcrumb} > ${targetName}`);
       },
-      agent: async (prompt: string, options: Readonly<AgentOptions> = {}) => {
+      agent: async (prompt: string, options?: Readonly<AgentOptions>) => {
         if (!bridge.agent || typeof prompt !== "string") fail("AGENT_FAILED", "No agent bridge is available");
-        const validatedOptions = validateAgentOptions(options);
+        const validatedOptions = validateAgentOptions(options === undefined ? {} : options);
         const scopedWorktreeOwner = inheritedHostWorktreeOwner.getStore() ?? worktreeOwner;
         const inherited = inheritedHostAgentPath.getStore() ?? [];
         const key = `${path}\0${JSON.stringify(inherited)}`;
