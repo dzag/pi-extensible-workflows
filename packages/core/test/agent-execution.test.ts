@@ -6,10 +6,16 @@ import test from "node:test";
 import { Type } from "@earendil-works/pi-ai";
 import { createLocalPiSession, FairAgentScheduler, localAgentTransport, WorkflowAgentExecutor, type AgentExecutionRoot, type AgentProgress, type SessionInput } from "../src/agent-execution.js";
 import { AgentSession, type AgentSessionEvent } from "@earendil-works/pi-coding-agent";
-import { WorkflowError } from "../src/index.js";
+import { WorkflowError, type AgentExecutionResult, type AgentToolCallProgress } from "../src/index.js";
 import type { AgentResourcePolicy } from "../src/types.js";
 import type { RunStore } from "../src/persistence.js";
 import { testTransport } from "./test-transport.js";
+void test("public agent execution result types remain exported", () => {
+  const result: AgentExecutionResult = { value: null, attempts: [], cwd: "/repo" };
+  const progress: AgentToolCallProgress = { id: "tool", name: "read", state: "completed" };
+  assert.equal(result.cwd, "/repo");
+  assert.equal(progress.state, "completed");
+});
 
 const root: AgentExecutionRoot = { cwd: "/repo", model: { provider: "openai", model: "gpt", thinking: "medium" }, availableModels: new Set(["openai/gpt", "anthropic/opus", "google/gemini"]), tools: new Set(["read", "grep", "find", "bash"]), agentDefinitions: { reviewer: { prompt: "Review carefully", model: "anthropic/opus", thinking: "high", tools: ["read"] }, scout: { prompt: "Inspect broadly", model: "google/gemini", thinking: "low", tools: ["read", "grep"] } } };
 const usage = { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, cost: { total: 0.25 } };

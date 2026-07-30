@@ -247,9 +247,6 @@ function matchResourcePolicy(policy: AgentResourcePolicy, pi: DoctorPiState): Ag
   const skills = [...new Set(pi.skills ?? [])];
   return { ...policy, excludedSkills: disabledResources(policy.effective.skills, skills), excludedExtensions: disabledResources(policy.effective.extensions, extensions), unmatchedSkills: unmatchedResourcePatterns(policy.effective.skills, skills), unmatchedExtensions: unmatchedResourcePatterns(policy.effective.extensions, extensions) };
 }
-function roleModel(value: string, aliases: Readonly<Record<string, string>>, known: ReadonlySet<string>, settingsPath: string): { provider: string; model: string; thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" } {
-  return resolveModelReference(value, aliases, known, settingsPath);
-}
 async function inspectRoleSession(cwd: string, agentDir: string, roleName: string, definition: AgentDefinition, rolePath: string, basePolicy: AgentResourcePolicy, rootModel: { provider: string; model: string; thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" }, activeTools: readonly string[], aliases: Readonly<Record<string, string>>, knownModels: ReadonlySet<string>, availableModels: ReadonlySet<string>, settingsPath: string, prompt: string, hooks: NonNullable<AgentExecutionRoot["agentSetupHooks"]>, diagnostics: DoctorDiagnostic[]): Promise<DoctorRoleInspection | undefined> {
   const setupDiagnostics: DoctorDiagnostic[] = [];
   const signal = new AbortController().signal;
@@ -398,9 +395,9 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
       const rootReference = pi.model ? `${pi.model.provider}/${pi.model.model}` : pi.availableModels[0] ?? pi.knownModels[0];
       if (!rootReference) diagnostics.push(diagnostic("error", "ROLE_INSPECTION_MODEL", "Cannot inspect a role because Pi has no registered model"));
       else {
-        let rootModel: ReturnType<typeof roleModel>;
+        let rootModel: ReturnType<typeof resolveModelReference>;
         try {
-          if (pi.model) { const thinking = parseThinking(pi.model.thinking); rootModel = { provider: pi.model.provider, model: pi.model.model, ...(thinking ? { thinking } : {}) }; } else rootModel = roleModel(rootReference, aliases, knownModels, settingsPath);
+          if (pi.model) { const thinking = parseThinking(pi.model.thinking); rootModel = { provider: pi.model.provider, model: pi.model.model, ...(thinking ? { thinking } : {}) }; } else rootModel = resolveModelReference(rootReference, aliases, knownModels, settingsPath);
           let roleAliases = aliases;
           if (definition.model && isDynamicModelAlias(definition.model, dynamicAliases)) {
             const dynamic = await registry.resolveModelAliases({ cwd, projectTrusted: pi.trust.trusted, rootModel, knownModels, availableModels, signal: new AbortController().signal });

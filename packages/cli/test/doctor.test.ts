@@ -345,6 +345,7 @@ void test("doctor parser accepts role and prompt probes", () => {
   assert.deepEqual(parseDoctorArgs(["--role", "reviewer", "--prompt=check this"]), { role: "reviewer", prompt: "check this" });
   assert.deepEqual(parseDoctorArgs(["reviewer"]), { role: "reviewer" });
   assert.throws(() => parseDoctorArgs(["--role", "reviewer", "other"]), /Unexpected argument/);
+  assert.throws(() => parseDoctorArgs(["--prompt", "check this"]), /--prompt requires --role/);
 });
 void test("CLI workflow arguments cover schema types, defaults, enums, and missing values", () => {
   const schema = { type: "object", properties: { issue: { type: "integer", description: "Issue number" }, label: { type: "string" }, ratio: { type: "number" }, mode: { type: "string", enum: ["fast", "safe"] }, verbose: { type: "boolean", default: false }, format: { type: "string", default: "plain" }, tags: { type: "array", items: { type: "string", enum: ["one", "two"] } }, scores: { type: "array", items: { type: "number" } } }, required: ["issue"], additionalProperties: false };

@@ -196,6 +196,7 @@ export function parseDoctorArgs(rawArgs: readonly string[]): { role?: string; pr
     if (role !== undefined) throw new Error(`Unexpected argument: ${token}`);
     role = token;
   }
+  if (prompt !== undefined && role === undefined) throw new Error("--prompt requires --role");
   return { ...(role === undefined ? {} : { role }), ...(prompt === undefined ? {} : { prompt }) };
 }
 
