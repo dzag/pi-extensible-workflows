@@ -708,6 +708,11 @@ void test("moves an attached foreground workflow to background without restartin
   assert.ok(runId);
   const store = new RunStore(home, "session", runId, home);
   t.after(async () => { release(); await execution.catch(() => {}); });
+  const noUiNotices: string[] = [];
+  const noUiContext = { ...context, hasUI: false, ui: { ...context.ui, notify(message: string) { noUiNotices.push(message); } } };
+  await command("background", noUiContext);
+  assert.deepEqual((await store.load()).run.delivery, { mode: "foreground", state: "attached", toolCallId: "foreground-call" });
+  assert.ok(noUiNotices.includes("Interactive workflow background selection is unavailable; provide a run ID."));
   await command("background", context);
   await toolResultHandler?.({ toolName: "workflow", toolCallId: "foreground-call", isError: false });
   controller.abort();

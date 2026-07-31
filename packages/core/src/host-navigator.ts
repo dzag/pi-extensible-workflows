@@ -65,7 +65,7 @@ export type WorkflowNavigatorDependencies = {
   answerCheckpoint: (runId: string, name: string, approved: boolean, silent?: boolean) => Promise<boolean>;
   recovery: ReturnType<typeof createWorkflowRecovery>;
   stopWorkflowRun: (runId: string) => Promise<{ runId: string; state: string; stopped: boolean; reason?: "unknown_run" | "already_terminal" }>;
-  moveForegroundToBackground: (runId?: string) => Promise<{ runId: string; state: "running"; detached: true }>;
+  moveForegroundToBackground: (runId: string) => Promise<{ runId: string; state: "running"; detached: true }>;
   isForegroundAttached: (runId: string) => boolean;
   withLiveActivities: (run: PersistedRun) => PersistedRun;
   liveAgentSessions: Map<string, import("./types.js").WorkflowAgentSession>;
@@ -108,7 +108,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
           const run = runId ? runs.get(runId) : undefined;
           const storedEntry = runId ? stores.find(({ store }) => store.runId === runId) : undefined;
           const stored = storedEntry ? { store: storedEntry.store, loaded: await storedEntry.store.load() } : undefined;
-          if (action === "background") {
+          if (action === "background" && runId) {
             const result = await moveForegroundToBackground(runId);
             ctx.ui.notify(`Moved workflow ${result.runId} to background.`, "info");
             return keepContext ? "dashboard" : "done";
@@ -263,7 +263,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
       const parameterlessAction = ["pause", "stop", "delete", "background"].includes(command) ? command as "pause" | "stop" | "delete" | "background" : undefined;
       if (parameterlessAction) {
         const runId = await selectParameterlessActionRun(parameterlessAction);
-        if (runId) await runAction(`${parameterlessAction} ${runId}`, true);
+        if (runId) await runAction(`${parameterlessAction} ${runId}`, true, () => undefined);
         return;
       }
       if (command.split(/\s+/)[0] === "resume" && command !== "resume") { await runAction(command, false); return; }

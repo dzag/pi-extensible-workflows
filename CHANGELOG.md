@@ -4,6 +4,7 @@
 ### New capabilities
 
 - Made `/workflow` run and agent actions discoverable through Enter while retaining the `a`/`A` shortcuts ([#185](https://github.com/vekexasia/pi-extensible-workflows/issues/185)).
+- Added state-filtered pickers for parameterless `/workflow pause`, `stop`, `delete`, and `background` ([#186](https://github.com/vekexasia/pi-extensible-workflows/issues/186)).
 
 ## [5.1.0] - 2026-07-31
 

@@ -339,3 +339,132 @@ void test("foreground resume shows failure diagnostics in the command interactio
   assert.ok(testSetup.notices.some((message) => message.includes("failure-run") && message.includes("error=INTERNAL_ERROR") && message.includes("artifacts:")));
   await testSetup.shutdown?.();
 });
+
+void test("parameterless stop does not leave a status after returning to chat", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-stop-picker-status-"));
+  const cwd = join(home, "project");
+  const store = await createRun(home, cwd, "status-run", "interrupted");
+  const testSetup = setup(home, cwd, (prompt, options) => prompt === "Stoppable workflows" ? options.find((option) => option.includes("status-run")) : undefined);
+  await startSetup(testSetup);
+  const statuses: Array<string | undefined> = [];
+  const context = { ...testSetup.context, ui: { ...testSetup.context.ui, setStatus(_key: string, text: string | undefined) { statuses.push(text); }, confirm: async () => true } };
+  await testSetup.command("stop", context);
+  assert.equal((await store.load()).run.state, "stopped");
+  assert.deepEqual(statuses, []);
+  assert.deepEqual(testSetup.notices, ["Stopped workflow status-run."]);
+  await testSetup.shutdown?.();
+});
+
+void test("parameterless pause filters multiple live runs", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-pause-picker-filter-"));
+  const cwd = join(home, "project");
+  let promptCount = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const transport = testTransport(async (): Promise<TestPiSession> => ({
+    sessionId: `pause-picker-${String(promptCount)}`,
+    sessionFile: "/sessions/pause-picker.jsonl",
+    messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+    getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
+    prompt: async () => { promptCount += 1; await gate; },
+    dispose() {},
+  }));
+  await createRun(home, cwd, "pause-completed", "completed");
+  await createRun(home, cwd, "pause-paused", "paused");
+  const testSetup = setup(home, cwd, (prompt) => prompt === "Pausable workflows" ? "Cancel" : undefined, undefined, transport);
+  await startSetup(testSetup);
+  const workflow = testSetup.tools.find(({ name }) => name === "workflow");
+  assert.ok(workflow);
+  const first = await workflow.execute("pause-picker-one", { name: "pause-one", script: `return await agent("one");` }, new AbortController().signal, undefined, testSetup.context) as { details: { runId: string } };
+  const second = await workflow.execute("pause-picker-two", { name: "pause-two", script: `return await agent("two");` }, new AbortController().signal, undefined, testSetup.context) as { details: { runId: string } };
+  for (let attempt = 0; attempt < 100 && promptCount < 2; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+  await testSetup.command("pause", testSetup.context);
+  const picker = testSetup.selections.find(({ prompt }) => prompt === "Pausable workflows");
+  assert.ok(picker);
+  assert.equal(picker.options.filter((option) => option.includes("pause-one") || option.includes("pause-two")).length, 2);
+  assert.equal(picker.options.some((option) => option.includes("pause-completed") || option.includes("pause-paused")), false);
+  release();
+  for (const runId of [first.details.runId, second.details.runId]) {
+    const store = new RunStore(cwd, "session", runId, home);
+    for (let attempt = 0; attempt < 100 && (await store.load()).run.state === "running"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal((await store.load()).run.state, "completed");
+  }
+  await testSetup.shutdown?.();
+});
+
+void test("parameterless background lists only attached foreground runs", { timeout: 10_000 }, async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-background-picker-filter-"));
+  const cwd = join(home, "project");
+  let started = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const transport = testTransport(async (): Promise<TestPiSession> => ({
+    sessionId: `background-picker-${String(started)}`,
+    sessionFile: "/sessions/background-picker.jsonl",
+    messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+    getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
+    prompt: async () => { started += 1; await gate; },
+    dispose() {},
+  }));
+  const testSetup = setup(home, cwd, (prompt) => prompt === "Attached foreground workflows" ? "Cancel" : undefined, undefined, transport);
+  await startSetup(testSetup);
+  const workflow = testSetup.tools.find(({ name }) => name === "workflow");
+  assert.ok(workflow);
+  const first = workflow.execute("background-picker-one", { name: "attached-one", script: `return await agent("one");`, foreground: true }, new AbortController().signal, undefined, testSetup.context);
+  const second = workflow.execute("background-picker-two", { name: "attached-two", script: `return await agent("two");`, foreground: true }, new AbortController().signal, undefined, testSetup.context);
+  t.after(async () => { release(); await Promise.allSettled([first, second]); await testSetup.shutdown?.(); });
+  for (let attempt = 0; attempt < 100 && started < 2; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+  await createRun(home, cwd, "unattached-run", "completed");
+  await testSetup.command("background", testSetup.context);
+  const picker = testSetup.selections.find(({ prompt }) => prompt === "Attached foreground workflows");
+  assert.ok(picker);
+  assert.equal(picker.options.filter((option) => option.includes("attached-one") || option.includes("attached-two")).length, 2);
+  assert.equal(picker.options.some((option) => option.includes("unattached-run")), false);
+  release();
+});
+
+void test("parameterless action pickers filter ineligible runs and show multiple candidates", async () => {
+  const cases = [
+    { action: "stop", prompt: "Stoppable workflows", eligible: "interrupted" as RunState, excluded: ["completed", "failed"] },
+    { action: "delete", prompt: "Deletable workflows", eligible: "completed" as RunState, excluded: ["running", "interrupted"] },
+  ] as const;
+  for (const candidate of cases) {
+    const home = mkdtempSync(join(tmpdir(), `pi-extensible-workflows-${candidate.action}-picker-filter-`));
+    const cwd = join(home, "project");
+    await createRun(home, cwd, `${candidate.action}-one`, candidate.eligible);
+    await createRun(home, cwd, `${candidate.action}-two`, candidate.eligible);
+    for (const state of candidate.excluded) await createRun(home, cwd, `${candidate.action}-${state}`, state);
+    const testSetup = setup(home, cwd, (prompt) => prompt === candidate.prompt ? "Cancel" : undefined);
+    await startSetup(testSetup);
+    const context = candidate.action === "delete" ? { ...testSetup.context, ui: { ...testSetup.context.ui, confirm: async () => true } } : testSetup.context;
+    await testSetup.command(candidate.action, context);
+    const picker = testSetup.selections.find(({ prompt }) => prompt === candidate.prompt);
+    assert.ok(picker);
+    assert.equal(picker.options.filter((option) => option.includes(`${candidate.action}-one`) || option.includes(`${candidate.action}-two`)).length, 2);
+    for (const state of candidate.excluded) assert.equal(picker.options.some((option) => option.includes(`${candidate.action}-${state}`)), false);
+    await testSetup.shutdown?.();
+  }
+});
+
+void test("parameterless action pickers report empty sets and no-UI selection consistently", async () => {
+  const actions = [
+    ["pause", "pausable"],
+    ["stop", "stoppable"],
+    ["delete", "deletable"],
+    ["background", "attached foreground"],
+  ] as const;
+  for (const [action, description] of actions) {
+    for (const hasUI of [true, false]) {
+      const home = mkdtempSync(join(tmpdir(), `pi-extensible-workflows-${action}-${hasUI ? "empty" : "no-ui"}-`));
+      const cwd = join(home, "project");
+      const candidateState = action === "pause" ? "running" : action === "stop" ? "interrupted" : action === "delete" ? "completed" : "completed";
+      const candidate = hasUI ? undefined : await createRun(home, cwd, `${action}-candidate`, candidateState);
+      const testSetup = setup(home, cwd, () => undefined, undefined, undefined, hasUI);
+      await testSetup.command(action, testSetup.context);
+      assert.deepEqual(testSetup.selections, []);
+      assert.ok(testSetup.notices.includes(hasUI ? `No ${description} workflow runs in this Pi session.` : `Interactive workflow ${action} selection is unavailable; provide a run ID.`));
+      if (candidate) assert.equal((await candidate.load()).run.state, candidateState);
+      await testSetup.shutdown?.();
+    }
+  }
+});
