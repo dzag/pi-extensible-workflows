@@ -160,7 +160,7 @@ void test("doctor reports role errors, warnings, overrides, and extension failur
   assert.equal(global.overriddenBy, join(paths.cwd, ".pi", "pi-extensible-workflows", "roles", "override.md"));
   assert.equal(global.active, false);
   assert.equal(doctorExitCode(report), 1);
-  assert.match(formatDoctorReport(report), /Fix: Use a tool listed under Active tools/);
+  assert.match(formatDoctorReport(report), /Fix: Use a tool listed under Pi active tools/);
 });
 
 void test("doctor rejects invalid role descriptions", async () => {
@@ -258,7 +258,26 @@ void test("role-targeted doctor inspects effective resources and prepares hooks 
   assert.match(inspection.systemPrompt.text, /Review role/);
   assert.equal(report.diagnostics.some(({ code, severity }) => code === "ROLE_INSPECTION" && severity === "error"), false);
   assert.equal(doctorExitCode(report), 0);
-  assert.match(formatDoctorReport(report), /## Role inspection/);
+  const formatted = formatDoctorReport(report);
+  assert.match(formatted, /## Role inspection/);
+  for (const heading of ["## Environment", "## Trust/resources", "## Agent resource exclusions", "## Active tools", "## Roles", "## Model aliases", "## Reusable functions"]) assert.doesNotMatch(formatted, new RegExp(heading));
+  assert.match(formatted, /Role: `reviewer`/);
+  assert.match(formatted, /- Tools:\n[ ]{2}- `grep`/);
+  assert.match(formatted, /- Effective skills:\n(?:[ ]{2}- .+\n)+/);
+  assert.match(formatted, /- Effective extensions:\n(?:[ ]{2}- .+\n)+/);
+  assert.match(formatted, /- Applied setup hooks:\n[ ]{2}- `adjust`/);
+  assert.match(formatted, /Final system prompt[\s\S]*HOOK:/);
+});
+void test("role-targeted doctor preserves role-not-found diagnostics in focused output", async () => {
+  const paths = fixture();
+  const report = await withHome(paths.root, () => doctor({ ...paths, role: "missing", discoverPi: async () => pi() }));
+  const formatted = formatDoctorReport(report);
+  assert.equal(report.roleInspection, undefined);
+  assert.match(formatted, /## Role inspection/);
+  assert.match(formatted, /Role: `missing`/);
+  assert.match(formatted, /ROLE_NOT_FOUND/);
+  assert.match(formatted, /1 error\(s\), 0 warning\(s\)/);
+  for (const heading of ["## Environment", "## Trust/resources", "## Active tools", "## Roles", "## Model aliases", "## Reusable functions"]) assert.doesNotMatch(formatted, new RegExp(heading));
 });
 
 void test("doctor respects untrusted projects and does not mutate fixtures", async () => {
@@ -288,7 +307,14 @@ void test("doctor reports effective resource exclusions and unmatched selectors"
   assert.deepEqual(report.resourcePolicy.unmatchedSkills, []);
   assert.deepEqual(report.resourcePolicy.unmatchedExtensions, []);
   assert.equal(report.diagnostics.filter(({ code }) => code === "AGENT_RESOURCE_UNMATCHED").length, 0);
-  assert.match(formatDoctorReport(report), /Effective skills: project-skill/);
+  const formatted = formatDoctorReport(report);
+  assert.match(formatted, /Effective skills: project-skill/);
+  assert.match(formatted, /## Pi active extensions/);
+  assert.match(formatted, /## Pi active skills/);
+  assert.match(formatted, /Exposed skills:\n[ ]{2}- `global-skill`/);
+  assert.match(formatted, /Disabled skills:\n[ ]{2}- `project-skill`/);
+  assert.match(formatted, /Exposed extensions:[\s\S]*- `[^`]+interactive\.ts`/);
+  assert.match(formatted, /Disabled extensions:\n[ ]{2}- `[^`]+project\.ts`/);
 });
 void test("doctor attributes unmatched replacement selectors to the project settings field", async () => {
   const paths = fixture();
@@ -312,7 +338,8 @@ void test("doctor reports matched glob exclusions and unmatched exceptions", asy
   assert.deepEqual(report.resourcePolicy.excludedExtensions, [globalExtension]);
   assert.deepEqual(report.resourcePolicy.unmatchedSkills, ["!missing-*"]);
   assert.deepEqual(report.resourcePolicy.unmatchedExtensions, [`!${join(paths.root, "missing.ts")}`]);
-  assert.match(formatDoctorReport(report), /Excluded skills: other-skill/);
+  assert.match(formatDoctorReport(report), /Disabled skills:\n[ ]{2}- `other-skill`/);
+  assert.match(formatDoctorReport(report), /Exposed skills:\n[ ]{2}- `my-project-skill`/);
 });
 void test("doctor excludes workflow_catalog from active capabilities and output", async () => {
   const paths = fixture();
@@ -327,7 +354,8 @@ void test("package bin and CLI expose doctor and inspector commands", async () =
   let output = "";
   const exit = await withHome(paths.root, () => runCli(["doctor"], { ...paths, discoverPi: async () => pi({ knownModels: [], availableModels: [] }) }, (text) => { output += text; }));
   assert.equal(exit, 0);
-  for (const heading of ["## Environment", "## Trust/resources", "## Active tools", "## Roles", "## Reusable functions", "## Diagnostics", "## Summary"]) assert.match(output, new RegExp(heading));
+  for (const heading of ["## Environment", "## Trust/resources", "## Pi active tools", "## Pi active extensions", "## Pi active skills", "## Workflow agent resources", "## Roles", "## Reusable functions", "## Diagnostics", "## Summary"]) assert.match(output, new RegExp(heading));
+  assert.doesNotMatch(output, /## Role inspection/);
   let inspected: string | undefined;
   assert.equal(await runCli(["inspect", "session-a"], { inspect: async (sessionId) => { inspected = sessionId; } }), 0);
   assert.equal(inspected, "session-a");

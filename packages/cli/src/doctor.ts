@@ -74,10 +74,13 @@ export interface DoctorReport {
   settingsSources: WorkflowSettingsSources;
   trust: DoctorTrust;
   activeTools: readonly string[];
+  piExtensions: readonly string[];
+  piSkills: readonly string[];
   roles: readonly DoctorRole[];
   functions: readonly DoctorFunction[];
   resourcePolicy: AgentResourcePolicy;
   modelAliases: readonly WorkflowCatalogModelAlias[];
+  roleTarget?: string;
   roleInspection?: DoctorRoleInspection;
   diagnostics: readonly DoctorDiagnostic[];
 }
@@ -238,7 +241,7 @@ function inspectRole(path: string, activeTools: ReadonlySet<string>, knownModels
   if (Buffer.byteLength(body) > 50 * 1024) diagnostics.push(diagnostic("warning", "ROLE_BODY_LARGE", "Role body exceeds 50KB", path));
   if (/{{\s*[^{}]+\s*}}/.test(body)) diagnostics.push(diagnostic("warning", "ROLE_PLACEHOLDER", "Role body contains an unsupported placeholder-looking token", path));
   if (definition.model) validateModel(definition.model, knownModels, availableModels, path, diagnostics, aliases, dynamicAliases, settingsPath);
-  for (const tool of definition.tools ?? []) if (!activeTools.has(tool)) diagnostics.push(diagnostic("error", "ROLE_TOOL_INACTIVE", `Tool is unknown or inactive: ${tool}`, path, "Use a tool listed under Active tools or enable its Pi extension."));
+  for (const tool of definition.tools ?? []) if (!activeTools.has(tool)) diagnostics.push(diagnostic("error", "ROLE_TOOL_INACTIVE", `Tool is unknown or inactive: ${tool}`, path, "Use a tool listed under Pi active tools or enable its Pi extension."));
   return definition;
 }
 
@@ -418,14 +421,57 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
   const severityOrder: Record<DoctorSeverity, number> = { error: 0, warning: 1 };
   diagnostics.sort((left, right) => severityOrder[left.severity] - severityOrder[right.severity] || (left.source ?? "").localeCompare(right.source ?? "") || left.code.localeCompare(right.code) || left.message.localeCompare(right.message));
   roles.sort((left, right) => left.name.localeCompare(right.name) || left.scope.localeCompare(right.scope));
-  return { cwd, agentDir, settingsPath, settings, settingsSources, trust: pi.trust, activeTools: [...activeTools].sort(), roles, functions, modelAliases, resourcePolicy, ...(roleInspection ? { roleInspection } : {}), diagnostics };
+  return { cwd, agentDir, settingsPath, settings, settingsSources, trust: pi.trust, activeTools: [...activeTools].sort(), piExtensions: [...new Set((pi.extensions ?? []).map(canonical))].sort(), piSkills: [...new Set(pi.skills ?? [])].sort(), roles, functions, modelAliases, resourcePolicy, ...(options.role !== undefined ? { roleTarget: options.role } : {}), ...(roleInspection ? { roleInspection } : {}), diagnostics };
 }
 
 function count(report: DoctorReport, severity: DoctorSeverity): number { return report.diagnostics.filter((item) => item.severity === severity).length; }
-
 export function doctorExitCode(report: DoctorReport): 0 | 1 { return count(report, "error") > 0 ? 1 : 0; }
+function exposedValues(values: readonly string[], excluded: readonly string[]): string[] {
+  const disabled = new Set(excluded);
+  return values.filter((value) => !disabled.has(value));
+}
+function nestedValues(label: string, values: readonly string[]): string[] {
+  return [`- ${label}:`, ...(values.length ? values.map((value) => `  - \`${value}\``) : ["  - (none)"])];
+}
+function roleInspectionLines(inspection: DoctorRoleInspection): string[] {
+  return [
+    `- Role: \`${inspection.role}\` - \`${inspection.path}\``,
+    `- Model: \`${inspection.model.provider}/${inspection.model.model}\` (${inspection.model.inherited ? "inherited, " : ""}${inspection.model.thinking ?? "off"})`,
+    ...nestedValues("Tools", inspection.tools),
+    ...nestedValues("Effective skills", inspection.resources.skills),
+    ...nestedValues("Effective extensions", inspection.resources.extensions),
+    ...nestedValues("Excluded skills", inspection.resources.excludedSkills),
+    ...nestedValues("Excluded extensions", inspection.resources.excludedExtensions),
+    ...nestedValues("Unmatched skills", inspection.resources.unmatchedSkills),
+    ...nestedValues("Unmatched extensions", inspection.resources.unmatchedExtensions),
+    `- Prompt probe: ${inspection.systemPrompt.probe ? JSON.stringify(inspection.systemPrompt.probe) : "empty"}`,
+    `- Expanded probe: ${JSON.stringify(inspection.systemPrompt.expandedProbe)}`,
+    `- System prompt source: ${inspection.systemPrompt.source ?? "(none)"}`,
+    "### Final system prompt",
+    "```",
+    inspection.systemPrompt.text,
+    "```",
+    ...nestedValues("Applied setup hooks", inspection.setup.hooks),
+    `- Setup diagnostics: ${String(inspection.setup.diagnostics.length)}`,
+  ];
+}
 
 export function formatDoctorReport(report: DoctorReport): string {
+  if (report.roleInspection || report.roleTarget !== undefined) {
+    const lines = [
+      "# pi-extensible-workflows doctor",
+      "",
+      "## Role inspection",
+      ...(report.roleInspection ? roleInspectionLines(report.roleInspection) : [`- Role: \`${report.roleTarget ?? "(unknown)"}\``, "- Inspection unavailable"]),
+      "",
+      "## Diagnostics",
+      ...(report.diagnostics.length ? report.diagnostics.map((item) => `- [${item.severity}] ${item.code}${item.source ? ` \`${item.source}\`` : ""}: ${item.message}${item.hint ? ` Fix: ${item.hint}` : ""}`) : ["- [ok] No diagnostics"]),
+      "",
+      "## Summary",
+      `- ${String(count(report, "error"))} error(s), ${String(count(report, "warning"))} warning(s)`,
+    ];
+    return `${lines.join("\n")}\n`;
+  }
   const lines = [
     "# pi-extensible-workflows doctor",
     "",
@@ -440,7 +486,16 @@ export function formatDoctorReport(report: DoctorReport): string {
     "## Trust/resources",
     `- [${report.trust.trusted ? "ok" : "warning"}] ${report.trust.source}`,
     "",
-    "## Agent resource exclusions",
+    "## Pi active tools",
+    ...(report.activeTools.length ? report.activeTools.map((tool) => `- \`${tool}\``) : ["- None resolved"]),
+    "",
+    "## Pi active extensions",
+    ...(report.piExtensions.length ? report.piExtensions.map((extension) => `- \`${extension}\``) : ["- None resolved"]),
+    "",
+    "## Pi active skills",
+    ...(report.piSkills.length ? report.piSkills.map((skill) => `- \`${skill}\``) : ["- None resolved"]),
+    "",
+    "## Workflow agent resources (after disabledAgentResources)",
     `- Global settings: \`${report.resourcePolicy.globalSettingsPath}\``,
     `- Global skills: ${report.resourcePolicy.global.skills.join(", ") || "(none)"}`,
     `- Global extensions: ${report.resourcePolicy.global.extensions.join(", ") || "(none)"}`,
@@ -449,38 +504,15 @@ export function formatDoctorReport(report: DoctorReport): string {
     `- Project extensions: ${report.resourcePolicy.project.extensions.join(", ") || "(none)"}`,
     `- Effective skills: ${report.resourcePolicy.effective.skills.join(", ") || "(none)"}`,
     `- Effective extensions: ${report.resourcePolicy.effective.extensions.join(", ") || "(none)"}`,
-    `- Excluded skills: ${report.resourcePolicy.excludedSkills?.join(", ") || "(none)"}`,
-    `- Excluded extensions: ${report.resourcePolicy.excludedExtensions?.join(", ") || "(none)"}`,
+    ...nestedValues("Exposed skills", exposedValues(report.piSkills, report.resourcePolicy.excludedSkills ?? [])),
+    ...nestedValues("Exposed extensions", exposedValues(report.piExtensions, report.resourcePolicy.excludedExtensions ?? [])),
+    ...nestedValues("Disabled skills", report.resourcePolicy.excludedSkills ?? []),
+    ...nestedValues("Disabled extensions", report.resourcePolicy.excludedExtensions ?? []),
     `- Unmatched skills: ${report.resourcePolicy.unmatchedSkills.join(", ") || "(none)"}`,
     `- Unmatched extensions: ${report.resourcePolicy.unmatchedExtensions.join(", ") || "(none)"}`,
     "",
-    "## Active tools",
-    ...(report.activeTools.length ? report.activeTools.map((tool) => `- \`${tool}\``) : ["- None resolved"]),
-    "",
     "## Roles",
     ...(report.roles.length ? report.roles.map((role) => `- \`${role.name}\` (${role.scope}, ${role.active ? "active" : role.overriddenBy ? `overridden by ${role.overriddenBy}` : "inactive: project untrusted"}) - \`${role.path}\`${role.extension ? `; ${extensionLabel(role.extension)} role directory "${dirname(role.path)}"` : ""}${role.overrides ? `; overrides \`${role.overrides}\`` : ""}`) : ["- None found"]),
-    ...(report.roleInspection ? [""] : []),
-    ...(report.roleInspection ? [
-      "## Role inspection",
-      `- Role: \`${report.roleInspection.role}\` - \`${report.roleInspection.path}\``,
-      `- Model: \`${report.roleInspection.model.provider}/${report.roleInspection.model.model}\` (${report.roleInspection.model.inherited ? "inherited, " : ""}${report.roleInspection.model.thinking ?? "off"})`,
-      `- Tools: ${report.roleInspection.tools.join(", ") || "(none)"}`,
-      `- Effective skills: ${report.roleInspection.resources.skills.join(", ") || "(none)"}`,
-      `- Effective extensions: ${report.roleInspection.resources.extensions.join(", ") || "(none)"}`,
-      `- Excluded skills: ${report.roleInspection.resources.excludedSkills.join(", ") || "(none)"}`,
-      `- Excluded extensions: ${report.roleInspection.resources.excludedExtensions.join(", ") || "(none)"}`,
-      `- Unmatched skills: ${report.roleInspection.resources.unmatchedSkills.join(", ") || "(none)"}`,
-      `- Unmatched extensions: ${report.roleInspection.resources.unmatchedExtensions.join(", ") || "(none)"}`,
-      `- Prompt probe: ${report.roleInspection.systemPrompt.probe ? JSON.stringify(report.roleInspection.systemPrompt.probe) : "empty"}`,
-      `- Expanded probe: ${JSON.stringify(report.roleInspection.systemPrompt.expandedProbe)}`,
-      `- System prompt source: ${report.roleInspection.systemPrompt.source ?? "(none)"}`,
-      "### Final system prompt",
-      "```",
-      report.roleInspection.systemPrompt.text,
-      "```",
-      `- Applied setup hooks: ${report.roleInspection.setup.hooks.join(", ") || "(none)"}`,
-      `- Setup diagnostics: ${String(report.roleInspection.setup.diagnostics.length)}`,
-    ] : []),
     "",
     "## Model aliases",
     ...(report.modelAliases.length ? report.modelAliases.map((alias) => `- [${alias.kind}] \`${alias.name}\`${alias.kind === "static" ? ` -> ${report.settings.modelAliases?.[alias.name] ?? "(unresolved)"}` : ""} (${alias.provenance})`) : ["- None registered"]),
