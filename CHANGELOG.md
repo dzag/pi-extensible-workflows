@@ -1,7 +1,26 @@
 # Changelog
 ## Unreleased
- - Added role-targeted `piewf doctor --role` inspection of effective agent resources and prepared prompts without provider execution ([#181](https://github.com/vekexasia/pi-extensible-workflows/issues/181)).
- - Added `/workflow background` to move an attached foreground workflow to background delivery without restarting it ([#182](https://github.com/vekexasia/pi-extensible-workflows/issues/182)).
+
+## [5.1.0] - 2026-07-31
+
+### New capabilities
+
+- Added role-targeted `piewf doctor --role` inspection of effective agent resources and prepared prompts without provider execution ([#181](https://github.com/vekexasia/pi-extensible-workflows/issues/181)).
+- Added `/workflow background` to move an attached foreground workflow to background delivery without restarting it ([#182](https://github.com/vekexasia/pi-extensible-workflows/issues/182)).
+- Added role `contextFiles` policies to scope context visible to workflow agents ([#179](https://github.com/vekexasia/pi-extensible-workflows/issues/179)).
+- Added long-running shell progress reporting in workflow views ([#180](https://github.com/vekexasia/pi-extensible-workflows/issues/180)).
+
+### CLI and diagnostics
+
+- Clarified `piewf doctor` output by separating Pi-active tools/resources from workflow-agent resources after `disabledAgentResources`.
+
+### TypeScript API
+
+- Added typed workflow schemas and orchestration results, plus public local Pi/session inspection APIs.
+
+### Verification
+
+- `npm run check` passes.
 
 ## [5.0.0] - 2026-07-29
 
