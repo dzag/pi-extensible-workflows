@@ -29,7 +29,7 @@ export type WorkflowRecoveryDependencies = {
   resolveWorktree: (store: RunStore, metadata: WorkflowMetadata, owner: string) => Promise<Readonly<WorkflowWorktreeReference>>;
   checkpointBridge: (runId: string, store: RunStore, metadata: WorkflowMetadata, foreground: boolean, ui?: { select?: (prompt: string, options: string[]) => Promise<string | undefined> }, headless?: boolean) => (raw: Readonly<Record<string, JsonValue>>, signal: AbortSignal) => Promise<boolean>;
   phaseBridge: (store: RunStore, metadata: WorkflowMetadata, lifecycle: RunLifecycle) => (phase: string) => Promise<void>;
-  logBridge: (lifecycle: RunLifecycle, workflowName: string) => (message: string) => Promise<void>;
+  logBridge: (store: RunStore, lifecycle: RunLifecycle, workflowName: string) => (message: string) => Promise<void>;
   lifecycleFor: (store: RunStore, state: RunState, budget: WorkflowBudgetRuntime, metadata: WorkflowMetadata) => RunLifecycle;
   createProviderErrorRecovery: (host: unknown, fallbackModels: ReadonlySet<string>, abort: () => void) => ((failure: AgentProviderFailure) => Promise<AgentProviderRecovery>) | undefined;
   cleanupTerminalRun: (runId: string) => Promise<void>;
@@ -130,7 +130,7 @@ export function createWorkflowRecovery(deps: WorkflowRecoveryDependencies) {
     run.executor.setRunContext(runContext);
     await scheduler.cancelRun(run.store.runId);
     await run.lifecycle.resume();
-    const execution = runWorkflow(script, loaded.snapshot.args, withWorkflowFunctions({ shell: (command, options, signal, identity) => shellForRun(run.store, run.metadata, run.lifecycle, command, options, signal, identity), agent: workflowAgentHandler(run.store, run.metadata, run.lifecycle, run.executor, run.store.cwd, run.store.runId), worktree: async (owner) => resolveWorktree(run.store, run.metadata, owner), checkpoint: checkpointBridge(run.store.runId, run.store, run.metadata, foreground, hasUI ? ui : undefined), phase: phaseBridge(run.store, run.metadata, run.lifecycle), log: logBridge(run.lifecycle, run.metadata.name) }, run.store, runContext, registry), controller.signal);
+    const execution = runWorkflow(script, loaded.snapshot.args, withWorkflowFunctions({ shell: (command, options, signal, identity) => shellForRun(run.store, run.metadata, run.lifecycle, command, options, signal, identity), agent: workflowAgentHandler(run.store, run.metadata, run.lifecycle, run.executor, run.store.cwd, run.store.runId), worktree: async (owner) => resolveWorktree(run.store, run.metadata, owner), checkpoint: checkpointBridge(run.store.runId, run.store, run.metadata, foreground, hasUI ? ui : undefined), phase: phaseBridge(run.store, run.metadata, run.lifecycle), log: logBridge(run.store, run.lifecycle, run.metadata.name) }, run.store, runContext, registry), controller.signal);
     run.execution = execution;
     const completion = execution.result.then(async (value) => {
       await scheduler.flush();

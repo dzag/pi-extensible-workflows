@@ -347,7 +347,7 @@ export class RunStore {
   }
 
   async appendEvent(event: WorkflowRunEvent): Promise<void> {
-    await this.updateState((run) => ({ ...run, events: [...(run.events ?? []), ...(run.events?.some((current) => current.type === event.type && current.message === event.message) ? [] : [event])] }));
+    await this.updateState((run) => ({ ...run, events: [...(run.events ?? []), ...(event.type !== "log" && run.events?.some((current) => current.type === event.type && current.message === event.message) ? [] : [event])] }));
   }
 
   async saveOwnership(nodes: readonly PersistedOwnershipNode[]): Promise<void> {

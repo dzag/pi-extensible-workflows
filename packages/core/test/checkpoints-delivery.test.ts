@@ -407,7 +407,33 @@ void test("human interrupted-run resume delivers a later failure", async () => {
     await shutdown?.();
   }
 });
-void test("workflow log appends capped TUI-only transcript entries", async () => {
+void test("foreground workflow logs stay in the live workflow item", async () => {
+  type LogData = { workflowName: string; message: string };
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-foreground-log-"));
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  const entries: Array<{ type: string; data: LogData }> = [];
+  const updates: Array<{ details: { run: { events?: readonly { type: string; message: string; timestamp?: number }[] } } }> = [];
+  workflowExtension({
+    registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {},
+    appendEntry(type: string, data: LogData) { entries.push({ type, data }); },
+    getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"],
+  } as never, home);
+  const execute = tools.find(({ name }) => name === "workflow")?.execute;
+  assert.ok(execute);
+  const result = await execute("id", { name: "logger", script: `await log("working"); await log("working"); return true;`, foreground: true }, new AbortController().signal, (update: (typeof updates)[number]) => { updates.push(update); }, { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }) as { details: { run: { events?: readonly { type: string; message: string; timestamp?: number }[] } } };
+  assert.equal(entries.length, 0);
+  const logs = result.details.run.events?.filter((event) => event.type === "log") ?? [];
+  assert.equal(logs.length, 2);
+  const firstLog = logs[0];
+  const secondLog = logs[1];
+  assert.ok(firstLog);
+  assert.ok(secondLog);
+  assert.equal(firstLog.message, "working");
+  assert.equal(secondLog.message, "working");
+  assert.equal(typeof firstLog.timestamp, "number");
+  assert.ok(updates.some(({ details }) => details.run.events?.length === 2));
+});
+void test("background workflow logs append capped TUI-only transcript entries", async () => {
   type LogData = { workflowName: string; message: string };
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-log-"));
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
@@ -421,7 +447,8 @@ void test("workflow log appends capped TUI-only transcript entries", async () =>
   } as never, home);
   const execute = tools.find(({ name }) => name === "workflow")?.execute;
   assert.ok(execute);
-  await execute("id", { name: "logger", script: `await log("working"); await log("😀".repeat(2000)); return true;`, foreground: true }, new AbortController().signal, undefined, { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } });
+  await execute("id", { name: "logger", script: `await log("working"); await log("😀".repeat(2000)); return true;`, foreground: false }, new AbortController().signal, undefined, { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } });
+  for (let attempt = 0; attempt < 100 && entries.length < 2; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 1));
   assert.equal(entries.length, 2);
   assert.deepEqual(entries[0], { type: "workflow-log", data: { workflowName: "logger", message: "working" } });
   const truncated = entries[1];

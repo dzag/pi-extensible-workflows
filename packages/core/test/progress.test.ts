@@ -35,6 +35,28 @@ void test("workflow progress shows runtime after the workflow state", () => {
   assert.match(formatWorkflowProgress(run), /\[running\] runtime=12s/);
   assert.match(formatWorkflowProgress({ ...run, state: "completed", usage: { tokens: 0, costUsd: 0, durationMs: 65_432, agentLaunches: 0 } }), /\[completed\] runtime=1m 5s/);
 });
+void test("workflow log rendering keeps recent visual lines collapsed and all lines expanded", () => {
+  type Rendered = { render: (width: number) => string[] };
+  type WorkflowTool = { name: string; renderResult?: (result: unknown, options: { expanded: boolean; isPartial: boolean }, theme: unknown, context: unknown) => Rendered };
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-log-rendering-"));
+  const tools: WorkflowTool[] = [];
+  workflowExtension({ registerTool(tool: WorkflowTool) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  const tool = tools.find(({ name }) => name === "workflow");
+  assert.ok(tool?.renderResult);
+  const run = { id: "run", workflowName: "logs", cwd: home, sessionId: "session", state: "completed" as const, agents: [], agentSessions: [], events: Array.from({ length: 6 }, (_, index) => ({ type: "log", message: index === 5 ? "last line\ncontinued line" : `log-${String(index)}`, timestamp: Date.UTC(2024, 0, 2, 3, 4, index) })) } as PersistedRun;
+  const result = { content: [], details: { run } };
+  const theme = { fg: (color: string, text: string) => `<${color}>${text}</${color}>`, bold: (text: string) => `<bold>${text}</bold>` };
+  const context = { state: {}, cwd: home, invalidate: () => {} };
+  const collapsed = tool.renderResult(result, { expanded: false, isPartial: false }, theme, context).render(200).join("\n");
+  assert.match(collapsed, /Logs/);
+  assert.doesNotMatch(collapsed, /log-0|log-1/);
+  assert.match(collapsed, /log-2|last line/);
+  assert.match(collapsed, /continued line/);
+  const expanded = tool.renderResult(result, { expanded: true, isPartial: false }, theme, context).render(200).join("\n");
+  assert.match(expanded, /log-0[\s\S]*last line/);
+  assert.match(expanded, /\d{2}:\d{2}:\d{2}/);
+  assert.match(expanded, /last line[\s\S]*continued line/);
+});
 void test("inline workflow progress rebases runtime after pause and resume", () => {
   const previousNow = Date.now;
   let now = 1_000;

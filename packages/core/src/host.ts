@@ -201,10 +201,20 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const data = entry.data;
     return textBlock(data ? `Workflow ${data.workflowName}: ${data.message}` : "");
   });
-  const logBridge = (lifecycle: RunLifecycle, workflowName: string) => async (message: string) => {
+  const logBridge = (store: RunStore, lifecycle: RunLifecycle, workflowName: string) => async (message: string) => {
+    const timestamp = Date.now();
+    const bounded = utf8Prefix(message, DELIVERY_LIMIT_BYTES);
     await lifecycle.enter();
-    try { pi.appendEntry<WorkflowLogEntry>(WORKFLOW_LOG_ENTRY, { workflowName, message: utf8Prefix(message, DELIVERY_LIMIT_BYTES) }); }
-    finally { await lifecycle.leave(); }
+    try {
+      const active = runs.get(store.runId);
+      const update = active?.foreground ? active.update : undefined;
+      if (update) {
+        const event = { type: "log", message: bounded, timestamp };
+        const persisted = await store.updateState((current) => current.delivery?.mode === "foreground" && current.delivery.state === "attached" ? { ...current, events: [...(current.events ?? []), event] } : current);
+        if (persisted.events?.at(-1) === event) { update(workflowToolUpdate(persisted)); return; }
+      }
+      pi.appendEntry<WorkflowLogEntry>(WORKFLOW_LOG_ENTRY, { workflowName, message: bounded });
+    } finally { await lifecycle.leave(); }
   };
   const eventPublisher = new WorkflowEventPublisher(piHostCapabilities(pi).events);
   pi.on("resources_discover", () => {
@@ -1045,7 +1055,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       runs.set(runId, { executor, store, metadata: checked.metadata, model: rootModel, lifecycle, budget: budgetRuntime, abortController: runController, foreground: foregroundAttached, projectTrusted: () => projectTrusted(ctx), checkpointResolvers: new Map(), ...(providerErrorRecovery ? { providerErrorRecovery } : {}), ...(params.foreground && onUpdate ? { update: onUpdate } : {}) });
       if (params.foreground && onUpdate) onUpdate(workflowToolUpdate((await store.load()).run));
       scheduler.addRun(runId, settings.concurrency, () => runs.get(runId)?.budget.checkAgentLaunch());
-      const execution = runWorkflow(script, args, withWorkflowFunctions({ shell: (command, options, signal, identity) => shellForRun(store, checked.metadata, lifecycle, command, options, signal, identity), agent: workflowAgentHandler(store, checked.metadata, lifecycle, executor, ctx.cwd, runId, captureRole), worktree: async (owner) => resolveWorktree(store, checked.metadata, owner), checkpoint: checkpointBridge(runId, store, checked.metadata, () => runs.get(runId)?.foreground ?? foregroundAttached, ctx.hasUI ? ctx.ui : undefined, headless), phase: phaseBridge(store, checked.metadata, lifecycle), log: logBridge(lifecycle, checked.metadata.name) }, store, runContext, registry), runController.signal);
+      const execution = runWorkflow(script, args, withWorkflowFunctions({ shell: (command, options, signal, identity) => shellForRun(store, checked.metadata, lifecycle, command, options, signal, identity), agent: workflowAgentHandler(store, checked.metadata, lifecycle, executor, ctx.cwd, runId, captureRole), worktree: async (owner) => resolveWorktree(store, checked.metadata, owner), checkpoint: checkpointBridge(runId, store, checked.metadata, () => runs.get(runId)?.foreground ?? foregroundAttached, ctx.hasUI ? ctx.ui : undefined, headless), phase: phaseBridge(store, checked.metadata, lifecycle), log: logBridge(store, lifecycle, checked.metadata.name) }, store, runContext, registry), runController.signal);
       (runs.get(runId) as NonNullable<ReturnType<typeof runs.get>>).execution = execution;
       await eventPublisher.runStarted(store, checked.metadata);
       const finish = execution.result.then(async (value) => {
@@ -1123,7 +1133,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     renderCall(args) {
       return textBlock(formatWorkflowPreview(args));
     },
-    renderResult(result, { isPartial }, theme, context) {
+    renderResult(result, { isPartial, expanded }, theme, context) {
       const details = result.details;
       if (isWorkflowFailureDiagnostics(details)) return textBlock(formatWorkflowFailureDiagnostics(details));
       const runDetails = details as { run?: PersistedRun; value?: JsonValue; preview?: string } | undefined;
@@ -1164,6 +1174,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             return withLiveActivities(loaded.run);
           }, () => { if (state.workflowProgress === currentProgress) requestRender(); });
         }
+        state.workflowProgressComponent.setExpanded(expanded);
         return state.workflowProgressComponent;
       }
       const content = result.content[0];

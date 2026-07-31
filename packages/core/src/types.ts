@@ -87,7 +87,7 @@ export interface AgentRecord { systemPrompt?: string; prompt?: string; id: strin
 export type WorkflowDeliveryMode = "foreground" | "background";
 export type WorkflowDeliveryStatus = "attached" | "pending" | "delivered";
 export interface WorkflowRunDelivery { mode: WorkflowDeliveryMode; state: WorkflowDeliveryStatus; toolCallId?: string }
-export interface WorkflowRunEvent { type: string; message: string }
+export interface WorkflowRunEvent { type: string; message: string; timestamp?: number }
 export interface WorkflowRetryProvenance { sourceRunId: string; lineageRootRunId: string; completedPaths: readonly string[]; incompletePaths: readonly string[]; namedWorktrees: readonly string[] }
 export interface WorkflowPhaseRecord { phase: string; afterAgent: number }
 export interface RunRecord { id: string; workflowName: string; cwd: string; sessionId: string; state: RunState; agentSessions: readonly WorkflowAgentSessionReference[]; parentRunId?: string; retry?: WorkflowRetryProvenance; phase?: string; phaseHistory?: readonly WorkflowPhaseRecord[]; agents: readonly AgentRecord[]; activeShells?: number; activeShellStartedAt?: number; error?: WorkflowErrorShape; failedAt?: string; budget?: WorkflowBudget; budgetVersion?: number; usage?: WorkflowBudgetUsage; budgetEvents?: readonly BudgetEvent[]; events?: readonly WorkflowRunEvent[]; delivery?: WorkflowRunDelivery }
