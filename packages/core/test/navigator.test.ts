@@ -100,7 +100,7 @@ void test("narrow navigator drills from tree to details to agent actions", { ski
     // Narrow mode is single-column: no details separator beside the tree.
     assert.doesNotMatch(tree, / \| /);
     h.sendKey("enter");
-    await h.waitFor("State:", 10_000);
+    await h.waitFor("Selected phase", 10_000);
     h.sendKey("enter");
     await h.waitFor("Run actions", 10_000);
     assert.match(h.readVisiblePane(), /Open script in editor/);

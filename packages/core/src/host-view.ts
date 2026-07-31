@@ -603,16 +603,16 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
     return `${selected ? "→" : " "} ${"  ".repeat(node.depth)}${nodeIcon(node)} ${node.label} · ${state(node.state)}${activity ? ` ${activity}` : ""}`;
   };
   const details = (node: WorkflowPhaseTreeNode | undefined): string[] => {
-    if (!node) return [styles.muted("No workflow node is selected"), styles.muted("enter run actions")];
+    if (!node) return [styles.muted("No workflow node is selected"), ...(selection.actions ? [] : [styles.muted("enter run actions")])];
     const agents = nodeAgents(node);
     if (node.kind === "phase") {
       const selected = node.phase;
       const counts = selected?.counts ?? phaseAgentCounts(agents);
-      return [styles.bold(`Selected phase: ${node.label}`), `Status: ${nodeStatus(node)}`, `agents completed=${String(counts.completed)} running=${String(counts.running)} failed=${String(counts.failed)} cancelled=${String(counts.cancelled)} pending=${String(counts.pending)}`, `Agents: ${String(agents.length)}`, styles.muted("enter run actions")];
+      return [styles.bold(`Selected phase: ${node.label}`), `Status: ${nodeStatus(node)}`, `agents completed=${String(counts.completed)} running=${String(counts.running)} failed=${String(counts.failed)} cancelled=${String(counts.cancelled)} pending=${String(counts.pending)}`, `Agents: ${String(agents.length)}`, ...(selection.actions ? [] : [styles.muted("enter run actions")])];
     }
     if (node.kind === "operation") {
       const states = phaseAgentCounts(agents);
-      return [styles.bold(`Selected operation: ${node.operationPath.join(" > ")}`), `Phase: ${node.phase?.name ?? node.phaseId}`, `Status: ${nodeStatus(node)}`, `agents completed=${String(states.completed)} running=${String(states.running)} failed=${String(states.failed)} cancelled=${String(states.cancelled)} pending=${String(states.pending)}`, `Agents: ${String(agents.length)}`, styles.muted("enter run actions")];
+      return [styles.bold(`Selected operation: ${node.operationPath.join(" > ")}`), `Phase: ${node.phase?.name ?? node.phaseId}`, `Status: ${nodeStatus(node)}`, `agents completed=${String(states.completed)} running=${String(states.running)} failed=${String(states.failed)} cancelled=${String(states.cancelled)} pending=${String(states.pending)}`, `Agents: ${String(agents.length)}`, ...(selection.actions ? [] : [styles.muted("enter run actions")])];
     }
     const agent = node.agent;
     if (!agent) return [styles.muted("Agent details are unavailable")];

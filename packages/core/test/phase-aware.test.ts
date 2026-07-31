@@ -224,7 +224,20 @@ void test("agent actions render inside the details column beside the tree", () =
   assert.ok(actionRow.includes(" | "), `actions must stay in the two-column layout: ${actionRow}`);
   assert.ok(actionRow.indexOf("Copy agent ID") > actionRow.indexOf(" | "), `actions belong in the details column: ${actionRow}`);
   assert.ok(lines.some((line) => line.includes("Agent actions")), "expected the actions title");
-  assert.ok(!lines.some((line) => line.includes("enter for agent actions")), "hint should disappear once actions are open");
+  assert.ok(!lines.some((line) => line.includes("enter agent actions")), "hint should disappear once actions are open");
+});
+void test("run action hints hide when run actions are open", () => {
+  const current = run("running", [{ ...agent("api"), structuralPath: ["reviewers", "api"] }], [{ phase: "review", afterAgent: 0 }]);
+  const tree = buildWorkflowPhaseTree(buildWorkflowPhaseModel(current, ["review"]));
+  const expandedNodeIds = tree.nodes.filter((node) => node.kind !== "agent").map((node) => node.id);
+  const actions = { title: "Run actions", options: ["Back"], index: 0 };
+  for (const node of tree.nodes.filter((candidate) => candidate.kind === "phase" || candidate.kind === "operation")) {
+    const lines = formatWorkflowPhaseDashboard(current, snapshot(["review"]), 120, { nodeId: node.id, expandedNodeIds, actions }).join("\n");
+    assert.doesNotMatch(lines, /enter run actions/);
+  }
+  const empty = formatWorkflowPhaseDashboard(run("running"), snapshot(), 120, { actions }).join("\n");
+  assert.match(empty, /Run actions/);
+  assert.doesNotMatch(empty, /enter run actions/);
 });
 void test("phase dashboard keeps system prompts out of agent details", () => {
   const current = run("running", [{ ...agent("api"), systemPrompt: "PRIVATE SYSTEM PROMPT" }], [{ phase: "review", afterAgent: 0 }]);

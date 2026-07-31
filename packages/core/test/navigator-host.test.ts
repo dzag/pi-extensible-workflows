@@ -459,7 +459,8 @@ void test("navigator returns to the picker after cancelling a recovered run dash
       const dashboard = component.render(200).join("\n");
       assert.match(dashboard, /interrupted/);
       assert.match(dashboard, /Tree/);
-      component.render(40);
+      const narrowTree = component.render(79).join("\n");
+      assert.match(narrowTree, /enter inspect/);
       component.handleInput?.("tui.select.confirm");
       const narrowDetails = component.render(40).join("\n");
       assert.match(narrowDetails, /enter run actions/);
