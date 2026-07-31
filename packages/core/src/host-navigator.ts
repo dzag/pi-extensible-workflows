@@ -73,10 +73,10 @@ export type WorkflowNavigatorDependencies = {
   registry: WorkflowRegistryApi;
   projectTrusted: (context: unknown) => boolean;
   resumeHostContext: (context: unknown) => WorkflowRecoveryContext;
+  resumeSelectedWorkflow: (runId: string, foreground: boolean, context: unknown, budgetPatch?: unknown) => Promise<{ workflowName: string; state: "running" | "completed"; attached: boolean; value?: JsonValue }>;
 };
-
 export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): void {
-  const { pi, home, clipboard, extensionAgentDir, runs, terminalRunStates, hardTerminalRunStates, ensureSessionLease, answerCheckpoint, recovery, stopWorkflowRun, moveForegroundToBackground, isForegroundAttached, withLiveActivities, liveAgentSessions, liveAgentPrepared, liveAgentHandoffs, registry, projectTrusted, resumeHostContext } = deps;
+  const { pi, home, clipboard, extensionAgentDir, runs, terminalRunStates, hardTerminalRunStates, ensureSessionLease, answerCheckpoint, recovery, stopWorkflowRun, moveForegroundToBackground, isForegroundAttached, withLiveActivities, liveAgentSessions, liveAgentPrepared, liveAgentHandoffs, registry, projectTrusted, resumeHostContext, resumeSelectedWorkflow } = deps;
   pi.registerCommand("workflow", {
     description: "Inspect and control workflows for this Pi session",
     handler: async (args, ctx) => {
@@ -236,6 +236,37 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
       if (command === "model-aliases") {
         if (!ctx.hasUI) { ctx.ui.notify("Model alias management requires UI.", "warning"); return; }
         await manageAliases();
+        return;
+      }
+      if (command === "resume") {
+        const ui = uiHostCapabilities(ctx.ui);
+        if (!ctx.hasUI || !ui?.select) { ctx.ui.notify("Interactive workflow resume selection is unavailable; provide a run ID.", "info"); return; }
+        const resumable = navigatorAttentionSort(stores.filter(({ loaded: { run } }) => ["paused", "interrupted", "budget_exhausted"].includes(run.state)));
+        if (!resumable.length) { ctx.ui.notify("No resumable workflow runs in this Pi session.", "info"); return; }
+        const labels = navigatorRunLabels(resumable);
+        const selectedLabel = await ui.select("Resumable workflows", [...labels, "Cancel"]);
+        if (!selectedLabel || selectedLabel === "Cancel") return;
+        const selected = resumable[labels.indexOf(selectedLabel)];
+        if (!selected) return;
+        const mode = await ui.select(`Resume ${selected.loaded.run.workflowName}`, ["Foreground", "Background", "Cancel"]);
+        if (!mode || mode === "Cancel") return;
+        let budgetPatch: unknown;
+        if (selected.loaded.run.state === "budget_exhausted") {
+          const budgetChoice = await ui.select("Budget exhausted", ["Resume unchanged", "Adjust budget", "Cancel"]);
+          if (!budgetChoice || budgetChoice === "Cancel") return;
+          if (budgetChoice === "Adjust budget") {
+            const input = await uiHostCapabilities(ctx.ui)?.input?.call(ctx.ui, "Budget patch (JSON)", "{\"tokens\":{\"hard\":null}}");
+            if (input === undefined) return;
+            try { budgetPatch = JSON.parse(input); } catch (error) { ctx.ui.notify(`Cannot parse budget patch: ${error instanceof Error ? error.message : String(error)}`, "warning"); return; }
+          }
+        }
+        try {
+          const result = await resumeSelectedWorkflow(selected.store.runId, mode === "Foreground", ctx, budgetPatch);
+          if (result.state === "completed" && !result.attached) ctx.ui.notify(`Workflow ${result.workflowName} completed.`, "info");
+          else if (result.state === "running") ctx.ui.notify(`Resumed workflow ${result.workflowName} in ${mode.toLowerCase()}.`, "info");
+        } catch (error) {
+          ctx.ui.notify(`Cannot resume workflow ${selected.store.runId}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+        }
         return;
       }
       if (!command) {

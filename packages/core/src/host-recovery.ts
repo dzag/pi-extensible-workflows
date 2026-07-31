@@ -121,6 +121,7 @@ export function createWorkflowRecovery(deps: WorkflowRecoveryDependencies) {
     if (!script) throw new WorkflowError("INTERNAL_ERROR", "Resume preflight did not produce a launch script");
     const persistedSnapshot = modeOverride === undefined ? snapshot : createLaunchSnapshot({ ...snapshot, launchMode: foreground ? "foreground" : "background" });
     await run.store.saveSnapshot(persistedSnapshot);
+    if (modeOverride !== undefined) await persistRunState(run.store, run.metadata, (current) => ({ ...current, delivery: { ...(current.delivery ?? {}), mode: foreground ? "foreground" : "background", state: foreground ? "attached" : "pending" } }));
     scheduler.updateRunLimit(run.store.runId, snapshot.settings.concurrency);
     run.executor = createAgentExecutor({ cwd: run.store.cwd, model: rootModel, tools: activeSnapshotTools(snapshot.tools, "session"), availableModels, knownModels, modelAliases: currentAliases, blockedAliases, blockedAliasTargets, settingsPath, agentDefinitions: snapshot.roles ?? {}, runStore: run.store, providerPause: async () => { deliver(`Workflow ${snapshot.metadata.name} paused: provider limit.`); await run.lifecycle.providerPause(); }, agentResourcePolicy: frozenResourcePolicy(currentPolicy) });
     const drift = aliasDrift(previousAliases, currentAliases);
@@ -160,7 +161,14 @@ export function createWorkflowRecovery(deps: WorkflowRecoveryDependencies) {
       });
       return undefined;
     }
-    return completion;
+    try {
+      const result = await completion;
+      await run.store.updateState((current) => current.delivery?.state === "attached" ? { ...current, delivery: { ...current.delivery, state: "delivered" } } : current);
+      return result;
+    } catch (error) {
+      await run.store.updateState((current) => current.delivery?.state === "attached" ? { ...current, delivery: { ...current.delivery, state: "delivered" } } : current);
+      throw error;
+    }
   };
   const applyBudgetDecision = async (request: BudgetApprovalRequest, approved: boolean, context?: unknown, signal?: AbortSignal, waitForCompletion = true): Promise<BudgetDecisionResult> => {
     const run = runs.get(request.runId);
@@ -172,7 +180,7 @@ export function createWorkflowRecovery(deps: WorkflowRecoveryDependencies) {
     run.budget = runtime;
     await persistRunState(run.store, run.metadata, (current) => { const next = { ...current, ...runtime.snapshot(), budgetVersion: nextVersion }; if (nextBudget) next.budget = nextBudget; else delete next.budget; return next; });
     const { hasUI, ui } = recoveryUi(context);
-    const completed = await coldResumeRun(run, hasUI, ui, projectTrusted(context), { ...resumeHostContext(context), ...(signal ? { signal } : {}) }, undefined, waitForCompletion);
+    const completed = await coldResumeRun(run, hasUI, ui, projectTrusted(context), { ...resumeHostContext(context), ...(signal ? { signal } : {}) }, request.foreground, waitForCompletion);
     if (completed) return { state: "completed", approved: true, value: completed.value, run: (await run.store.load()).run };
     return { state: "running", approved: true };
   };
@@ -204,7 +212,7 @@ export function createWorkflowRecovery(deps: WorkflowRecoveryDependencies) {
     if (!resumeBudgetAllowed(nextBudget, usage)) throw new WorkflowError("RESUME_INCOMPATIBLE", "Every exhausted hard budget must be raised above retained usage or removed");
     if (budgetRelaxed(currentBudget, nextBudget)) {
       const proposalId = randomUUID();
-      const request: BudgetApprovalRequest = { kind: "budget", proposalId, runId, consumed: usage, previous: currentBudget ?? {}, proposed: nextBudget ?? {}, budgetVersion: loaded.run.budgetVersion ?? 1 };
+      const request: BudgetApprovalRequest = { kind: "budget", proposalId, runId, consumed: usage, previous: currentBudget ?? {}, proposed: nextBudget ?? {}, budgetVersion: loaded.run.budgetVersion ?? 1, ...(modeOverride === undefined ? {} : { foreground: modeOverride }) };
       await run.store.requestWorkflowDecision(request);
       await appendBudgetDecisionEvent(run, request, "adjustment_requested");
       deliver(budgetDecisionDelivery(run.metadata, request));
