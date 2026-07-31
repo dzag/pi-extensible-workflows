@@ -270,9 +270,10 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       }
     });
   };
-  type ForegroundDetachResult = { runId: string; state: "running"; detached: true };
+  type ForegroundDetachResult = { runId: string; state: "running"; detached: true; run: PersistedRun };
   type ForegroundDelivery = { store: RunStore; inline: boolean; detached: boolean; detach: () => Promise<ForegroundDetachResult>; timer?: ReturnType<typeof setTimeout> };
-  const pendingFailureDiagnostics = new Map<string, WorkflowFailureDiagnostics>();
+  type PendingFailureDiagnostic = { diagnostic: WorkflowFailureDiagnostics; run: PersistedRun };
+  const pendingFailureDiagnostics = new Map<string, PendingFailureDiagnostic>();
   const foregroundDeliveries = new Map<string, ForegroundDelivery>();
   const foregroundResumeClaims = new WeakSet<RunStore>();
   const terminalDeliveryQueues = new WeakMap<RunStore, Promise<void>>();
@@ -345,10 +346,10 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       foregroundDeliveries.delete(event.toolCallId);
     }
     if (event.toolName !== "workflow" || !event.isError) return;
-    const diagnostic = pendingFailureDiagnostics.get(event.toolCallId);
-    if (!diagnostic) return;
+    const pending = pendingFailureDiagnostics.get(event.toolCallId);
+    if (!pending) return;
     pendingFailureDiagnostics.delete(event.toolCallId);
-    return { content: [{ type: "text" as const, text: serializeWorkflowFailureDiagnostics(diagnostic) }], details: diagnostic, isError: true };
+    return { content: [{ type: "text" as const, text: serializeWorkflowFailureDiagnostics(pending.diagnostic) }], details: { ...pending.diagnostic, run: pending.run }, isError: true };
   });
   const deliverTerminal = (store: RunStore, content: string, failure = false): Promise<void> => {
     const previous = terminalDeliveryQueues.get(store) ?? Promise.resolve();
@@ -1041,8 +1042,10 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
             for (const checkpoint of await store.awaitingCheckpoints()) deliverBackgroundCheckpoint(checked.metadata.name, runId, checkpoint);
             signal?.removeEventListener("abort", onForegroundAbort);
             if (delivery.timer) clearTimeout(delivery.timer);
-            resolveDetached({ runId, state: "running", detached: true });
-            return { runId, state: "running", detached: true };
+            const run = (await store.load()).run;
+            const result = { runId, state: "running" as const, detached: true as const, run };
+            resolveDetached(result);
+            return result;
           },
         };
         foregroundDeliveries.set(toolCallId, delivery);
@@ -1074,7 +1077,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         await eventPublisher.runFailed(store, checked.metadata, typed, state);
         const diagnostic = await createWorkflowFailureDiagnostics(store, checked.metadata, typed, persisted);
         Object.defineProperty(typed, WORKFLOW_FAILURE_DIAGNOSTICS, { value: diagnostic });
-        if (params.foreground) pendingFailureDiagnostics.set(toolCallId, diagnostic);
+        if (params.foreground) pendingFailureDiagnostics.set(toolCallId, { diagnostic, run: persisted });
         throw typed;
       });
       const completion = finish.finally(() => cleanupTerminalRun(runId));
@@ -1122,7 +1125,10 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           completion.then((result) => ({ kind: "completed" as const, result })),
           detachedResult.then((result) => ({ kind: "detached" as const, result })),
         ]);
-      if (outcome.kind === "detached") return { content: [{ type: "text" as const, text: JSON.stringify(outcome.result) }], details: { ...outcome.result, preview: `Moved workflow ${runId} to background.` } };
+      if (outcome.kind === "detached") {
+        const { run, ...detached } = outcome.result;
+        return { content: [{ type: "text" as const, text: JSON.stringify(detached) }], details: { ...detached, run, preview: `Moved workflow ${runId} to background.` } };
+      }
       const { value } = outcome.result;
       const run = (await store.load()).run;
       return { content: [{ type: "text" as const, text: JSON.stringify(value) }, { type: "text" as const, text: `Workflow run ID: ${runId}` }], details: { runId, value, run } };
@@ -1135,7 +1141,13 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     },
     renderResult(result, { isPartial, expanded }, theme, context) {
       const details = result.details;
-      if (isWorkflowFailureDiagnostics(details)) return textBlock(formatWorkflowFailureDiagnostics(details));
+      if (isWorkflowFailureDiagnostics(details)) {
+        const failureRun = object(details) && object(details.run) ? details.run as unknown as PersistedRun : undefined;
+        if (!failureRun) return textBlock(formatWorkflowFailureDiagnostics(details));
+        const failure = workflowProgressBlock(failureRun, theme, undefined, undefined, undefined, formatWorkflowFailureDiagnostics(details));
+        failure.setExpanded(expanded);
+        return failure;
+      }
       const runDetails = details as { run?: PersistedRun; value?: JsonValue; preview?: string } | undefined;
       const state = context.state as WorkflowProgressRenderState;
       if (runDetails?.run && isPartial && runDetails.run.state === "running" && !state.workflowSpinner) {

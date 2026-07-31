@@ -106,7 +106,7 @@
             <tr><td><code>withWorktree(name, callback)</code></td><td>Creates or reuses one deterministic named worktree scope. The callback receives a frozen <code>{ path, branch }</code> reference.</td></tr>
             <tr><td><code>checkpoint(input)</code></td><td>Waits for a decision described by <code>{ name, prompt, context }</code> and returns a boolean. The prompt and context have the same size limits as the workflow primitive.</td></tr>
             <tr><td><code>phase(name)</code></td><td>Records a progress phase. It returns no workflow value.</td></tr>
-            <tr><td><code>log(message)</code></td><td>Adds a bounded TUI-only transcript entry.</td></tr>
+            <tr><td><code>log(message)</code></td><td>Renders attached foreground logs in the live workflow item and appends background or detached logs as bounded TUI-only transcript entries, capped at 4 KB.</td></tr>
             <tr><td><code>invoke(name, input)</code></td><td>Calls another registered function by unqualified name, with input and output schema validation. Use this for composition instead of importing an implementation.</td></tr>
           </tbody>
         </table></div>

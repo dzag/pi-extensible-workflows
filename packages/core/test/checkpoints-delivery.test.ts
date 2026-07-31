@@ -433,6 +433,22 @@ void test("foreground workflow logs stay in the live workflow item", async () =>
   assert.equal(typeof firstLog.timestamp, "number");
   assert.ok(updates.some(({ details }) => details.run.events?.length === 2));
 });
+void test("foreground workflow failure keeps logs in the workflow item", async () => {
+  type FailureResult = { details?: { run?: { events?: readonly { type: string; message: string }[] } } };
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-foreground-failure-log-"));
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  let toolResultHandler: ((event: { toolName: string; toolCallId: string; isError: boolean }) => Promise<unknown>) | undefined;
+  workflowExtension({
+    registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as typeof toolResultHandler; },
+    getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"],
+  } as never, home);
+  const execute = tools.find(({ name }) => name === "workflow")?.execute;
+  assert.ok(execute);
+  await assert.rejects(execute("failure", { name: "failure", script: `await log("before failure"); throw new Error("failure");`, foreground: true }, new AbortController().signal, () => {}, { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }));
+  assert.ok(toolResultHandler);
+  const result = await toolResultHandler({ toolName: "workflow", toolCallId: "failure", isError: true }) as FailureResult;
+  assert.deepEqual(result.details?.run?.events?.filter((event) => event.type === "log").map((event) => event.message), ["before failure"]);
+});
 void test("background workflow logs append capped TUI-only transcript entries", async () => {
   type LogData = { workflowName: string; message: string };
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-log-"));

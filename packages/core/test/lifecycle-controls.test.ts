@@ -687,6 +687,7 @@ void test("moves an attached foreground workflow to background without restartin
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
   const messages: string[] = [];
+  const entries: string[] = [];
   const starts: string[] = [];
   let toolResultHandler: ((event: { toolName: string; toolCallId: string; isError: boolean }) => Promise<unknown>) | undefined;
   let release!: () => void;
@@ -696,13 +697,13 @@ void test("moves an attached foreground workflow to background without restartin
     messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
     prompt: async () => { starts.push("first"); await gate; }, abort: async () => { release(); }, steer: async () => {}, dispose() {},
   });
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as typeof toolResultHandler; }, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
+  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as typeof toolResultHandler; }, appendEntry(_type: string, data: { message: string }) { entries.push(data.message); }, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   const command = commands[0]?.handler;
   assert.ok(workflow && command);
   const context = { cwd: home, hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {}, select: async (_prompt: string, options: string[]) => options.find((option) => option.includes("background-command")) } };
   const controller = new AbortController();
-  const execution = workflow.execute("foreground-call", { name: "background-command", script: `return await agent("first", {label:"first"});`, foreground: true }, controller.signal, undefined, context);
+  const execution = workflow.execute("foreground-call", { name: "background-command", script: `await log("before detach"); return await agent("first", {label:"first"});`, foreground: true }, controller.signal, () => {}, context);
   await waitForIssue105(() => starts.includes("first"));
   const runId = (await listRunIds(home, "session", home))[0];
   assert.ok(runId);
@@ -716,8 +717,10 @@ void test("moves an attached foreground workflow to background without restartin
   await command("background", context);
   await toolResultHandler?.({ toolName: "workflow", toolCallId: "foreground-call", isError: false });
   controller.abort();
-  const detached = await execution as { details: { runId: string; state: string; detached: boolean; preview?: string } };
+  const detached = await execution as { details: { runId: string; state: string; detached: boolean; preview?: string; run: { events?: readonly { type: string; message: string; timestamp?: number }[] } } };
   assert.deepEqual({ runId: detached.details.runId, state: detached.details.state, detached: detached.details.detached }, { runId, state: "running", detached: true });
+  assert.equal(detached.details.run.events?.filter((event) => event.type === "log").map((event) => event.message).join("\n"), "before detach");
+  assert.deepEqual(entries, []);
   assert.match(detached.details.preview ?? "", /Moved workflow .* to background/);
   assert.deepEqual((await store.load()).run.delivery, { mode: "background", state: "pending" });
   release();

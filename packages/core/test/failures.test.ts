@@ -164,7 +164,9 @@ void test("foreground failures patch finalized tool results with bounded diagnos
   assert.ok(patched);
   const result = patched as { content: Array<{ text: string }>; details: Record<string, unknown>; isError: boolean };
   const diagnostic = JSON.parse(result.content[0]?.text ?? "null") as WorkflowFailureDiagnostics;
-  assert.deepEqual(result.details, diagnostic);
+  const { run, ...resultDiagnostic } = result.details;
+  assert.deepEqual(resultDiagnostic, diagnostic);
+  assert.ok(run);
   assert.equal(result.isError, true);
   assert.equal(diagnostic.workflowName, "diagnostics");
   assert.equal(diagnostic.state, "failed");
@@ -198,7 +200,9 @@ void test("foreground failures patch finalized tool results with bounded diagnos
   assert.ok(emptyPatched);
   const emptyResult = emptyPatched as { content: Array<{ text: string }>; details: Record<string, unknown>; isError: boolean };
   const emptyDiagnostic = JSON.parse(emptyResult.content[0]?.text ?? "null") as { error: { message: string } };
-  assert.deepEqual(emptyResult.details, emptyDiagnostic);
+  const { run: emptyRun, ...emptyResultDiagnostic } = emptyResult.details;
+  assert.deepEqual(emptyResultDiagnostic, emptyDiagnostic);
+  assert.ok(emptyRun);
   assert.equal(emptyResult.isError, true);
   assert.equal(emptyDiagnostic.error.message, "The workflow failed without an error message.");
 });
