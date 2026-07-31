@@ -1,4 +1,14 @@
 # Changelog
+## [5.1.1] - 2026-07-31
+
+### Fixes
+
+- Clarified workflow phase state glyphs while keeping detailed agent activity in the dashboard details.
+
+### Verification
+
+- `npm run check` passes.
+
 ## [5.1.0] - 2026-07-31
 
 ### New capabilities
