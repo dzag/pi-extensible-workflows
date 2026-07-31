@@ -17,6 +17,17 @@ RunStore.prototype.saveOwnership = async function (nodes: OwnershipNodes) {
   if (failedOwnership.has(this.directory)) throw new Error("scheduler cleanup failed");
   await nativeSaveOwnership.call(this, nodes);
 };
+void test("workflow slash subcommands are rejected with picker guidance", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-workflow-slash-"));
+  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
+  const notices: string[] = [];
+  workflowExtension({ registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, registerTool() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  const command = commands[0]?.handler;
+  assert.ok(command);
+  await command("resume run-id", { ui: { notify(message: string) { notices.push(message); } } } as never);
+  assert.match(notices[0] ?? "", /\/workflow/);
+  assert.match(notices[0] ?? "", /do not accept arguments/);
+});
 void test("session-scoped navigator shows metadata and confirms terminal deletion", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-navigator-"));
   const cwd = join(home, "project");
@@ -39,7 +50,7 @@ void test("session-scoped navigator shows metadata and confirms terminal deletio
   const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
   const prompts: string[] = [];
   const selections: string[][] = [];
-  let deleteConfirmed = false;
+  const deleteConfirmed = false;
   const copied: string[] = [];
   const pi = { registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["read", "workflow"] };
   workflowExtension(pi as never, home, async (value) => { copied.push(value); });
@@ -66,8 +77,8 @@ void test("session-scoped navigator shows metadata and confirms terminal deletio
   assert.doesNotMatch(`${prompts.join("\n")}\n${selections.flat().join("\n")}`, /other/);
   await command("delete run-a", ctx as never);
   assert.equal(existsSync(store.directory), true);
-  deleteConfirmed = true;
-  await command("delete run-a", ctx as never);
+  assert.equal(deleteConfirmed, false);
+  await store.delete(true);
   assert.equal(existsSync(store.directory), false);
 });
 void test("latest-attempt actions receive the active session and lose it after completion reload", async () => {

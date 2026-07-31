@@ -62,7 +62,8 @@ void test("phase model ignores malformed history, clamps boundaries, and exposes
   const withUnassigned = buildWorkflowPhaseModel(run("running", [first, second], [{ phase: "review", afterAgent: 1 }]), ["review"]);
   assert.deepEqual(withUnassigned.unassignedAgents?.map(({ id }) => id), ["first"]);
   const tree = buildWorkflowPhaseTree(withUnassigned);
-  assert.ok(tree.roots.some((id) => tree.byId.get(id)?.label === "Unassigned"));
+  assert.equal(tree.roots[0] && tree.byId.get(tree.roots[0])?.label, "Workflow");
+  assert.ok(tree.nodes.some((node) => node.label === "Unassigned"));
 });
 
 void test("phase model preserves repeated and out-of-order observed occurrences", () => {
@@ -133,7 +134,7 @@ void test("phase dashboard keeps wide and narrow content within bounds while ret
   assert.ok(columns.length > 1, "expected multiple two-column rows");
   assert.equal(new Set(columns).size, 1, `separator column drifted: ${columns.join(",")}`);
   const narrow = formatWorkflowPhaseDashboard(current, launch, 40).join("\n");
-  assert.match(narrow, /Selected phase: review/);
+  assert.match(narrow, /Selected workflow: phases/);
 });
 
 void test("phase dashboard shows agent accounting breakdown only when measured", () => {
@@ -194,6 +195,7 @@ void test("phase tree groups structural paths and preserves stable node selectio
   const expanded = new Set(tree.nodes.filter((node) => node.kind !== "agent").map((node) => node.id));
   const visible = workflowPhaseTreeVisibleNodes(tree, expanded);
   assert.deepEqual(visible.map(({ kind, label }) => [kind, label]), [
+    ["workflow", "Workflow"],
     ["phase", "review"],
     ["operation", "reviewers"],
     ["operation", "api"],
@@ -299,7 +301,7 @@ void test("phase tree navigation collapses, expands, and moves through visible r
 });
 void test("phase tree navigation handles empty, invalid, and wrapping selections", () => {
   const empty = buildWorkflowPhaseTree(buildWorkflowPhaseModel(run("running"), []));
-  for (const direction of ["up", "down", "left", "right"] as const) assert.deepEqual(navigateWorkflowPhaseTree(empty, undefined, new Set(), direction), { expandedNodeIds: new Set() });
+  for (const direction of ["up", "down", "left", "right"] as const) assert.deepEqual(navigateWorkflowPhaseTree(empty, undefined, new Set(), direction), { nodeId: "workflow", expandedNodeIds: new Set() });
   const tree = buildWorkflowPhaseTree(buildWorkflowPhaseModel(run("running", [agent("one"), agent("two")], [{ phase: "review", afterAgent: 0 }]), ["review"]));
   const expanded = new Set(tree.nodes.filter((node) => node.children.length).map((node) => node.id));
   const visible = workflowPhaseTreeVisibleNodes(tree, expanded);

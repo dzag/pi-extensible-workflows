@@ -45,13 +45,13 @@ function workflowRecoveryGuidance(action: "resume" | "retry", state: RunState): 
     if (state === "failed") return "Failed workflow runs must use workflow_retry({ runId })";
     if (state === "completed") return "Completed workflow runs have no recovery action";
     if (state === "stopped") return "Stopped workflow runs have no recovery action; launch a new workflow";
-    if (state === "interrupted") return "Interrupted workflow runs use /workflow resume, not workflow_resume";
+    if (state === "interrupted") return "Interrupted workflow runs must be resumed from the interactive /workflow picker";
     return `Only budget-exhausted runs can be resumed with workflow_resume; source is ${state}`;
   }
   if (state === "budget_exhausted") return "Budget-exhausted workflow runs must use workflow_resume({ runId, budget? })";
   if (state === "completed") return "Completed workflow runs have no recovery action";
   if (state === "stopped") return "Stopped workflow runs cannot be retried; launch a new workflow";
-  if (state === "interrupted") return "Interrupted workflow runs use /workflow resume, not workflow_retry";
+  if (state === "interrupted") return "Interrupted workflow runs must be resumed from the interactive /workflow picker";
   return `Only failed workflow runs can be retried; source is ${state}`;
 }
 function assertExpectedWorkflowState(expectedState: string | undefined, actualState: RunState): void {

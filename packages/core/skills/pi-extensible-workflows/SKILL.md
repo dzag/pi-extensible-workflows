@@ -22,7 +22,7 @@ return await agent(
 );
 ```
 
-Await `parallel(...)` or `pipeline(...)` results before interpolation. Runs are backgrounded by default; set the tool-call `foreground: true` when the caller must wait for the final value. Use `/workflow background` to pick an attached foreground workflow to move to the background without restarting it, or provide its run ID for a prompt-free explicit command.
+Await `parallel(...)` or `pipeline(...)` results before interpolation. Runs are backgrounded by default; set the tool-call `foreground: true` when the caller must wait for the final value. Use `/workflow` to open the picker and select a run for contextual actions such as moving an attached foreground workflow to the background.
 
 ## Runtime and safety rules
 

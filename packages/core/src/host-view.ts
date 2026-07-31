@@ -603,10 +603,10 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
   const ansiPattern = new RegExp(ANSI_SGR_SOURCE, "g");
   const visibleLength = (text: string): number => text.replace(ansiPattern, "").length;
   const padTo = (text: string, limit: number): string => `${text}${" ".repeat(Math.max(0, limit - visibleLength(text)))}`;
-  const phaseStyle = (state: WorkflowPhaseState | AgentRecord["state"]): ((text: string) => string) => phaseStyleForState(state, styles);
+  const phaseStyle = (state: string): ((text: string) => string) => phaseStyleForState(state, styles);
   const phase = selection.phaseId ? model.phases.find((candidate) => candidate.id === selection.phaseId) : undefined;
   const selectedByAgent = selection.agentId ? tree.nodes.find((node) => node.kind === "agent" && node.agentId === selection.agentId && (!selection.phaseId || node.phaseId === selection.phaseId)) : undefined;
-  const selectedNode = (selection.nodeId ? tree.byId.get(selection.nodeId) : undefined) ?? selectedByAgent ?? (phase ? tree.byId.get(workflowPhaseTreePath("phase", phase.id, [])) : undefined) ?? (model.currentPhaseId ? tree.byId.get(workflowPhaseTreePath("phase", model.currentPhaseId, [])) : undefined) ?? tree.nodes[0];
+  const selectedNode = (selection.nodeId ? tree.byId.get(selection.nodeId) : undefined) ?? selectedByAgent ?? (phase ? tree.byId.get(workflowPhaseTreePath("phase", phase.id, [])) : undefined) ?? tree.byId.get("workflow") ?? (model.currentPhaseId ? tree.byId.get(workflowPhaseTreePath("phase", model.currentPhaseId, [])) : undefined) ?? tree.nodes[0];
   const selectedPhase = selectedNode?.phase ?? (selectedNode ? model.phases.find((candidate) => candidate.id === selectedNode.phaseId) : undefined);
   const visibleNodes = workflowPhaseTreeVisibleNodes(tree, expanded);
   const nodeAgents = (node: WorkflowPhaseTreeNode): AgentRecord[] => {
@@ -630,14 +630,20 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
   const details = (node: WorkflowPhaseTreeNode | undefined): string[] => {
     if (!node) return [styles.muted("No workflow node is selected"), ...(selection.actions ? [] : [styles.muted("enter run actions")])];
     const agents = nodeAgents(node);
+    if (node.kind === "workflow") {
+      const counts = phaseAgentCounts(agents);
+      return [styles.bold(`Selected workflow: ${run.workflowName}`), `Run ID: ${run.id}`, `Status: ${nodeStatus(node)}`, `agents completed=${String(counts.completed)} running=${String(counts.running)} failed=${String(counts.failed)} cancelled=${String(counts.cancelled)} pending=${String(counts.pending)}`, `Agents: ${String(agents.length)}`, ...(selection.actions ? [] : [styles.muted("enter run actions")])];
+    }
     if (node.kind === "phase") {
       const selected = node.phase;
       const counts = selected?.counts ?? phaseAgentCounts(agents);
-      return [styles.bold(`Selected phase: ${node.label}`), `Status: ${nodeStatus(node)}`, `agents completed=${String(counts.completed)} running=${String(counts.running)} failed=${String(counts.failed)} cancelled=${String(counts.cancelled)} pending=${String(counts.pending)}`, `Agents: ${String(agents.length)}`, ...(selection.actions ? [] : [styles.muted("enter run actions")])];
+      const hint = node.children.length ? "enter expand/collapse" : "enter phase details";
+      return [styles.bold(`Selected phase: ${node.label}`), `Status: ${nodeStatus(node)}`, `agents completed=${String(counts.completed)} running=${String(counts.running)} failed=${String(counts.failed)} cancelled=${String(counts.cancelled)} pending=${String(counts.pending)}`, `Agents: ${String(agents.length)}`, ...(selection.actions ? [] : [styles.muted(hint)])];
     }
     if (node.kind === "operation") {
       const states = phaseAgentCounts(agents);
-      return [styles.bold(`Selected operation: ${node.operationPath.join(" > ")}`), `Phase: ${node.phase?.name ?? node.phaseId}`, `Status: ${nodeStatus(node)}`, `agents completed=${String(states.completed)} running=${String(states.running)} failed=${String(states.failed)} cancelled=${String(states.cancelled)} pending=${String(states.pending)}`, `Agents: ${String(agents.length)}`, ...(selection.actions ? [] : [styles.muted("enter run actions")])];
+      const hint = node.children.length ? "enter expand/collapse" : "enter phase details";
+      return [styles.bold(`Selected operation: ${node.operationPath.join(" > ")}`), `Phase: ${node.phase?.name ?? node.phaseId}`, `Status: ${nodeStatus(node)}`, `agents completed=${String(states.completed)} running=${String(states.running)} failed=${String(states.failed)} cancelled=${String(states.cancelled)} pending=${String(states.pending)}`, `Agents: ${String(agents.length)}`, ...(selection.actions ? [] : [styles.muted(hint)])];
     }
     const agent = node.agent;
     if (!agent) return [styles.muted("Agent details are unavailable")];

@@ -4,7 +4,7 @@
 ### New capabilities
 - Render foreground workflow logs inline with timestamped progress while preserving background transcript delivery ([#187](https://github.com/vekexasia/pi-extensible-workflows/issues/187)).
 - Made `/workflow` run and agent actions discoverable through Enter while retaining the `a`/`A` shortcuts ([#185](https://github.com/vekexasia/pi-extensible-workflows/issues/185)).
-- Added state-filtered pickers for parameterless `/workflow pause`, `stop`, `delete`, and `background` ([#186](https://github.com/vekexasia/pi-extensible-workflows/issues/186)).
+- Made `/workflow` the sole workflow slash-command; run, agent, alias, lifecycle, budget, and checkpoint actions are now contextual in the picker and dashboard, while workflow tools remain available ([#188](https://github.com/vekexasia/pi-extensible-workflows/issues/188)).
 
 ## [5.1.0] - 2026-07-31
 

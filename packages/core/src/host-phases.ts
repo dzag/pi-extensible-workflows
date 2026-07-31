@@ -5,7 +5,7 @@ import { object } from "./utils.js";
 export type WorkflowPhaseState = "not started" | "running" | "completed" | "failed" | "cancelled" | "interrupted" | "budget_exhausted";
 export interface WorkflowPhaseAgentCounts { total: number; completed: number; running: number; failed: number; cancelled: number; pending: number }
 export interface WorkflowPhaseView { id: string; name: string; occurrence: number; state: WorkflowPhaseState; observed: boolean; afterAgent?: number; agents: readonly AgentRecord[]; counts: WorkflowPhaseAgentCounts }
-export interface WorkflowPhaseModel { declaredPhases: readonly string[]; phases: readonly WorkflowPhaseView[]; currentPhaseIndex?: number; currentPhaseId?: string; counts: Readonly<Partial<Record<WorkflowPhaseState, number>>>; unassignedAgents?: readonly AgentRecord[] }
+export interface WorkflowPhaseModel { runState: RunState; declaredPhases: readonly string[]; phases: readonly WorkflowPhaseView[]; currentPhaseIndex?: number; currentPhaseId?: string; counts: Readonly<Partial<Record<WorkflowPhaseState, number>>>; unassignedAgents?: readonly AgentRecord[] }
 type WorkflowPhaseSource = readonly string[] | Pick<LaunchSnapshot, "phases"> | undefined;
 function phaseNames(source: WorkflowPhaseSource): string[] {
   const phases: readonly unknown[] = source === undefined ? [] : Array.isArray(source) ? source : (source as Pick<LaunchSnapshot, "phases">).phases ?? [];
@@ -75,18 +75,19 @@ export function buildWorkflowPhaseModel(run: Pick<PersistedRun, "state" | "phase
   const current = currentPhaseIndex === undefined ? undefined : phases[currentPhaseIndex];
   const assigned = new Set(observedEntries.flatMap(({ agents }) => agents.map((agent) => agent.id)));
   const unassignedAgents = run.agents.filter((agent) => !assigned.has(agent.id));
-  const result: WorkflowPhaseModel = { declaredPhases, phases, counts };
+  const result: WorkflowPhaseModel = { runState: run.state, declaredPhases, phases, counts };
   if (current !== undefined && currentPhaseIndex !== undefined) { result.currentPhaseIndex = currentPhaseIndex; result.currentPhaseId = current.id; }
   if (unassignedAgents.length) result.unassignedAgents = unassignedAgents;
   return result;
 }
 export interface WorkflowPhaseSelection { phaseId?: string | undefined; agentId?: string | undefined; nodeId?: string | undefined; expandedNodeIds?: readonly string[] | undefined; treeOnly?: boolean | undefined; detailsOnly?: boolean | undefined; actions?: { title: string; options: readonly string[]; index: number } | undefined }
-export type WorkflowPhaseTreeNodeKind = "phase" | "operation" | "agent";
-export interface WorkflowPhaseTreeNode { id: string; kind: WorkflowPhaseTreeNodeKind; label: string; depth: number; phaseId: string; operationPath: readonly string[]; parentId?: string; children: readonly string[]; state: WorkflowPhaseState | AgentRecord["state"]; agentId?: string; agent?: AgentRecord; phase?: WorkflowPhaseView }
+export type WorkflowPhaseTreeNodeKind = "workflow" | "phase" | "operation" | "agent";
+export interface WorkflowPhaseTreeNode { id: string; kind: WorkflowPhaseTreeNodeKind; label: string; depth: number; phaseId: string; operationPath: readonly string[]; parentId?: string; children: readonly string[]; state: WorkflowPhaseState | RunState | AgentRecord["state"]; agentId?: string; agent?: AgentRecord; phase?: WorkflowPhaseView }
 export interface WorkflowPhaseTree { roots: readonly string[]; nodes: readonly WorkflowPhaseTreeNode[]; byId: ReadonlyMap<string, WorkflowPhaseTreeNode> }
 export interface WorkflowPhaseTreeSelection { nodeId?: string | undefined }
 export type WorkflowPhaseTreeDirection = "up" | "down" | "left" | "right";
 export function workflowPhaseTreePath(kind: WorkflowPhaseTreeNodeKind, phaseId: string, operationPath: readonly string[], agentId?: string): string {
+  if (kind === "workflow") return "workflow";
   const root = `phase/${encodeURIComponent(phaseId)}`;
   if (kind === "phase") return root;
   const operation = operationPath.map((part) => encodeURIComponent(part)).join("/");
@@ -115,7 +116,7 @@ export function buildWorkflowPhaseTree(model: WorkflowPhaseModel): WorkflowPhase
   };
   const samePath = (left: readonly string[], right: readonly string[]): boolean => left.length === right.length && left.every((part, index) => part === right[index]);
   const addPhase = (phaseId: string, label: string, agents: readonly AgentRecord[], phase?: WorkflowPhaseView): void => {
-    const phaseNode = add({ id: workflowPhaseTreePath("phase", phaseId, []), kind: "phase", label, depth: 0, phaseId, operationPath: [], state: phase?.state ?? workflowPhaseTreeAggregateState(agents.map((agent) => agent.state)), ...(phase ? { phase } : {}) });
+    const phaseNode = add({ id: workflowPhaseTreePath("phase", phaseId, []), kind: "phase", label, depth: 0, phaseId, operationPath: [], state: phase?.state ?? workflowPhaseTreeAggregateState(agents.map((agent) => agent.state)), ...(phase ? { phase } : {}) }, workflowNode.id);
     const operationNodes = new Map<string, Draft>();
     const entries: AgentEntry[] = agents.map((agent) => ({ agent, path: [...(agent.structuralPath ?? [])], node: undefined as unknown as Draft, defaultParentId: phaseNode.id }));
     const agentEntries = new Map(entries.map((entry) => [entry.agent.id, entry]));
@@ -192,6 +193,7 @@ export function buildWorkflowPhaseTree(model: WorkflowPhaseModel): WorkflowPhase
     };
     for (const operation of operationNodes.values()) operation.state = workflowPhaseTreeAggregateState(statesFor(operation));
   };
+  const workflowNode = add({ id: "workflow", kind: "workflow", label: "Workflow", depth: 0, phaseId: "", operationPath: [], state: model.runState });
   for (const phase of model.phases) addPhase(phase.id, `${phase.name}${phase.occurrence > 1 ? ` #${String(phase.occurrence)}` : ""}`, phase.agents, phase);
   if (model.unassignedAgents?.length) addPhase("unassigned", "Unassigned", model.unassignedAgents);
   const nodes = [...drafts.values()].map((node) => ({ ...node, children: [...node.children] }));
