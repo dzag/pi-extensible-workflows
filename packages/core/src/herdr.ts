@@ -117,7 +117,10 @@ function hasPiProcess(value: unknown, originatingEntrypoint?: string): boolean {
     const name = process?.name;
     const argv = process?.argv;
     const commandLine = process?.cmdline;
-    if (originatingEntrypoint) return Array.isArray(argv) && argv.some((value) => value === originatingEntrypoint) || typeof commandLine === "string" && commandLine.includes(originatingEntrypoint);
+    if (originatingEntrypoint) {
+      if (Array.isArray(argv) && argv.some((value) => value === originatingEntrypoint) || typeof commandLine === "string" && commandLine.includes(originatingEntrypoint)) return true;
+      return name === "pi" || Array.isArray(argv) && argv[0] === "pi";
+    }
     return name === "pi" || Array.isArray(argv) && argv[0] === "pi" || typeof commandLine === "string" && commandLine.includes("/bin/pi");
   });
 }

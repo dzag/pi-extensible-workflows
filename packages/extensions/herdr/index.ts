@@ -128,7 +128,7 @@ function sessionPath(reference: WorkflowAgentSessionReference): string | undefin
 }
 function inspectSessionCommand(reference: WorkflowAgentSessionReference): string {
   const source = sessionPath(reference) ?? reference.sessionId;
-  return `pi --fork ${quote(source)} --tools ${quote("read,grep,find,ls")}`;
+  return `pi --session ${quote(source)} --tools ${quote("read,grep,find,ls")}`;
 }
 function inlineFactorySource(extension: InlineExtension): string {
   const factory = typeof extension === "function" ? extension : typeof extension === "object" && typeof extension.factory === "function" ? extension.factory : undefined;
@@ -496,7 +496,7 @@ export function createHerdrExtension(options: HerdrExtensionOptions = {}): Herdr
           const label = typeof context.agent.label === "string" && context.agent.label.trim() ? context.agent.label : typeof context.agent.name === "string" && context.agent.name.trim() ? context.agent.name : "workflow agent";
           const setWorkingMessage = (state?: HerdrAgentStatus | "done" | "completed"): void => context.ui.setWorkingMessage?.(state ? `${label}: ${state}` : undefined);
           await handoff.request(async () => {
-            if (!needsContinuation(session.getLastAssistant())) return;
+            const continueTask = needsContinuation(session.getLastAssistant());
             let opened: PaneHandle | undefined;
             let suspended = false;
             let reportedWorking = false;
@@ -515,7 +515,7 @@ export function createHerdrExtension(options: HerdrExtensionOptions = {}): Herdr
                 await session.suspendForHandoff();
                 suspended = true;
               }
-              opened = await launchPane({ session, prepared, identity: { structuralPath: context.agent.structuralPath ?? [], ...(context.agent.parentBreadcrumb ? { parentBreadcrumb: context.agent.parentBreadcrumb } : {}), callSite: context.agent.label ?? context.agent.name, occurrence: context.attempt.attempt }, attempt: context.attempt.attempt, runner, fullyInspectable: false, env, signal: context.signal, prompt: "Continue the current workflow task from this session.", directPrompt: true, onStatus: reportStatus });
+              opened = await launchPane({ session, prepared, identity: { structuralPath: context.agent.structuralPath ?? [], ...(context.agent.parentBreadcrumb ? { parentBreadcrumb: context.agent.parentBreadcrumb } : {}), callSite: context.agent.label ?? context.agent.name, occurrence: context.attempt.attempt }, attempt: context.attempt.attempt, runner, fullyInspectable: false, env, signal: context.signal, prompt: continueTask ? "Continue the current workflow task from this session." : undefined, directPrompt: continueTask, onStatus: reportStatus });
               handoff.takeover();
               if (!session.suspendForHandoff) {
                 await abortSession(session);

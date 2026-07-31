@@ -64,7 +64,7 @@ void test("opens a completed session in a Herdr pane without taking ownership", 
     assert.deepEqual(calls, [
       ["pane", "layout", "--pane", "pane"],
       ["pane", "split", "pane", "--direction", "right", "--no-focus"],
-      ["pane", "run", "new-pane", `cd '${process.cwd()}' && pi --fork '/tmp/completed session.jsonl' --tools 'read,grep,find,ls'`],
+      ["pane", "run", "new-pane", `cd '${process.cwd()}' && pi --session '/tmp/completed session.jsonl' --tools 'read,grep,find,ls'`],
     ]);
   } finally {
     for (const [name, value] of Object.entries(previousEnvironment)) {
@@ -94,7 +94,7 @@ void test("falls back to the run cwd when a completed attempt worktree was remov
     assert.deepEqual(calls, [
       ["pane", "layout", "--pane", "pane"],
       ["pane", "split", "pane", "--direction", "right", "--no-focus"],
-      ["pane", "run", "new-pane", `cd '${root}' && pi --fork '/tmp/completed session.jsonl' --tools 'read,grep,find,ls'`],
+      ["pane", "run", "new-pane", `cd '${root}' && pi --session '/tmp/completed session.jsonl' --tools 'read,grep,find,ls'`],
     ]);
     assert.equal(extension.agentAttemptActions.openSession.visible({ ...context, run: { cwd: join(root, "removed") } }), false);
   } finally {
@@ -174,19 +174,38 @@ void test("fails a Herdr handoff when the originating Pi runtime is unavailable"
   await assert.rejects(opening, /originating Pi runtime is unavailable \(resolution failed\)/);
   assert.equal(calls.some(([command, subcommand]) => command === "pane" && subcommand === "run"), false);
 });
-void test("does not open a pane after a terminal assistant response", async () => {
+void test("opens a terminal live session without inventing a continuation", async () => {
   const calls = [];
   const ownership = [];
-  const runner = async (args) => { calls.push([...args]); return ""; };
+  let processReports = 0;
+  let runCommand;
+  const runner = async (args) => {
+    calls.push([...args]);
+    if (args[0] === "pane" && args[1] === "run") {
+      const script = /sh '([^']+)'$/.exec(args[3]);
+      runCommand = script ? readFileSync(script[1], "utf8") : args[3];
+    }
+    if (args[1] === "layout") return JSON.stringify({ result: { layout: { panes: [{ pane_id: "pane", rect: { width: 80, height: 20 } }] } } });
+    if (args[1] === "split") return JSON.stringify({ result: { pane: { pane_id: "new-pane" } } });
+    if (args[1] === "process-info") {
+      processReports += 1;
+      return processReports === 1 ? JSON.stringify({ result: { process_info: { foreground_processes: [{ name: "node", argv: [process.execPath, piRuntime.entrypoint] }] } } }) : JSON.stringify({ result: { process_info: { foreground_processes: [] } } });
+    }
+    return "";
+  };
   const extension = createHerdrExtension({ agentDir: mkdtempSync(join(tmpdir(), "herdr-extension-terminal-")), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" }, runner });
   const handoff = createLiveSessionHandoff();
   handoff.observe({ type: "turn_started" });
   const session = { reference: { transport: "local", sessionId: "session" }, getLastAssistant: () => ({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "completed report" }] }), suspendForHandoff: async () => ownership.push("suspend"), resumeFromHandoff: async () => ownership.push("resume") };
-  const opening = extension.agentAttemptActions.openLiveSession.run({ liveSession: session, prepared: {}, handoff, attempt: { attempt: 1 }, agent: {}, run: {}, signal: new AbortController().signal, ui: {} });
+  const opening = extension.agentAttemptActions.openLiveSession.run({ liveSession: session, prepared: { cwd: "/repo", model: { provider: "openai", model: "gpt" }, tools: [], piRuntime }, handoff, attempt: { attempt: 1 }, agent: {}, run: {}, signal: new AbortController().signal, ui: {} });
   handoff.observe({ type: "turn_end" });
   await opening;
-  assert.equal(calls.some(([command, subcommand]) => command === "pane" && subcommand === "run"), false);
-  assert.deepEqual(ownership, []);
+  const runCall = calls.find(([command, subcommand]) => command === "pane" && subcommand === "run");
+  assert.ok(runCall);
+  assert.ok(runCommand);
+  assert.match(runCommand, /--session-id 'session'/);
+  assert.doesNotMatch(runCommand, /Continue the current workflow task/);
+  assert.deepEqual(ownership, ["suspend", "resume"]);
 });
 void test("reports terminal turns as idle", async () => {
   const handlers = new Map();
