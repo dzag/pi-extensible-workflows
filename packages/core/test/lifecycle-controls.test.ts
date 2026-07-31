@@ -700,7 +700,7 @@ void test("moves an attached foreground workflow to background without restartin
   const workflow = tools.find(({ name }) => name === "workflow");
   const command = commands[0]?.handler;
   assert.ok(workflow && command);
-  const context = { cwd: home, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
+  const context = { cwd: home, hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {}, select: async (_prompt: string, options: string[]) => options.find((option) => option.includes("background-command")) } };
   const controller = new AbortController();
   const execution = workflow.execute("foreground-call", { name: "background-command", script: `return await agent("first", {label:"first"});`, foreground: true }, controller.signal, undefined, context);
   await waitForIssue105(() => starts.includes("first"));
@@ -745,7 +745,7 @@ void test("detaching a checkpointed foreground workflow switches future prompts 
   const store = new RunStore(home, "session", runId, home);
   t.after(() => { releaseSelect(); });
   await waitForIssue105(async () => (await store.load()).run.state === "awaiting_input");
-  await command("background", context);
+  await command(`background ${runId}`, context);
   const detached = await execution as { details: { runId: string; state: string; detached: boolean } };
   assert.deepEqual({ runId: detached.details.runId, state: detached.details.state, detached: detached.details.detached }, { runId, state: "running", detached: true });
   assert.deepEqual((await store.load()).run.delivery, { mode: "background", state: "pending" });

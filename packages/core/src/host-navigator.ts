@@ -97,7 +97,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
         return entries.filter((entry): entry is { store: RunStore; loaded: { run: PersistedRun; snapshot: Readonly<LaunchSnapshot> }; resolvedAt: number | undefined } => entry !== undefined);
       };
       let stores = await loadStores();
-      const usage = "Usage: /workflow [model-aliases], or /workflow background [run-id], pause|resume [run-id]|stop|approve|reject|delete <run-id> [checkpoint-name]. Approve/reject are for checkpoints only; use workflow_respond with a proposalId or the navigator's budget controls for budget decisions. Use workflow_resume for budget patches."
+      const usage = "Usage: /workflow [model-aliases], or /workflow background|pause|resume|stop|delete [run-id]|approve|reject <run-id> [checkpoint-name]. Approve/reject are for checkpoints only; use workflow_respond with a proposalId or the navigator's budget controls for budget decisions. Use workflow_resume for budget patches."
       const setWorkflowStatus = (text: string | undefined) => {
         const setStatus = uiHostCapabilities(ctx.ui)?.setStatus;
         setStatus?.call(ctx.ui, "workflow-stop", text);
@@ -171,6 +171,27 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
           return "dashboard";
         }
       };
+      const selectParameterlessActionRun = async (action: "pause" | "stop" | "delete" | "background"): Promise<string | undefined> => {
+        const ui = uiHostCapabilities(ctx.ui);
+        if (!ctx.hasUI || !ui?.select) { ctx.ui.notify(`Interactive workflow ${action} selection is unavailable; provide a run ID.`, "info"); return; }
+        const candidates = navigatorAttentionSort(
+          action === "delete"
+            ? stores.filter(({ loaded: { run } }) => hardTerminalRunStates.has(run.state))
+            : action === "background"
+              ? stores.filter(({ store }) => isForegroundAttached(store.runId))
+              : stores.filter(({ store }) => {
+                  const live = runs.get(store.runId);
+                  if (!live) return false;
+                  return action === "pause" ? live.lifecycle.state === "running" : !hardTerminalRunStates.has(live.lifecycle.state);
+                }),
+        );
+        const labels = navigatorRunLabels(candidates);
+        const description = action === "background" ? "attached foreground" : action === "pause" ? "pausable" : action === "stop" ? "stoppable" : "deletable";
+        if (!candidates.length) { ctx.ui.notify(`No ${description} workflow runs in this Pi session.`, "info"); return; }
+        const selectedLabel = await ui.select(`${description[0]?.toUpperCase() ?? ""}${description.slice(1)} workflows`, [...labels, "Cancel"]);
+        if (!selectedLabel || selectedLabel === "Cancel") return;
+        return candidates[labels.indexOf(selectedLabel)]?.store.runId;
+      };
       const manageAliases = async (): Promise<void> => {
         const settingsPath = workflowSettingsPath(extensionAgentDir);
         let aliasSettingsPath = settingsPath;
@@ -237,6 +258,12 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
       if (command === "model-aliases") {
         if (!ctx.hasUI) { ctx.ui.notify("Model alias management requires UI.", "warning"); return; }
         await manageAliases();
+        return;
+      }
+      const parameterlessAction = ["pause", "stop", "delete", "background"].includes(command) ? command as "pause" | "stop" | "delete" | "background" : undefined;
+      if (parameterlessAction) {
+        const runId = await selectParameterlessActionRun(parameterlessAction);
+        if (runId) await runAction(`${parameterlessAction} ${runId}`, true);
         return;
       }
       if (command.split(/\s+/)[0] === "resume" && command !== "resume") { await runAction(command, false); return; }

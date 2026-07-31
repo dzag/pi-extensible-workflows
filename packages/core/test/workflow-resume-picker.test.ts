@@ -98,6 +98,7 @@ async function createLivePausedRun(sourceForeground: boolean): Promise<{ testSet
   const paused = new Promise<string>((resolve) => { resolvePaused = resolve; });
   let pauseRequested = false;
   const testSetup = setup(home, cwd, (prompt, options) => {
+    if (prompt === "Pausable workflows") return options.find((option) => option.includes("live-paused"));
     if (prompt === "Resumable workflows") return options.find((option) => option.includes("live-paused"));
     if (options.includes("Foreground")) return sourceForeground ? "Foreground" : "Background";
     return undefined;
@@ -107,8 +108,7 @@ async function createLivePausedRun(sourceForeground: boolean): Promise<{ testSet
     const event = data as { phase?: string; runId?: string };
     if (event.phase !== "pause" || !event.runId) return;
     pauseRequested = true;
-    const runId = event.runId;
-    void testSetup.command(`pause ${runId}`, testSetup.context).then(() => { resolvePaused(runId); });
+    void testSetup.command("pause", testSetup.context).then(() => { resolvePaused(event.runId as string); });
   });
   await startSetup(testSetup);
   const workflow = testSetup.tools.find(({ name }) => name === "workflow");
@@ -251,6 +251,55 @@ void test("parameterless resume reports no candidates", async () => {
   await testSetup.command("resume", testSetup.context);
   assert.deepEqual(testSetup.selections, []);
   assert.ok(testSetup.notices.includes("No resumable workflow runs in this Pi session."));
+  await testSetup.shutdown?.();
+});
+
+void test("parameterless delete selects a single deletable run", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-delete-picker-"));
+  const cwd = join(home, "project");
+  const store = await createRun(home, cwd, "completed-run", "completed");
+  const testSetup = setup(home, cwd, (_prompt, options) => options.find((option) => option.includes("completed-run")));
+  await startSetup(testSetup);
+  const context = { ...testSetup.context, ui: { ...testSetup.context.ui, confirm: async () => true } };
+  await testSetup.command("delete", context);
+  const picker = testSetup.selections.find(({ prompt }) => prompt === "Deletable workflows");
+  assert.ok(picker);
+  assert.equal(picker.options.at(-1), "Cancel");
+  assert.ok(picker.options.some((option) => option.includes("completed-run")));
+  await assert.rejects(store.load());
+  await testSetup.shutdown?.();
+});
+
+void test("parameterless stop selects a live non-terminal run and confirms", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-stop-picker-"));
+  const cwd = join(home, "project");
+  const store = await createRun(home, cwd, "interrupted-run", "interrupted");
+  const testSetup = setup(home, cwd, (prompt, options) => prompt === "Stoppable workflows" ? options.find((option) => option.includes("interrupted-run")) : undefined);
+  await startSetup(testSetup);
+  let confirmed = false;
+  const context = { ...testSetup.context, ui: { ...testSetup.context.ui, confirm: async () => { confirmed = true; return true; } } };
+  await testSetup.command("stop", context);
+  const picker = testSetup.selections.find(({ prompt }) => prompt === "Stoppable workflows");
+  assert.ok(picker);
+  assert.equal(picker.options.at(-1), "Cancel");
+  assert.ok(confirmed);
+  assert.equal((await store.load()).run.state, "stopped");
+  assert.ok(testSetup.notices.includes("Stopped workflow interrupted-run."));
+  await testSetup.shutdown?.();
+});
+
+void test("cancelling a parameterless delete picker leaves the run unchanged", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-delete-cancel-"));
+  const cwd = join(home, "project");
+  const store = await createRun(home, cwd, "cancel-delete", "completed");
+  const testSetup = setup(home, cwd, (prompt) => prompt === "Deletable workflows" ? "Cancel" : undefined);
+  await startSetup(testSetup);
+  let confirmed = false;
+  const context = { ...testSetup.context, ui: { ...testSetup.context.ui, confirm: async () => { confirmed = true; return true; } } };
+  await testSetup.command("delete", context);
+  assert.equal((await store.load()).run.state, "completed");
+  assert.equal(confirmed, false);
+  assert.equal(testSetup.notices.some((message) => message.startsWith("Deleted workflow")), false);
   await testSetup.shutdown?.();
 });
 
