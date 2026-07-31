@@ -204,7 +204,7 @@ void test("TUI navigator exposes agent-scoped worktree actions without transcrip
           component.handleInput?.("h");
           component.handleInput?.("h");
           component.handleInput?.("h");
-          component.handleInput?.("a");
+          component.handleInput?.("tui.select.confirm");
           chooseAction("Copy run path");
         } else if (customCalls === 2) {
           component.handleInput?.("a");
@@ -459,6 +459,14 @@ void test("navigator returns to the picker after cancelling a recovered run dash
       const dashboard = component.render(200).join("\n");
       assert.match(dashboard, /interrupted/);
       assert.match(dashboard, /Tree/);
+      component.render(40);
+      component.handleInput?.("tui.select.confirm");
+      const narrowDetails = component.render(40).join("\n");
+      assert.match(narrowDetails, /enter run actions/);
+      component.handleInput?.("tui.select.confirm");
+      assert.match(component.render(40).join("\n"), /Run actions/);
+      component.handleInput?.("tui.select.cancel");
+      component.handleInput?.("tui.select.cancel");
       component.handleInput?.("a");
       assert.match(component.render(200).join("\n"), /Resume/);
       component.handleInput?.("tui.select.cancel");

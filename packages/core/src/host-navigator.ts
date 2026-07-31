@@ -548,7 +548,8 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                         selectionNeedsScroll = false;
                       }
                       dashboardOffset = Math.max(0, Math.min(maxOffset, dashboardOffset));
-                      const hint = truncateToVisualLines(theme.fg("dim", actionMode ? `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} actions · ${keyLabel("tui.select.confirm", "enter")} run · ${keyLabel("tui.editor.cursorLeft", "←")} tree · ${keyLabel("tui.select.cancel", "esc")} tree` : `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} tree · ${keyLabel("tui.editor.cursorLeft", "←")}/${keyLabel("tui.editor.cursorRight", "→")} collapse/expand · ${keyLabel("tui.select.confirm", "enter")} inspect · a actions · ${keyLabel("tui.select.cancel", "esc")} ${narrow && detailsMode ? "tree" : "back"}${content.length > viewport ? ` · ${keyLabel("tui.select.pageUp", "pgup")}/${keyLabel("tui.select.pageDown", "pgdn")} scroll` : ""} · auto-refresh 1s`), Number.MAX_SAFE_INTEGER, width, 1).visualLines[0] ?? "";
+                      const enterAction = agent ? "agent actions" : "run actions";
+                      const hint = truncateToVisualLines(theme.fg("dim", actionMode ? `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} actions · ${keyLabel("tui.select.confirm", "enter")} run · ${keyLabel("tui.editor.cursorLeft", "←")} tree · ${keyLabel("tui.select.cancel", "esc")} tree` : `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} tree · ${keyLabel("tui.editor.cursorLeft", "←")}/${keyLabel("tui.editor.cursorRight", "→")} collapse/expand · ${keyLabel("tui.select.confirm", "enter")} ${enterAction} · a actions · ${keyLabel("tui.select.cancel", "esc")} ${narrow && detailsMode ? "tree" : "back"}${content.length > viewport ? ` · ${keyLabel("tui.select.pageUp", "pgup")}/${keyLabel("tui.select.pageDown", "pgdn")} scroll` : ""} · auto-refresh 1s`), Number.MAX_SAFE_INTEGER, width, 1).visualLines[0] ?? "";
                       return [...content.slice(dashboardOffset, dashboardOffset + viewport), ...(hintRows ? [hint] : [])];
                     },
                     invalidate() {},
@@ -598,15 +599,15 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                         tui.requestRender();
                         return;
                       }
-                      const current = selectedNodeId ? tree.byId.get(selectedNodeId) : tree.nodes[0];
                       if (workflowKeyMatches(keybindings, data, "tui.select.cancel")) {
                         if (narrow && detailsMode) { detailsMode = false; selectionNeedsScroll = true; } else done("Back");
                       } else if (narrow && detailsMode) {
                         if (workflowKeyMatches(keybindings, data, "tui.select.pageUp")) dashboardOffset = Math.max(0, dashboardOffset - Math.max(1, terminalRows() - 1));
                         else if (workflowKeyMatches(keybindings, data, "tui.select.pageDown")) dashboardOffset += Math.max(1, terminalRows() - 1);
                         else if (workflowKeyMatches(keybindings, data, "tui.select.confirm")) {
-                          if (current?.kind === "agent" && current.agentId) { actionMode = true; actionIndex = 0; }
-                          else if (current?.children.length) { if (expandedNodeIds.has(current.id)) expandedNodeIds.delete(current.id); else expandedNodeIds.add(current.id); }
+                          actionMode = true;
+                          actionIndex = 0;
+                          dashboardOffset = 0;
                         }
                       } else if (workflowKeyMatches(keybindings, data, "tui.editor.cursorLeft")) {
                         const next = navigateWorkflowPhaseTree(tree, selectedNodeId, expandedNodeIds, "left");
@@ -624,8 +625,11 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                       else if (workflowKeyMatches(keybindings, data, "tui.select.pageDown")) dashboardOffset += Math.max(1, terminalRows() - 1);
                       else if (workflowKeyMatches(keybindings, data, "tui.select.confirm")) {
                         if (narrow) detailsMode = true;
-                        else if (current?.kind === "agent" && current.agentId) { actionMode = true; actionIndex = 0; }
-                        else if (current?.children.length) { if (expandedNodeIds.has(current.id)) expandedNodeIds.delete(current.id); else expandedNodeIds.add(current.id); }
+                        else {
+                          actionMode = true;
+                          actionIndex = 0;
+                          dashboardOffset = 0;
+                        }
                       }
                       tui.requestRender();
                     },

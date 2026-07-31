@@ -603,22 +603,22 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
     return `${selected ? "→" : " "} ${"  ".repeat(node.depth)}${nodeIcon(node)} ${node.label} · ${state(node.state)}${activity ? ` ${activity}` : ""}`;
   };
   const details = (node: WorkflowPhaseTreeNode | undefined): string[] => {
-    if (!node) return [styles.muted("No workflow node is selected")];
+    if (!node) return [styles.muted("No workflow node is selected"), styles.muted("enter run actions")];
     const agents = nodeAgents(node);
     if (node.kind === "phase") {
       const selected = node.phase;
       const counts = selected?.counts ?? phaseAgentCounts(agents);
-      return [styles.bold(`Selected phase: ${node.label}`), `Status: ${nodeStatus(node)}`, `agents completed=${String(counts.completed)} running=${String(counts.running)} failed=${String(counts.failed)} cancelled=${String(counts.cancelled)} pending=${String(counts.pending)}`, `Agents: ${String(agents.length)}`];
+      return [styles.bold(`Selected phase: ${node.label}`), `Status: ${nodeStatus(node)}`, `agents completed=${String(counts.completed)} running=${String(counts.running)} failed=${String(counts.failed)} cancelled=${String(counts.cancelled)} pending=${String(counts.pending)}`, `Agents: ${String(agents.length)}`, styles.muted("enter run actions")];
     }
     if (node.kind === "operation") {
       const states = phaseAgentCounts(agents);
-      return [styles.bold(`Selected operation: ${node.operationPath.join(" > ")}`), `Phase: ${node.phase?.name ?? node.phaseId}`, `Status: ${nodeStatus(node)}`, `agents completed=${String(states.completed)} running=${String(states.running)} failed=${String(states.failed)} cancelled=${String(states.cancelled)} pending=${String(states.pending)}`, `Agents: ${String(agents.length)}`];
+      return [styles.bold(`Selected operation: ${node.operationPath.join(" > ")}`), `Phase: ${node.phase?.name ?? node.phaseId}`, `Status: ${nodeStatus(node)}`, `agents completed=${String(states.completed)} running=${String(states.running)} failed=${String(states.failed)} cancelled=${String(states.cancelled)} pending=${String(states.pending)}`, `Agents: ${String(agents.length)}`, styles.muted("enter run actions")];
     }
     const agent = node.agent;
     if (!agent) return [styles.muted("Agent details are unavailable")];
     const duration = agentDuration(agent, now);
     const stalled = stalledDuration(agent, now);
-    const result = [...(agent.activity ? [`Activity: ${agent.activity.text}`] : []), ...(stalled === undefined ? [] : [styles.warning(`stalled? ${formatStalledDuration(stalled)}`)]), `State: ${phaseStyle(agent.state)(agent.state)}`, ...(agent.structuralPath?.length ? [`Structural path: ${agent.structuralPath.join(" > ")}`] : []), `Model: ${agent.model.provider}/${agent.model.model}${agent.model.thinking ? `:${agent.model.thinking}` : ""}`, `Role: ${agent.role ?? "(none)"}`, `Tools: ${agent.tools.join(", ") || "(none)"}`, ...(agent.attempts > 1 ? [`Attempts: ${String(agent.attempts)}`] : []), ...(duration === undefined ? [] : [`Duration: ${formatWorkflowRuntime(duration)}`]), ...(agent.accounting ? formatAgentAccounting(agent.accounting) : []), ...(selection.actions ? [] : [styles.muted("enter for agent actions")])];
+    const result = [...(agent.activity ? [`Activity: ${agent.activity.text}`] : []), ...(stalled === undefined ? [] : [styles.warning(`stalled? ${formatStalledDuration(stalled)}`)]), `State: ${phaseStyle(agent.state)(agent.state)}`, ...(agent.structuralPath?.length ? [`Structural path: ${agent.structuralPath.join(" > ")}`] : []), `Model: ${agent.model.provider}/${agent.model.model}${agent.model.thinking ? `:${agent.model.thinking}` : ""}`, `Role: ${agent.role ?? "(none)"}`, `Tools: ${agent.tools.join(", ") || "(none)"}`, ...(agent.attempts > 1 ? [`Attempts: ${String(agent.attempts)}`] : []), ...(duration === undefined ? [] : [`Duration: ${formatWorkflowRuntime(duration)}`]), ...(agent.accounting ? formatAgentAccounting(agent.accounting) : []), ...(selection.actions ? [] : [styles.muted("enter agent actions")])];
     const error = agent.attemptDetails?.at(-1)?.error;
     if (error) result.push(styles.error(`Error: ${error.code}: ${error.message}`));
     return result;
