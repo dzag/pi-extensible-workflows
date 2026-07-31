@@ -26,12 +26,27 @@ export type WorkflowErrorCode = (typeof ERROR_CODES)[number];
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export type JsonSchema = { [key: string]: JsonValue };
 type WorkflowSchema = JsonSchema | TSchema;
+export type RoleOverride = {
+  name: string;
+  model?: string | null;
+  thinking?: NonNullable<ModelSpec["thinking"]> | null;
+  tools?: string[] | null;
+  description?: string | null;
+  overrideSystemPrompt?: boolean | null;
+  contextFiles?: ContextFileScope[] | null;
+  disabledAgentResources?: { skills: string[]; extensions: string[] } | null;
+};
+export function roleNameOf(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (typeof value === "object" && value !== null && !Array.isArray(value) && typeof (value as { name?: unknown }).name === "string") return (value as { name: string }).name;
+  return undefined;
+}
 export interface AgentOptions<Schema extends TSchema = never> {
   label?: string;
   model?: string;
   thinking?: NonNullable<ModelSpec["thinking"]>;
   tools?: string[];
-  role?: string;
+  role?: string | RoleOverride;
   outputSchema?: JsonSchema | Schema;
   retries?: number;
   timeoutMs?: number | null;
