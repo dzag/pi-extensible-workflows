@@ -6,7 +6,7 @@ import { StringDecoder } from "node:string_decoder";
 import { RunStore, structuralPath as operationPath } from "./persistence.js";
 import type { AgentAttempt } from "./agent-execution.js";
 import type { AgentIdentity, AgentAttemptSummary, JsonValue, ShellIdentity, ShellOptions, ShellResult, WorkflowAgentSessionReference, WorkflowBridge, WorkflowErrorCode, WorkflowExecution } from "./types.js";
-import { WorkflowError } from "./types.js";
+import { WorkflowError, roleNameOf } from "./types.js";
 import { asWorkflowError, errorText, fail, isWorkflowAuthored, jsonValue, markWorkflowAuthored, object, positiveInteger } from "./utils.js";
 import { instrumentWorkflow, validateAgentOptions, validateShellCommand, validateShellOptions } from "./validation.js";
 
@@ -460,7 +460,7 @@ export function runWorkflow(script: string, args: JsonValue = null, bridge: Work
         const opts = validateAgentOptions(values[1]);
         const identity = readAgentIdentity(values[2]);
         const path = agentIdentityPath(identity);
-        const label = typeof opts.label === "string" ? opts.label : typeof opts.role === "string" ? opts.role : "agent";
+        const label = typeof opts.label === "string" ? opts.label : roleNameOf(opts.role) ?? "agent";
         try {
           const result = await bridge.agent(values[0], opts, controller.signal, identity);
           value = branded({ name: label, ok: true, value: result ?? null });
