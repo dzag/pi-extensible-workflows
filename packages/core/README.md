@@ -21,7 +21,7 @@ The repository is an npm-workspaces monorepo. The public package is maintained i
 
 ## Capabilities
 
-The default path is a named inline workflow: write a `script` that fans out independent work with `parallel(...)`, awaits the keyed results, passes them into one summarizing `agent(...)`, and returns. Provide exactly one of `script` or `scriptPath` and a non-empty `name`; a reviewed JavaScript file's contents are captured in the run at launch. Registered functions are available as globals inside scripts, and `args` remains available to pass JSON values into the script. Runs are backgrounded by default; set `foreground: true` when the final value must be returned in the same tool call. If a foreground tool call detaches before its result is accepted by the next event-loop turn, the terminal success or failure is promoted to exactly one follow-up message.
+The default path is a named inline workflow: write a `script` that fans out independent work with `parallel(...)`, awaits the keyed results, passes them into one summarizing `agent(...)`, and returns. Provide exactly one of `script` or `scriptPath` and a non-empty `name`; a reviewed JavaScript file's contents are captured in the run at launch. Registered functions are available as globals inside scripts, and `args` remains available to pass JSON values into the script. Runs are backgrounded by default; set `foreground: true` when the final value must be returned in the same tool call. Use `/workflow` to open the workflow picker, then choose a run and its contextual dashboard actions, including moving an attached foreground workflow to the background. The terminal result is then delivered as exactly one follow-up message. If a foreground tool call detaches before its result is accepted by the next event-loop turn, the terminal success or failure is promoted to exactly one follow-up message.
 
 ```js
 const reviews = await parallel("review", {
@@ -45,6 +45,7 @@ Learn more about roles, workflow contracts, and extension APIs in the documentat
 - [Global and project settings](https://vekexasia.github.io/pi-extensible-workflows/developers.html#settings)
 - [Aggregate run budgets](https://vekexasia.github.io/pi-extensible-workflows/developers.html#budgets)
 - [Workflow DSL and worktrees](https://vekexasia.github.io/pi-extensible-workflows/developers.html#dsl)
+- [Role files and per-call customization](https://vekexasia.github.io/pi-extensible-workflows/roles.html)
 - [Extension authoring guide](https://vekexasia.github.io/pi-extensible-workflows/extensions.html)
 - [Copy-paste extension template](https://github.com/vekexasia/pi-extensible-workflows/tree/main/packages/core/examples/workflow-extension-template)
 - [Run artifacts and lifecycle events](https://vekexasia.github.io/pi-extensible-workflows/developers.html#lifecycle)

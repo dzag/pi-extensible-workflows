@@ -1,19 +1,19 @@
 # Changelog
-## Unreleased
-
-### New capabilities
-- Render foreground workflow logs inline with timestamped progress while preserving background transcript delivery ([#187](https://github.com/vekexasia/pi-extensible-workflows/issues/187)).
-- Made `/workflow` run and agent actions discoverable through Enter while retaining the `a`/`A` shortcuts ([#185](https://github.com/vekexasia/pi-extensible-workflows/issues/185)).
-- Made `/workflow` the sole workflow slash-command; run, agent, alias, lifecycle, budget, and checkpoint actions are now contextual in the picker and dashboard, while workflow tools remain available ([#188](https://github.com/vekexasia/pi-extensible-workflows/issues/188)).
-
 ## [5.1.0] - 2026-07-31
 
 ### New capabilities
 
 - Added role-targeted `piewf doctor --role` inspection of effective agent resources and prepared prompts without provider execution ([#181](https://github.com/vekexasia/pi-extensible-workflows/issues/181)).
-- Added `/workflow background` to move an attached foreground workflow to background delivery without restarting it ([#182](https://github.com/vekexasia/pi-extensible-workflows/issues/182)).
+- Added `/workflow` as the sole workflow slash-command with contextual run, agent, lifecycle, budget, and checkpoint actions; Enter opens the applicable action picker and `a`/`A` remains available as a legacy shortcut ([#185](https://github.com/vekexasia/pi-extensible-workflows/issues/185), [#188](https://github.com/vekexasia/pi-extensible-workflows/issues/188)).
+- Added an interactive startup picker to resume one or all interrupted workflows.
+- Added `/workflow background` behavior to move an attached foreground workflow to background delivery without restarting it ([#182](https://github.com/vekexasia/pi-extensible-workflows/issues/182)).
 - Added role `contextFiles` policies to scope context visible to workflow agents ([#179](https://github.com/vekexasia/pi-extensible-workflows/issues/179)).
-- Added long-running shell progress reporting in workflow views ([#180](https://github.com/vekexasia/pi-extensible-workflows/issues/180)).
+- Added per-call role override objects with inheritance, unsetting, and explicit replacement semantics.
+- Added long-running shell progress reporting and inline foreground log rendering while preserving background transcript delivery ([#180](https://github.com/vekexasia/pi-extensible-workflows/issues/180), [#187](https://github.com/vekexasia/pi-extensible-workflows/issues/187)).
+
+### Fixes
+
+- Exported CLI launchers now prefer the configured Pi package installation before resolving a development-workspace package, preserving registered workflow functions when launched from the repository.
 
 ### CLI and diagnostics
 
@@ -22,6 +22,10 @@
 ### TypeScript API
 
 - Added typed workflow schemas and orchestration results, plus public local Pi/session inspection APIs.
+
+### Herdr
+
+- Kept handed-off and completed workflow sessions inspectable, including correct continuation behavior for already-completed sessions.
 
 ### Verification
 

@@ -45,6 +45,7 @@ Learn more about roles, workflow contracts, and extension APIs in the documentat
 - [Global and project settings](https://vekexasia.github.io/pi-extensible-workflows/developers.html#settings)
 - [Aggregate run budgets](https://vekexasia.github.io/pi-extensible-workflows/developers.html#budgets)
 - [Workflow DSL and worktrees](https://vekexasia.github.io/pi-extensible-workflows/developers.html#dsl)
+- [Role files and per-call customization](https://vekexasia.github.io/pi-extensible-workflows/roles.html)
 - [Extension authoring guide](https://vekexasia.github.io/pi-extensible-workflows/extensions.html)
 - [Copy-paste extension template](https://github.com/vekexasia/pi-extensible-workflows/tree/main/packages/core/examples/workflow-extension-template)
 - [Run artifacts and lifecycle events](https://vekexasia.github.io/pi-extensible-workflows/developers.html#lifecycle)

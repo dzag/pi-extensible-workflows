@@ -14,6 +14,7 @@
       <nav aria-label="Primary navigation">
         <a href="developers.html">Developers</a>
         <a class="active" href="agents.html">Agents</a>
+        <a href="roles.html">Roles</a>
         <a href="extensions.html">Extensions</a>
         <a href="https://github.com/vekexasia/pi-extensible-workflows">Repository</a>
       </nav>
@@ -25,7 +26,7 @@
       <a href="#quick-start">Quick start</a>
       <a href="#script-contract">Script and args</a>
       <a href="#patterns">Workflow patterns</a>
-      <a href="#selection">Roles and models</a>
+      <a href="roles.html">Roles and call customization</a>
       <a href="#budgets">Run budgets</a>
       <a href="#checkpoints">Checkpoints</a>
       <a href="#recovery">Failure and recovery</a>
@@ -97,14 +98,14 @@
         <p>Use roles only when the Pi installation provides those role files. Otherwise choose an explicit available model and the smallest required tool list.</p>
       </section>
       <section id="selection">
-        <h2>Role and model selection</h2>
-        <p>An agent can select a <code>role</code> string, a role object such as <code>{ name: "reviewer", model: "provider/model", tools: [] }</code>, a configured model alias, an explicit <code>model</code> such as <code>provider/model:thinking</code>, a <code>thinking</code> level, and a list of <code>tools</code>. A role object loads the named role and overrides its frontmatter per call: omitted fields inherit, <code>null</code> unsets, and explicit values including <code>[]</code> and <code>false</code> replace the file value. Keep top-level <code>model</code>, <code>thinking</code>, and <code>tools</code> out of calls with any role form; put overrides inside the role object. A requested model or tool must be inside the launching session boundary. When <code>workflow_catalog</code> exposes model aliases, an exact alias name takes precedence over a matching native bare model name; explicit call-level <code>thinking</code> overrides the alias suffix. See <a href="developers.html#settings">global workflow settings</a> for alias and workflow-agent resource policy.</p>
-        <p>Optional controls are <code>outputSchema</code>, non-negative integer <code>retries</code>, positive integer or <code>null</code> <code>timeoutMs</code>, and the canonical <code>withWorktree(name, callback)</code> scope. Use separate named scopes for independent branches and one enclosing scope for collaborators.</p>
-        <pre><code class="language-javascript"><span class="tok-keyword">return</span> <span class="tok-keyword">await</span> <span class="tok-function">agent</span>(<span class="tok-string">"Inspect the package API"</span>, <span class="tok-punctuation">{</span>
+        <h2>Models and call options</h2>
+        <p>Use a configured model alias or an explicit <code>provider/model</code> with optional thinking suffix when a role is not appropriate. For role files, role strings, role objects, frontmatter, context scope, and per-call overrides, see the dedicated <a href="roles.html">Roles documentation</a>.</p>
+        <p>Non-policy call options include <code>label</code>, <code>outputSchema</code>, non-negative integer <code>retries</code>, positive integer or <code>null</code> <code>timeoutMs</code>, and the canonical <code>withWorktree(name, callback)</code> scope.</p>
+        <pre><code class="language-javascript"><span class="tok-keyword">return</span> <span class="tok-keyword">await</span> <span class="tok-function">agent</span><span class="tok-punctuation">(</span><span class="tok-string">"Inspect the package API"</span><span class="tok-punctuation">,</span> <span class="tok-punctuation">{</span>
   <span class="tok-property">model</span><span class="tok-punctuation">:</span> <span class="tok-string">"openai-codex/gpt-5.6-sol:high"</span><span class="tok-punctuation">,</span>
   <span class="tok-property">tools</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">[</span><span class="tok-string">"read"</span><span class="tok-punctuation">,</span> <span class="tok-string">"grep"</span><span class="tok-punctuation">,</span> <span class="tok-string">"find"</span><span class="tok-punctuation">]</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">timeoutMs</span><span class="tok-punctuation">:</span> <span class="tok-number">120000</span><span class="tok-punctuation">,</span>
-<span class="tok-punctuation">}</span>);</code></pre>
+  <span class="tok-property">timeoutMs</span><span class="tok-punctuation">:</span> <span class="tok-number">120000</span>
+<span class="tok-punctuation">}</span><span class="tok-punctuation">);</span></code></pre>
       </section>
       <section id="budgets">
         <h2>Run budgets</h2>
@@ -137,7 +138,7 @@
           <li><strong>Failure:</strong> catch workflow-source failures as ordinary <code>Error</code> values and inspect <code>code</code> and <code>message</code>. Host tool calls reject with <code>WorkflowError</code>; finalized failures keep bounded structured JSON diagnostics in tool-result details with the run ID, failed branch, completed siblings, retryable paths, named worktrees, and state/journal artifact paths. Background follow-ups present the workflow name, run ID, error, failed path when known, retry action when available, and artifact paths on one human-readable line. External side effects are not guaranteed exactly once.</li>
           <li><strong>Retry:</strong> after a failure follow-up, call <code>workflow_status({ runId })</code> before recovery or replacement work, then pass its returned <code>state</code> as <code>expectedState</code> to <code>workflow_retry({ runId, expectedState })</code> only for a persisted <code>failed</code> run. Recovery inherits the source run's foreground/background mode; pass <code>foreground</code> to override it. Foreground recovery returns terminal details inline, while background recovery delivers completion or failure as a follow-up.</li>
           <li><strong>Agent retry:</strong> set <code>retries</code> only for safe, repeatable agent work. Each attempt gets a fresh Pi session but preserves filesystem changes.</li>
-          <li><strong>Resume:</strong> provider limits pause native work; Pi shutdown marks active runs <code>interrupted</code>. Reopen the original Pi session and explicitly resume. A <code>budget_exhausted</code> run can resume through <code>workflow_resume({ runId, expectedState, budget? })</code> with the state returned by <code>workflow_status</code> and retained historical usage and an acceptable budget; recovery keeps the source launch mode unless <code>foreground</code> explicitly overrides it. A <code>failed</code> run points to <code>workflow_retry({ runId, expectedState })</code>; completed and stopped runs remain non-resumable.</li>
+          <li><strong>Resume:</strong> provider limits pause native work; Pi shutdown marks active runs <code>interrupted</code>. Reopen the original Pi session and use the interactive <code>/workflow</code> picker to resume one interrupted workflow, resume all, or skip. A <code>budget_exhausted</code> run can resume through <code>workflow_resume({ runId, expectedState, budget? })</code> with the state returned by <code>workflow_status</code> and retained historical usage and an acceptable budget; recovery keeps the source launch mode unless <code>foreground</code> explicitly overrides it. A <code>failed</code> run points to <code>workflow_retry({ runId, expectedState })</code>; completed and stopped runs remain non-resumable.</li>
           <li><strong>Cancellation:</strong> stopping a run is immediate, cascades to owned agents, and cannot be undone. A cancelled workflow reports <code>CANCELLED</code> or a stopped run state.</li>
         </ul>
         <p>Use <code>/workflow</code> to inspect state and budgets, manage model aliases, pause, resume, adjust an exhausted budget, stop, approve, reject, or delete a run. The run navigator presents phases first, then structural operation paths, then agents; on wide terminals, Enter opens run actions for phase, operation, or empty selections and agent actions for agent selections; on narrow terminals, the first Enter opens details and a second Enter opens the applicable action list. When agent actions are open, <code>h</code> or the left arrow closes them; Escape remains available. The <code>a</code> or <code>A</code> key remains a legacy shortcut for the applicable action list. In the TUI, open the run script, an agent prompt, an effective system prompt, or a completed top-level agent result in the configured external editor; agent prompts and system prompts are available while their agents are running and settled. Phase and operation nodes have no artifact action. Select an agent to inspect its ID and see applicable branch or worktree actions. The run ID returned by a background invocation is the handle for run-level actions.</p>

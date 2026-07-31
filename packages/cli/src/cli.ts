@@ -327,8 +327,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 let cli;
-try { cli = await import(import.meta.resolve("@piewf/cli")); } catch {}
-if (!cli) try { cli = await import(pathToFileURL(join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "npm", "node_modules", "@piewf/cli", "dist", "src", "cli.js")).href); } catch {}
+try { cli = await import(pathToFileURL(join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "npm", "node_modules", "@piewf/cli", "dist", "src", "cli.js")).href); } catch {}
+if (!cli) try { cli = await import(import.meta.resolve("@piewf/cli")); } catch {}
 if (cli) process.exitCode = await cli.runCli(["run", ${JSON.stringify(workflowName)}, ...process.argv.slice(2)]);
 else { const result = spawnSync("piewf", ["run", ${JSON.stringify(workflowName)}, ...process.argv.slice(2)], { stdio: "inherit" }); if (result.error) { console.error("Could not resolve @piewf/cli; install it or put piewf on PATH."); process.exitCode = 1; } else process.exitCode = result.status ?? 1; }
 `;
