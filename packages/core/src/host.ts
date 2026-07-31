@@ -447,7 +447,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
     const persisted = await persistRunState(store, metadata, (current) => {
       const nextRun = { ...current, state: next, ...budget.snapshot() };
       if (next === "running" || next === "completed") { delete nextRun.error; delete nextRun.failedAt; }
-      if (next === "running" && (previous === "paused" || previous === "interrupted" || previous === "budget_exhausted") && nextRun.delivery?.mode === "background") nextRun.delivery = { ...nextRun.delivery, state: "pending" };
+      if (next === "running" && (previous === "paused" || previous === "interrupted" || previous === "budget_exhausted") && nextRun.delivery?.state === "delivered") nextRun.delivery = { ...nextRun.delivery, state: "pending" };
       return nextRun;
     });
     await eventPublisher.runState(store, metadata, previous, next, reason);
@@ -807,7 +807,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
   const recovery = createWorkflowRecovery({
     pi, home, runs, scheduler, eventPublisher, persistRunState, projectTrusted, resumeHostContext, ensureSessionLease, createAgentExecutor, activeSnapshotTools, frozenResourcePolicy, resolveLaunchPrologue: resumeLaunchPrologue, workflowAgentHandler, shellForRun, resolveWorktree, checkpointBridge, phaseBridge, logBridge, lifecycleFor, createProviderErrorRecovery, cleanupTerminalRun, deliver: (content) => { deliver(pi, content); }, deliverTerminal, workflowToolUpdate, registry, modelSpec,
   });
-  const resumeSelectedWorkflow = async (runId: string, foreground: boolean, context: unknown, budgetPatch?: unknown): Promise<{ workflowName: string; state: "running" | "completed"; attached: boolean; value?: JsonValue }> => {
+  const resumeSelectedWorkflow = async (runId: string, foreground: boolean, context: unknown, budgetPatch?: unknown): Promise<{ workflowName: string; state: "running" | "completed" | "awaiting_approval"; attached: boolean; value?: JsonValue }> => {
     const run = runs.get(runId);
     if (!run) throw new WorkflowError("RESUME_INCOMPATIBLE", `Unknown workflow run ${runId} in the current project and Pi session`);
     const host = object(context) ? context : {};
@@ -830,14 +830,19 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       await run.lifecycle.resume();
       if (!foreground) return { workflowName: run.metadata.name, state: "running", attached: false };
       if (!completion) return { workflowName: run.metadata.name, state: "running", attached: false };
-      try { await completion; } catch (error) { if (!wasAttached) await run.store.updateState((current) => current.delivery?.mode === "foreground" && current.delivery.state === "attached" ? { ...current, delivery: { ...current.delivery, state: "delivered" } } : current); throw error; }
-      if (!wasAttached) await run.store.updateState((current) => current.delivery?.mode === "foreground" && current.delivery.state === "attached" ? { ...current, delivery: { ...current.delivery, state: "delivered" } } : current);
-      return { workflowName: run.metadata.name, state: "completed", attached: wasAttached };
+      try {
+        const completed = await completion as { value?: JsonValue };
+        if (!wasAttached) await run.store.updateState((current) => current.delivery?.mode === "foreground" && current.delivery.state === "attached" ? { ...current, delivery: { ...current.delivery, state: "delivered" } } : current);
+        return { workflowName: run.metadata.name, state: "completed", attached: wasAttached, ...(!wasAttached && completed.value !== undefined ? { value: completed.value } : {}) };
+      } catch (error) {
+        if (!wasAttached) await run.store.updateState((current) => current.delivery?.mode === "foreground" && current.delivery.state === "attached" ? { ...current, delivery: { ...current.delivery, state: "delivered" } } : current);
+        throw error;
+      }
     }
     if (!foreground && isForegroundAttached(runId)) await moveForegroundToBackground(runId);
     if (run.lifecycle.state === "budget_exhausted") {
       const result = await recovery.resumeWorkflowRun(runId, budgetPatch, context, undefined, foreground, foreground);
-      return { workflowName: run.metadata.name, state: result.state === "completed" ? "completed" : "running", attached: false, ...(result.state === "completed" && result.value !== undefined ? { value: result.value } : {}) };
+      return { workflowName: run.metadata.name, state: result.state === "completed" ? "completed" : result.state === "awaiting_approval" ? "awaiting_approval" : "running", attached: false, ...(result.state === "completed" && result.value !== undefined ? { value: result.value } : {}) };
     }
     if (run.lifecycle.state !== "interrupted") throw new WorkflowError("RESUME_INCOMPATIBLE", `Workflow run state changed: ${run.lifecycle.state}`);
     const completed = await recovery.coldResumeRun(run, hasUI, ui, projectTrusted(context), recoveryContext, foreground, foreground);

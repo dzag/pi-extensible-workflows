@@ -9,6 +9,7 @@ import { openWorkflowArtifact, workflowPromptArtifact, workflowResultArtifact, w
 import { agentBreadcrumb, formatCheckpointReview, formatNavigatorRun, formatWorkflowPhaseDashboard, navigatorAttentionSort, navigatorRunLabels, themeWorkflowProgressStyles } from "./host-view.js";
 import { buildWorkflowPhaseModel, buildWorkflowPhaseTree, navigateWorkflowPhaseTree, preserveWorkflowPhaseSelection, preserveWorkflowPhaseTreeSelection, workflowPhaseTreeInitialExpanded } from "./host-phases.js";
 import { type WorkflowRecoveryContext, type createWorkflowRecovery } from "./host-recovery.js";
+import { failureDiagnosticsFrom, formatWorkflowFailureDelivery, formatWorkflowFailureDeliveryFallback } from "./host-delivery.js";
 import { type WorkflowRunRecord } from "./host-runtime.js";
 import { type AgentAttemptActionContext, type AgentAttemptSummary, type AgentRecord, type JsonValue, type LaunchSnapshot } from "./types.js";
 
@@ -73,7 +74,7 @@ export type WorkflowNavigatorDependencies = {
   registry: WorkflowRegistryApi;
   projectTrusted: (context: unknown) => boolean;
   resumeHostContext: (context: unknown) => WorkflowRecoveryContext;
-  resumeSelectedWorkflow: (runId: string, foreground: boolean, context: unknown, budgetPatch?: unknown) => Promise<{ workflowName: string; state: "running" | "completed"; attached: boolean; value?: JsonValue }>;
+  resumeSelectedWorkflow: (runId: string, foreground: boolean, context: unknown, budgetPatch?: unknown) => Promise<{ workflowName: string; state: "running" | "completed" | "awaiting_approval"; attached: boolean; value?: JsonValue }>;
 };
 export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): void {
   const { pi, home, clipboard, extensionAgentDir, runs, terminalRunStates, hardTerminalRunStates, ensureSessionLease, answerCheckpoint, recovery, stopWorkflowRun, moveForegroundToBackground, isForegroundAttached, withLiveActivities, liveAgentSessions, liveAgentPrepared, liveAgentHandoffs, registry, projectTrusted, resumeHostContext, resumeSelectedWorkflow } = deps;
@@ -96,7 +97,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
         return entries.filter((entry): entry is { store: RunStore; loaded: { run: PersistedRun; snapshot: Readonly<LaunchSnapshot> }; resolvedAt: number | undefined } => entry !== undefined);
       };
       let stores = await loadStores();
-      const usage = "Usage: /workflow [model-aliases], or /workflow background [run-id], pause|resume|stop|approve|reject|delete <run-id> [checkpoint-name]. Approve/reject are for checkpoints only; use workflow_respond with a proposalId or the navigator's budget controls for budget decisions. Use workflow_resume for budget patches."
+      const usage = "Usage: /workflow [model-aliases], or /workflow background [run-id], pause|resume [run-id]|stop|approve|reject|delete <run-id> [checkpoint-name]. Approve/reject are for checkpoints only; use workflow_respond with a proposalId or the navigator's budget controls for budget decisions. Use workflow_resume for budget patches."
       const setWorkflowStatus = (text: string | undefined) => {
         const setStatus = uiHostCapabilities(ctx.ui)?.setStatus;
         setStatus?.call(ctx.ui, "workflow-stop", text);
@@ -238,6 +239,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
         await manageAliases();
         return;
       }
+      if (command.split(/\s+/)[0] === "resume" && command !== "resume") { await runAction(command, false); return; }
       if (command === "resume") {
         const ui = uiHostCapabilities(ctx.ui);
         if (!ctx.hasUI || !ui?.select) { ctx.ui.notify("Interactive workflow resume selection is unavailable; provide a run ID.", "info"); return; }
@@ -262,10 +264,13 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
         }
         try {
           const result = await resumeSelectedWorkflow(selected.store.runId, mode === "Foreground", ctx, budgetPatch);
-          if (result.state === "completed" && !result.attached) ctx.ui.notify(`Workflow ${result.workflowName} completed.`, "info");
+          if (result.state === "completed" && !result.attached) ctx.ui.notify(`Workflow ${result.workflowName} completed${result.value === undefined ? "." : `: ${JSON.stringify(result.value)}`}`, "info");
+          else if (result.state === "awaiting_approval") ctx.ui.notify(`Budget adjustment for ${result.workflowName} is awaiting approval.`, "warning");
           else if (result.state === "running") ctx.ui.notify(`Resumed workflow ${result.workflowName} in ${mode.toLowerCase()}.`, "info");
         } catch (error) {
-          ctx.ui.notify(`Cannot resume workflow ${selected.store.runId}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+          const diagnostic = failureDiagnosticsFrom(error);
+          const message = diagnostic ? formatWorkflowFailureDelivery(diagnostic) : formatWorkflowFailureDeliveryFallback(selected.loaded.run.workflowName, selected.store.runId, selected.store.directory, error);
+          ctx.ui.notify(`Cannot resume workflow ${selected.store.runId}: ${message}`, "warning");
         }
         return;
       }

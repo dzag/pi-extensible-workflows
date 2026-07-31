@@ -163,10 +163,10 @@ export function createWorkflowRecovery(deps: WorkflowRecoveryDependencies) {
     }
     try {
       const result = await completion;
-      await run.store.updateState((current) => current.delivery?.state === "attached" ? { ...current, delivery: { ...current.delivery, state: "delivered" } } : current);
+      await run.store.updateState((current) => current.delivery?.mode === "foreground" && (current.delivery.state === "attached" || current.delivery.state === "pending") ? { ...current, delivery: { ...current.delivery, state: "delivered" } } : current);
       return result;
     } catch (error) {
-      await run.store.updateState((current) => current.delivery?.state === "attached" ? { ...current, delivery: { ...current.delivery, state: "delivered" } } : current);
+      await run.store.updateState((current) => current.delivery?.mode === "foreground" && (current.delivery.state === "attached" || current.delivery.state === "pending") ? { ...current, delivery: { ...current.delivery, state: "delivered" } } : current);
       throw error;
     }
   };
