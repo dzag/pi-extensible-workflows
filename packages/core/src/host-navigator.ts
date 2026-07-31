@@ -268,6 +268,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
           else if (result.state === "awaiting_approval") ctx.ui.notify(`Budget adjustment for ${result.workflowName} is awaiting approval.`, "warning");
           else if (result.state === "running") ctx.ui.notify(`Resumed workflow ${result.workflowName} in ${mode.toLowerCase()}.`, "info");
         } catch (error) {
+          if (error && typeof error === "object" && (error as { workflowResumeAttached?: boolean }).workflowResumeAttached) return;
           const diagnostic = failureDiagnosticsFrom(error);
           const message = diagnostic ? formatWorkflowFailureDelivery(diagnostic) : formatWorkflowFailureDeliveryFallback(selected.loaded.run.workflowName, selected.store.runId, selected.store.directory, error);
           ctx.ui.notify(`Cannot resume workflow ${selected.store.runId}: ${message}`, "warning");

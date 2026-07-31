@@ -264,6 +264,7 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
   type ForegroundDelivery = { store: RunStore; inline: boolean; detached: boolean; detach: () => Promise<ForegroundDetachResult>; timer?: ReturnType<typeof setTimeout> };
   const pendingFailureDiagnostics = new Map<string, WorkflowFailureDiagnostics>();
   const foregroundDeliveries = new Map<string, ForegroundDelivery>();
+  const foregroundResumeClaims = new WeakSet<RunStore>();
   const terminalDeliveryQueues = new WeakMap<RunStore, Promise<void>>();
   const liveActivities = new Map<string, Map<string, AgentActivity>>();
   const liveEventTimes = new Map<string, Map<string, number>>();
@@ -345,7 +346,8 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       let claimed: boolean | undefined;
       await store.updateState((current) => {
         if (failure && !FAILURE_DELIVERY_STATES.has(current.state)) return current;
-        if (current.delivery?.state === "delivered") return current;
+        if (current.delivery?.state === "delivered") { foregroundResumeClaims.delete(store); return current; }
+        if (foregroundResumeClaims.has(store) && current.delivery?.mode === "foreground" && current.delivery.state === "attached") { foregroundResumeClaims.delete(store); return current; }
         if (current.delivery?.mode === "foreground" && current.delivery.state === "attached") { claimed = true; return { ...current, delivery: { ...current.delivery, state: "delivered" } }; }
         if (!current.delivery) { claimed = true; return current; }
         claimed = true;
@@ -826,16 +828,19 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       } else if (!foreground) run.foreground = false;
       else run.foreground = true;
       await recovery.refreshPausedRunAliases(run, { ...recoveryContext, projectTrusted: projectTrusted(context) });
+      const claimedForegroundResume = foreground && !wasAttached;
+      if (claimedForegroundResume) foregroundResumeClaims.add(run.store);
       const completion = run.completion;
       await run.lifecycle.resume();
       if (!foreground) return { workflowName: run.metadata.name, state: "running", attached: false };
-      if (!completion) return { workflowName: run.metadata.name, state: "running", attached: false };
+      if (!completion) { if (claimedForegroundResume) foregroundResumeClaims.delete(run.store); return { workflowName: run.metadata.name, state: "running", attached: false }; }
       try {
         const completed = await completion as { value?: JsonValue };
         if (!wasAttached) await run.store.updateState((current) => current.delivery?.mode === "foreground" && current.delivery.state === "attached" ? { ...current, delivery: { ...current.delivery, state: "delivered" } } : current);
         return { workflowName: run.metadata.name, state: "completed", attached: wasAttached, ...(!wasAttached && completed.value !== undefined ? { value: completed.value } : {}) };
       } catch (error) {
         if (!wasAttached) await run.store.updateState((current) => current.delivery?.mode === "foreground" && current.delivery.state === "attached" ? { ...current, delivery: { ...current.delivery, state: "delivered" } } : current);
+        if (wasAttached && error && typeof error === "object") Object.defineProperty(error, "workflowResumeAttached", { value: true });
         throw error;
       }
     }
