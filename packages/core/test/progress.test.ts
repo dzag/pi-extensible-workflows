@@ -28,12 +28,28 @@ void test("workflow progress warns after ten minutes of agent silence and resets
   assert.doesNotMatch(formatWorkflowProgress(reset, "◇", undefined, now), /stalled\?/);
   assert.match(formatNavigatorDashboard(stalled, [], [], now), /responding - stalled\? 12m/);
   const snapshot = createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "stalling" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
-  assert.match(formatWorkflowPhaseDashboard(stalled, snapshot, 120, {}, undefined, now).join("\n"), /stalled\? 12m/);
+  assert.match(formatWorkflowPhaseDashboard(stalled, snapshot, 120, { agentId: "run:1" }, undefined, now).join("\n"), /stalled\? 12m/);
 });
 void test("workflow progress shows runtime after the workflow state", () => {
   const run = { id: "run", workflowName: "runtime", cwd: "/repo", sessionId: "session", state: "running" as const, agents: [], agentSessions: [], usage: { tokens: 0, costUsd: 0, durationMs: 12_345, agentLaunches: 0 } } as Parameters<typeof formatWorkflowProgress>[0];
   assert.match(formatWorkflowProgress(run), /\[running\] runtime=12s/);
   assert.match(formatWorkflowProgress({ ...run, state: "completed", usage: { tokens: 0, costUsd: 0, durationMs: 65_432, agentLaunches: 0 } }), /\[completed\] runtime=1m 5s/);
+});
+void test("phase tree uses compact state glyphs while details keep activity", () => {
+  const agents = [
+    { id: "run:1", name: "running", path: "run:1", state: "running" as const, model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1, activity: { kind: "text" as const, text: "responding" } },
+    { id: "run:2", name: "paused", path: "run:2", state: "paused" as const, model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
+    { id: "run:3", name: "failed", path: "run:3", state: "failed" as const, model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
+  ];
+  const run = { id: "run", workflowName: "glyphs", cwd: "/repo", sessionId: "session", state: "running" as const, agents, agentSessions: [] };
+  const snapshot = createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "glyphs" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
+  const lines = formatWorkflowPhaseDashboard(run, snapshot, 120, { agentId: "run:1" });
+  const tree = lines.map((line) => line.split(" | ")[0]).join("\n");
+  assert.match(tree, /running · ⠦/);
+  assert.match(tree, /paused · ⏸/);
+  assert.match(tree, /failed · ✗/);
+  assert.doesNotMatch(tree, /responding/);
+  assert.match(lines.join("\n"), /Activity: responding/);
 });
 void test("workflow log rendering keeps recent visual lines collapsed and all lines expanded", () => {
   type Rendered = { render: (width: number) => string[] };

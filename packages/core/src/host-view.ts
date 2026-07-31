@@ -55,14 +55,14 @@ function renderGroupedAgents(agents: readonly AgentRecord[], render: (entry: { a
     ...group.entries.map((entry) => render(entry, grouped)),
   ]);
 }
-const RUN_STATE_GLYPH: Record<string, string> = { completed: "✓", failed: "✗", stopped: "✗", budget_exhausted: "!", awaiting_input: "●" };
-const AGENT_STATE_GLYPH: Record<string, string> = { completed: "✓", failed: "✗", cancelled: "✗" };
+const RUN_STATE_GLYPH: Record<string, string> = { "not started": "○", queued: "○", pausing: "⏸", paused: "⏸", completed: "✓", failed: "✗", stopped: "✗", interrupted: "↯", budget_exhausted: "!", awaiting_input: "?" };
+const AGENT_STATE_GLYPH: Record<string, string> = { queued: "○", waiting_for_child: "…", paused: "⏸", retrying: "↻", completed: "✓", failed: "✗", cancelled: "✗" };
 function runStateGlyph(state: string, running: string): string { return state === "running" ? running : RUN_STATE_GLYPH[state] ?? "◆"; }
 function agentStateGlyph(state: string, running: string): string { return state === "running" ? running : AGENT_STATE_GLYPH[state] ?? "○"; }
 type ProgressStyleKey = "success" | "error" | "warning" | "accent" | "muted";
-const PROGRESS_STATE_STYLE: Record<string, ProgressStyleKey> = { completed: "success", failed: "error", cancelled: "error", running: "accent" };
-const WORKFLOW_ICON_STYLE: Record<string, ProgressStyleKey> = { completed: "success", failed: "error", stopped: "error", budget_exhausted: "warning", running: "accent" };
-const PHASE_STATE_STYLE: Record<string, ProgressStyleKey> = { completed: "success", failed: "error", cancelled: "error", running: "accent", interrupted: "warning", budget_exhausted: "warning" };
+const PROGRESS_STATE_STYLE: Record<string, ProgressStyleKey> = { completed: "success", failed: "error", cancelled: "error", running: "accent", paused: "warning", pausing: "warning", interrupted: "warning", retrying: "accent", budget_exhausted: "warning", awaiting_input: "warning" };
+const WORKFLOW_ICON_STYLE: Record<string, ProgressStyleKey> = { completed: "success", failed: "error", stopped: "error", interrupted: "warning", budget_exhausted: "warning", awaiting_input: "warning", paused: "warning", pausing: "warning", running: "accent" };
+const PHASE_STATE_STYLE: Record<string, ProgressStyleKey> = { completed: "success", failed: "error", cancelled: "error", running: "accent", paused: "warning", pausing: "warning", interrupted: "warning", budget_exhausted: "warning" };
 function styleForState(map: Record<string, ProgressStyleKey>, state: string, styles: WorkflowProgressStyles): (text: string) => string {
   const key = map[state] ?? "muted";
   return (text) => styles[key](text);
@@ -624,8 +624,8 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
   const treeLine = (node: WorkflowPhaseTreeNode): string => {
     const selected = node.id === selectedNode?.id;
     const state = progressStyleForState(node.state, styles);
-    const activity = node.agent && !SETTLED_AGENT_STATES.has(node.agent.state) ? formatAgentActivity(node.agent, "⠦", styles, now) : "";
-    return `${selected ? "→" : " "} ${"  ".repeat(node.depth)}${nodeIcon(node)} ${node.label} · ${state(node.state)}${activity ? ` ${activity}` : ""}`;
+    const glyph = node.kind === "agent" && node.agent ? agentStateGlyph(node.agent.state, "⠦") : runStateGlyph(node.state, "⠦");
+    return `${selected ? "→" : " "} ${"  ".repeat(node.depth)}${nodeIcon(node)} ${node.label} · ${state(glyph)}`;
   };
   const details = (node: WorkflowPhaseTreeNode | undefined): string[] => {
     if (!node) return [styles.muted("No workflow node is selected"), ...(selection.actions ? [] : [styles.muted("enter run actions")])];
