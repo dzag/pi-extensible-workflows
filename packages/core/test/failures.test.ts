@@ -301,6 +301,8 @@ void test("background and cold-resumed terminal failures deliver artifacts witho
   const waitingScript = "phase('build'); return await agent('wait');";
   await stopped.create({ id: stopped.runId, workflowName: "stopped-run", cwd: home, sessionId, state: "interrupted", agents: [], agentSessions: [], delivery: { mode: "background", state: "pending" } }, snapshot("stopped-run", waitingScript));
   await interrupted.create({ id: interrupted.runId, workflowName: "interrupted-run", cwd: home, sessionId, state: "interrupted", agents: [], agentSessions: [], delivery: { mode: "background", state: "pending" } }, snapshot("interrupted-run", waitingScript));
+  const exhausted = new RunStore(home, sessionId, "exhausted-run", home);
+  await exhausted.create({ id: exhausted.runId, workflowName: "exhausted-run", cwd: home, sessionId, state: "budget_exhausted", agents: [], agentSessions: [], delivery: { mode: "background", state: "pending" } }, snapshot("exhausted-run", "throw Object.assign(new Error('budget exhausted'), { code: 'BUDGET_EXHAUSTED' });"));
   const context = { cwd: home, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => sessionId }, ui: { notify() {} } };
   const waitFor = async (store: RunStore, predicate: (run: PersistedRun) => boolean): Promise<PersistedRun> => {
     for (let attempt = 0; attempt < 200; attempt += 1) { const run = (await store.load()).run; if (predicate(run)) return run; await new Promise<void>((resolve) => setImmediate(resolve)); }
@@ -316,11 +318,13 @@ void test("background and cold-resumed terminal failures deliver artifacts witho
     await waitFor(stopped, (run) => run.state === "running");
     await stop.execute("stop", { runId: stopped.runId });
     const stoppedMessage = await delivered("stopped-run");
+    await contextualWorkflowAction(command, context, exhausted.runId, "Resume unchanged", "Background");
+    const exhaustedMessage = await delivered("exhausted-run");
     await contextualWorkflowAction(command, context, interrupted.runId, "Resume", "Background");
     await waitFor(interrupted, (run) => run.state === "running");
     await shutdown?.();
     const interruptedMessage = await delivered("interrupted-run");
-    for (const [name, message, code] of [["stopped-run", stoppedMessage, "CANCELLED"], ["interrupted-run", interruptedMessage, "CANCELLED"]] as const) {
+    for (const [name, message, code] of [["stopped-run", stoppedMessage, "CANCELLED"], ["interrupted-run", interruptedMessage, "CANCELLED"], ["exhausted-run", exhaustedMessage, "BUDGET_EXHAUSTED"]] as const) {
       assert.match(message, new RegExp(`error=${code}:`));
       assert.match(message, new RegExp(`runDirectory=.*${name}`));
       assert.match(message, /statePath=.*state\.json/);
