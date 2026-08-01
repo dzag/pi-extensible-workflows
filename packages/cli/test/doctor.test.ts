@@ -51,7 +51,6 @@ async function withHomeAndCwd<T>(home: string, cwd: string, action: () => Promis
 const cliExtension: WorkflowExtension = {
   version: "1.0.0",
   headline: "CLI test workflows",
-  description: "Workflows for CLI acceptance tests",
   functions: {
     cliEcho: {
       description: "Echo a CLI issue",
@@ -73,7 +72,7 @@ function runIsolatedCli(paths: { root: string; cwd: string; agentDir: string }, 
   const script = join(paths.root, "isolated-cli.mjs");
   const indexUrl = pathToFileURL(join(process.cwd(), "../core", "dist", "src", "index.js")).href;
   const cliUrl = pathToFileURL(join(process.cwd(), "dist", "src", "cli.js")).href;
-  writeFileSync(script, [`import { registerWorkflowExtension } from ${JSON.stringify(indexUrl)};`, `import { runCli } from ${JSON.stringify(cliUrl)};`, `registerWorkflowExtension({ version: "1.0.0", headline: "Isolated CLI", description: "Isolated CLI test", functions: { ${functionDefinition} } });`, "const controller = new AbortController();", abort ? "setImmediate(() => controller.abort());" : "", `const exit = await runCli(${JSON.stringify(args)}, { cwd: ${JSON.stringify(paths.cwd)}, agentDir: ${JSON.stringify(paths.agentDir)}, signal: controller.signal, stderr: (text) => process.stderr.write(text) });`, "process.exitCode = exit;"].join("\n"));
+  writeFileSync(script, [`import { registerWorkflowExtension } from ${JSON.stringify(indexUrl)};`, `import { runCli } from ${JSON.stringify(cliUrl)};`, `registerWorkflowExtension({ version: "1.0.0", headline: "Isolated CLI", functions: { ${functionDefinition} } });`, "const controller = new AbortController();", abort ? "setImmediate(() => controller.abort());" : "", `const exit = await runCli(${JSON.stringify(args)}, { cwd: ${JSON.stringify(paths.cwd)}, agentDir: ${JSON.stringify(paths.agentDir)}, signal: controller.signal, stderr: (text) => process.stderr.write(text) });`, "process.exitCode = exit;"].join("\n"));
   const result = spawnSync(process.execPath, [script], { cwd: process.cwd(), encoding: "utf8", timeout: 10_000, env: { ...process.env, HOME: paths.root, PI_CODING_AGENT_DIR: paths.agentDir, PI_OFFLINE: "1" } });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
@@ -190,9 +189,9 @@ void test("doctor reports every registered function", async () => {
 void test("doctor reports dynamic model alias provenance", async () => {
   const paths = fixture();
   const registry = new WorkflowRegistry();
-  registry.register({ version: "1.0.0", headline: "Model policy", description: "Selects models", modelAliases: { reviewer: { resolve: () => "openai/gpt" } } });
+  registry.register({ version: "1.0.0", headline: "Model policy", modelAliases: { reviewer: { resolve: () => "openai/gpt" } } });
   const report = await withHome(paths.root, () => doctor({ ...paths, registry, discoverPi: async () => pi() }));
-  assert.deepEqual(report.modelAliases, [{ name: "reviewer", kind: "dynamic", provenance: "extension: Model policy", version: "1.0.0", headline: "Model policy", extensionDescription: "Selects models" }]);
+  assert.deepEqual(report.modelAliases, [{ name: "reviewer", kind: "dynamic", provenance: "extension: Model policy", version: "1.0.0", headline: "Model policy" }]);
   assert.match(formatDoctorReport(report), /\[dynamic\] `reviewer` \(extension: Model policy\)/);
 });
 void test("doctor accepts role files using unshadowed dynamic model aliases without resolving them", async () => {
@@ -200,7 +199,7 @@ void test("doctor accepts role files using unshadowed dynamic model aliases with
   writeFileSync(join(paths.agentDir, "pi-extensible-workflows", "roles", "reviewer.md"), "---\nmodel: policy-model\n---\nReview");
   const registry = new WorkflowRegistry();
   let calls = 0;
-  registry.register({ version: "1.0.0", headline: "Model policy", description: "Selects models", modelAliases: { "policy-model": { resolve: () => { calls += 1; return "openai/gpt"; } } } });
+  registry.register({ version: "1.0.0", headline: "Model policy", modelAliases: { "policy-model": { resolve: () => { calls += 1; return "openai/gpt"; } } } });
   const report = await withHome(paths.root, () => doctor({ ...paths, registry, discoverPi: async () => pi() }));
   assert.equal(calls, 0);
   assert.equal(report.diagnostics.some(({ code }) => code === "MODEL_INVALID" || code === "MODEL_UNAVAILABLE"), false);
@@ -212,7 +211,7 @@ void test("doctor leaves static settings aliases shadowing dynamic aliases", asy
   writeFileSync(join(paths.agentDir, "pi-extensible-workflows", "roles", "reviewer.md"), "---\nmodel: policy-model\n---\nReview");
   const registry = new WorkflowRegistry();
   let calls = 0;
-  registry.register({ version: "1.0.0", headline: "Model policy", description: "Selects models", modelAliases: { "policy-model": { resolve: () => { calls += 1; return "openai/gpt"; } } } });
+  registry.register({ version: "1.0.0", headline: "Model policy", modelAliases: { "policy-model": { resolve: () => { calls += 1; return "openai/gpt"; } } } });
   const report = await withHome(paths.root, () => doctor({ ...paths, registry, discoverPi: async () => pi() }));
   assert.equal(calls, 0);
   assert.equal(report.diagnostics.some(({ code }) => code === "MODEL_INVALID"), false);
@@ -238,7 +237,7 @@ void test("role-targeted doctor inspects effective resources and prepares hooks 
   writeFileSync(join(paths.agentDir, "extensions", "doctor-hook.ts"), "export default (pi) => { pi.on('before_agent_start', (event) => ({ systemPrompt: event.systemPrompt + '\\nHOOK:' + event.prompt })); };\n");
   writeFileSync(join(paths.cwd, ".pi", "pi-extensible-workflows", "roles", "reviewer.md"), "---\nthinking: high\ntools: [read, grep]\ndisabledAgentResources:\n  skills: [review-skill]\n  extensions: [missing-extension]\n---\nReview role");
   const registry = new WorkflowRegistry();
-  registry.register({ version: "1.0.0", headline: "Doctor setup", description: "Doctor setup hook", agentSetupHooks: { adjust: { setup(agent, context) { assert.equal(context.mode, "inspection"); assert.equal(agent.prepared.model.model, "fixture-model"); assert.equal(agent.prepared.model.thinking, "high"); agent.options.model = "fixture/override-model"; agent.options.thinking = "low"; agent.options.tools = ["grep"]; } } } });
+  registry.register({ version: "1.0.0", headline: "Doctor setup", agentSetupHooks: { adjust: { setup(agent, context) { assert.equal(context.mode, "inspection"); assert.equal(agent.prepared.model.model, "fixture-model"); assert.equal(agent.prepared.model.thinking, "high"); agent.options.model = "fixture/override-model"; agent.options.thinking = "low"; agent.options.tools = ["grep"]; } } } });
   const report = await withHomeAndCwd(paths.root, paths.cwd, () => doctor({ ...paths, role: "reviewer", registry, discoverPi: async () => pi({ activeTools: ["read", "grep"], knownModels: ["fixture/fixture-model", "fixture/override-model"], availableModels: ["fixture/fixture-model", "fixture/override-model"], model: { provider: "fixture", model: "fixture-model", thinking: "medium" } }) }));
   const inspection = report.roleInspection;
   assert.ok(inspection);
@@ -386,7 +385,7 @@ void test("CLI workflow arguments cover schema types, defaults, enums, and missi
   assert.throws(() => parseWorkflowCliArgs(schema, ["123", "--tags", "three"]), /Invalid value for enum/);
   assert.throws(() => parseWorkflowCliArgs(schema, ["not-an-integer"]), /Invalid integer/);
   assert.throws(() => parseWorkflowCliArgs(schema, ["1", "--unknown"]), /Unknown option/);
-  const help = formatWorkflowCliHelp({ name: "developIssue", version: "1.0.0", headline: "Test", extensionDescription: "Test", description: "Develop issue", input: schema, output: { type: "string" } });
+  const help = formatWorkflowCliHelp({ name: "developIssue", version: "1.0.0", headline: "Test", description: "Develop issue", input: schema, output: { type: "string" } });
   assert.match(help, /Issue number/);
   assert.match(help, /--tags <string>.*enum="one","two"/);
   assert.ok(help.includes("  --approve".padEnd(28) + "Trust project resources for this launch"));
@@ -425,7 +424,7 @@ void test("exported launchers are executable and delegate unchanged arguments", 
   const indexUrl = pathToFileURL(join(process.cwd(), "../core", "dist", "src", "index.js")).href;
   mkdirSync(fallbackCli, { recursive: true });
   writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: "@piewf/cli", version: "4.0.2" }));
-  writeFileSync(join(fallbackCli, "cli.js"), `import { registerWorkflowExtension } from ${JSON.stringify(indexUrl)};\nimport { runCli } from ${JSON.stringify(pathToFileURL(cliPath).href)};\nregisterWorkflowExtension({ version: "1.0.0", headline: "Real runner", description: "Real runner", functions: { cliEcho: { description: "Echo", input: { type: "object", properties: { issue: { type: "integer" } }, required: ["issue"], additionalProperties: false }, output: { type: "object", properties: { issue: { type: "integer" } }, required: ["issue"], additionalProperties: false }, run: (input) => ({ issue: input.issue }) } } });\nexport { runCli };\n`);
+  writeFileSync(join(fallbackCli, "cli.js"), `import { registerWorkflowExtension } from ${JSON.stringify(indexUrl)};\nimport { runCli } from ${JSON.stringify(pathToFileURL(cliPath).href)};\nregisterWorkflowExtension({ version: "1.0.0", headline: "Real runner", functions: { cliEcho: { description: "Echo", input: { type: "object", properties: { issue: { type: "integer" } }, required: ["issue"], additionalProperties: false }, output: { type: "object", properties: { issue: { type: "integer" } }, required: ["issue"], additionalProperties: false }, run: (input) => ({ issue: input.issue }) } } });\nexport { runCli };\n`);
   const realOutput = execFileSync(destination, ["7"], { cwd: paths.cwd, env: { ...process.env, HOME: paths.root, PI_CODING_AGENT_DIR: paths.agentDir, PI_OFFLINE: "1" }, encoding: "utf8" });
   assert.equal(realOutput, '{"issue":7}\n');
 });
@@ -626,7 +625,7 @@ void test("doctor diagnoses extension role directories with extension provenance
   writeFileSync(join(first, "unique.md"), "Unique role");
   writeFileSync(join(second, "same.md"), "Second role");
   writeFileSync(join(second, "broken.md"), "---\ndescription: [broken\n---\nBroken");
-  registerWorkflowExtension({ version: "1.0.0", headline: "Role package", description: "Role package for doctor", roleDirectories: [missing, empty, first, pathToFileURL(second)] });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Role package", roleDirectories: [missing, empty, first, pathToFileURL(second)] });
   const report = await doctor({ ...paths, discoverPi: async () => pi() });
   const codes = report.diagnostics.map(({ code }) => code);
   assert.ok(codes.includes("ROLE_DIRECTORY"));
@@ -644,7 +643,7 @@ void test("portable bundles load method shorthand functions and selected payload
   const resource = join(root, "resource.txt");
   writeFileSync(resource, "portable resource\n");
   const destination = join(root, "bundle");
-  const workflow = { name: "methodWorkflow", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle method", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
+  const workflow = { name: "methodWorkflow", version: "1.0.0", headline: "Bundle", description: "Bundle method", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
   const manifest = writePortableWorkflowBundle({ destination, command: "method-workflow", workflow, functionSource: "async run(input) { return input.value; }", aliasTargets: { fast: "openai/gpt" }, resources: { static: [resource] }, piVersion: ">=0.80.9 <0.81.0", engineVersion: ">=5.0.0 <6.0.0" });
   assert.match(manifest.runtime.pi, /^>=/);
   assert.deepEqual(manifest.aliasTargets, { fast: "openai/gpt" });
@@ -668,7 +667,7 @@ void test("portable bundles name dependency packages and entry points by their p
   const entryPoint = join(root, "entry-point.mjs");
   writeFileSync(entryPoint, "export const entryPoint = true;\n");
   const destination = join(root, "bundle");
-  const workflow = { name: "dependencyWorkflow", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle dependencies", input: { type: "object", additionalProperties: false }, output: { type: "boolean" } };
+  const workflow = { name: "dependencyWorkflow", version: "1.0.0", headline: "Bundle", description: "Bundle dependencies", input: { type: "object", additionalProperties: false }, output: { type: "boolean" } };
   const manifest = writePortableWorkflowBundle({ destination, command: "dependency-workflow", workflow, functionSource: "async run() { return true; }", resources: { dependencies: [dependency, entryPoint] }, piVersion: ">=0.80.9 <0.81.0", engineVersion: ">=5.0.0 <6.0.0" });
   assert.deepEqual(manifest.payload?.dependencies, ["@scope/example", "entry-point.mjs"]);
   assert.equal(readFileSync(join(destination, "payload", "node_modules", "@scope", "example", "package.json"), "utf8"), JSON.stringify({ name: "@scope/example" }));
@@ -689,7 +688,7 @@ void test("portable bundle setup resolves an external runtime, launches, and fai
   writeFileSync(piExecutable, "#!/usr/bin/env node\nif (process.argv[2] === \"--version\") console.log(\"0.82.0\");\n", { mode: 0o755 });
   chmodSync(piExecutable, 0o755);
   writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:@piewf/cli"] }));
-  const workflow = { name: "e2e", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle e2e", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
+  const workflow = { name: "e2e", version: "1.0.0", headline: "Bundle", description: "Bundle e2e", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
   const environment = { ...process.env, PATH: `${join(piRoot, "dist")}:${process.env.PATH ?? ""}`, HOME: root, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" };
   const create = (name: string, requirements: Record<string, readonly string[]>, piVersion = ">=0.82.0 <0.83.0", aliasTargets?: Readonly<Record<string, string>>) => { const destination = join(root, name); writePortableWorkflowBundle({ destination, command: name, workflow, functionSource: "async run(input) { return input.value; }", requirements, ...(aliasTargets ? { aliasTargets } : {}), piVersion, engineVersion: ">=5.0.0 <6.0.0" }); return destination; };
   const runFailure = (bundle: string): string => { try { execFileSync(bundle, ["setup", "--yes"], { env: environment, encoding: "utf8", stdio: "pipe" }); return ""; } catch (error) { return String((error as { stderr?: unknown }).stderr ?? error); } };
@@ -767,7 +766,7 @@ else {
   if (process.env.BUNDLE_INSTALL_MODE === "incompatible") writeFileSync(join(target, "package.json"), JSON.stringify({ name: "@piewf/cli", version: "3.0.0" }));
 }` , { mode: 0o755 });
   chmodSync(piExecutable, 0o755);
-  const workflow = { name: "install", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle install", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
+  const workflow = { name: "install", version: "1.0.0", headline: "Bundle", description: "Bundle install", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
   const environment = { ...process.env, PATH: `${join(piRoot, "dist")}:${process.env.PATH ?? ""}`, HOME: root, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1", BUNDLE_ENGINE_SOURCE: process.cwd(), BUNDLE_CORE_SOURCE: join(process.cwd(), "../core"), BUNDLE_AGENT_SOURCE: join(process.cwd(), "../../node_modules/@earendil-works/pi-coding-agent"), BUNDLE_TYPEBOX_SOURCE: join(process.cwd(), "../../node_modules/typebox"), BUNDLE_PI_AI_SOURCE: join(process.cwd(), "../../node_modules/@earendil-works/pi-ai") };
   const create = (name: string): string => { const destination = join(root, name); writePortableWorkflowBundle({ destination, command: name, workflow, functionSource: "async run(input) { return input.value; }", piVersion: ">=0.82.0 <0.83.0", engineVersion: ">=5.0.0 <6.0.0" }); return destination; };
   const runSetup = (bundle: string, mode: string): ReturnType<typeof spawnSync> => spawnSync(join(bundle, basename(bundle)), ["setup", "--yes"], { env: { ...environment, BUNDLE_INSTALL_MODE: mode }, encoding: "utf8" });
@@ -795,9 +794,9 @@ else {
 void test("portable bundles can load a selected workflow extension with its module state", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-bundle-extension-"));
   const extension = join(root, "workflow.mjs");
-  writeFileSync(extension, `import { registerWorkflowExtension } from "pi-extensible-workflows";\nconst suffix = "!";\nexport default function extension() { registerWorkflowExtension({ version: "1.0.0", headline: "Bundled extension", description: "Bundled extension", functions: { extensionSelected: { description: "Selected", input: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }, output: { type: "string" }, run(input) { return input.value + suffix; } } } }); }\n`);
+  writeFileSync(extension, `import { registerWorkflowExtension } from "pi-extensible-workflows";\nconst suffix = "!";\nexport default function extension() { registerWorkflowExtension({ version: "1.0.0", headline: "Bundled extension", functions: { extensionSelected: { description: "Selected", input: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }, output: { type: "string" }, run(input) { return input.value + suffix; } } } }); }\n`);
   const destination = join(root, "bundle");
-  writePortableWorkflowBundle({ destination, command: "selected", workflow: { name: "selected", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle", input: { type: "object" }, output: { type: "string" } }, functionSource: '() => "workflow"', resources: { extensions: [extension] }, piVersion: ">=0.80.9 <0.81.0", engineVersion: ">=5.0.0 <6.0.0" });
+  writePortableWorkflowBundle({ destination, command: "selected", workflow: { name: "selected", version: "1.0.0", headline: "Bundle", description: "Bundle", input: { type: "object" }, output: { type: "string" } }, functionSource: '() => "workflow"', resources: { extensions: [extension] }, piVersion: ">=0.80.9 <0.81.0", engineVersion: ">=5.0.0 <6.0.0" });
   type BundleFunction = { run: (input: Record<string, unknown>) => unknown };
   type BundleExtension = { functions?: Record<string, BundleFunction> };
   const registrations: BundleExtension[] = [];

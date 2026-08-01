@@ -22,7 +22,7 @@ async function waitForRunState(store: RunStore, state: string): Promise<void> {
 }
 let acceptanceFunctionCalls = 0;
 const acceptanceExtension: WorkflowExtension = {
-  version: "1.0.0", headline: "Acceptance", description: "Acceptance globals",
+  version: "1.0.0", headline: "Acceptance",
   functions: {
     echo: { description: "Echo once", input: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }, output: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }, run(input, context) { acceptanceFunctionCalls += 1; return { value: context.prompt("{value}", { value: input.value as string }) }; } },
     orchestrate: {
@@ -566,7 +566,7 @@ void test("registered extension agents persist structural scope for late sibling
     dispose() {},
   });
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
-  registerWorkflowExtension({ version: "1.0.0", headline: "Identity", description: "Identity acceptance", functions: { review: { description: "Review", input: { type: "object" }, output: { type: "string" }, run: (_input, context) => context.agent("developer", { label: "developer" }) } } });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Identity", functions: { review: { description: "Review", input: { type: "object" }, output: { type: "string" }, run: (_input, context) => context.agent("developer", { label: "developer" }) } } });
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   const result = await workflow.execute("id", { name: "issue69", script: `return parallel("issues", { "issue-65": async () => { const first = await review({}); await Promise.resolve(); const second = await review({}); return [first, second]; }, "issue-66": () => review({}) });`, foreground: true }, new AbortController().signal, undefined, { cwd: home, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } });
@@ -614,7 +614,7 @@ void test("setup hooks conditionally install an inline Pi extension for one agen
   };
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ details: { value: unknown } }> }> = [];
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["read", "workflow"] } as never, home, async () => {}, testTransport(createSession));
-  registerWorkflowExtension({ version: "1.0.0", headline: "Setup hooks", description: "Setup hook fixture", agentSetupHooks: { advisor: { setup(agent) { if (agent.options.advisor !== true) return; agent.sessionInput.extensionFactories ??= []; agent.sessionInput.extensionFactories.push(scopedAdvisorFactory); } } } });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Setup hooks", agentSetupHooks: { advisor: { setup(agent) { if (agent.options.advisor !== true) return; agent.sessionInput.extensionFactories ??= []; agent.sessionInput.extensionFactories.push(scopedAdvisorFactory); } } } });
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   const result = await workflow.execute("id", { name: "setup-hooks", script: `return parallel("agents", { marked: () => agent("marked", { advisor: true }), plain: () => agent("plain") });`, foreground: true }, new AbortController().signal, undefined, { cwd: home, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } });
@@ -644,7 +644,7 @@ void test("parent registry survives nested agent session lifecycle", async () =>
   });
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "workflow_catalog"], on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; } } as never, home, async () => {}, testTransport(createSession));
   registerWorkflowExtension({
-    version: "1.0.0", headline: "Registry session", description: "Registry session acceptance",
+    version: "1.0.0", headline: "Registry session",
     functions: {
       afterNested: {
         description: "Run after a nested session",
@@ -679,7 +679,7 @@ void test("registered function context exposes callback worktree references", as
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ details: { value?: unknown } }> }> = [];
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
   registerWorkflowExtension({
-    version: "1.0.0", headline: "Worktree reference", description: "Worktree reference acceptance",
+    version: "1.0.0", headline: "Worktree reference",
     functions: {
       readReference: { description: "Read reference", input: { type: "object" }, output: { type: "object" }, async run(_input, context) { let frozen = false; const reference = await context.withWorktree("registered", async (value) => { frozen = Object.isFrozen(value); return { path: value.path, branch: value.branch }; }); return { reference, frozen, runName: context.run.workflow.name }; } }
     },
@@ -706,7 +706,7 @@ void test("shared worktree scopes persist one owner across production agents and
   execFileSync("git", ["-C", cwd, "add", "."]);
   execFileSync("git", ["-C", cwd, "commit", "-qm", "initial"]);
   const extension: WorkflowExtension = {
-    version: "1.0.0", headline: "Shared worktree", description: "Shared worktree acceptance",
+    version: "1.0.0", headline: "Shared worktree",
     functions: {
       inherited: { description: "Use the inherited scope", input: { type: "object" }, output: { type: "object" }, async run(_input, context) { return context.parallel("function-agents", { left: () => context.agent("function-left"), right: () => context.agent("function-right") }); } },
       scoped: { description: "Use a named scope", input: { type: "object" }, output: { type: "string" }, async run(_input, context) { return context.withWorktree("shared", async () => context.agent("function-scoped")); } },

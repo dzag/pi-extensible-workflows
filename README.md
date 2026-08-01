@@ -6,7 +6,7 @@
 
 Turn multi-agent tasks into deterministic jobs that fan out in parallel, pause for approval, and resume without rerunning completed work.
 
-[Documentation](https://vekexasia.github.io/pi-extensible-workflows/) | [Developer guide](https://vekexasia.github.io/pi-extensible-workflows/developers.html) | [Agent guide](https://vekexasia.github.io/pi-extensible-workflows/agents.html) | [Extension authoring](https://vekexasia.github.io/pi-extensible-workflows/extensions.html) | [Video overview](https://youtu.be/qAiivspEHmU)
+[Documentation](https://vekexasia.github.io/pi-extensible-workflows/) | [Developer guide](https://vekexasia.github.io/pi-extensible-workflows/developers.html) | [Roles](https://vekexasia.github.io/pi-extensible-workflows/roles.html) | [Extension authoring](https://vekexasia.github.io/pi-extensible-workflows/extensions.html) | [LLM guide](https://vekexasia.github.io/pi-extensible-workflows/llm.md) | [Video overview](https://youtu.be/qAiivspEHmU)
 
 Requires Node.js 22.19 or newer. This is a trusted Pi extension with the same filesystem and process access as Pi.
 
@@ -50,8 +50,7 @@ Learn more about roles, workflow contracts, and extension APIs in the documentat
 - [Copy-paste extension template](https://github.com/vekexasia/pi-extensible-workflows/tree/main/packages/core/examples/workflow-extension-template)
 - [Run artifacts and lifecycle events](https://vekexasia.github.io/pi-extensible-workflows/developers.html#lifecycle)
 - [Run inspection and recovery](https://vekexasia.github.io/pi-extensible-workflows/developers.html#operations)
-- [Agent patterns and model selection](https://vekexasia.github.io/pi-extensible-workflows/agents.html#patterns)
-- [Checkpoints](https://vekexasia.github.io/pi-extensible-workflows/agents.html#checkpoints)
+- [LLM guide for installation, configuration, roles, extension authoring, and TypeBox function inference](https://vekexasia.github.io/pi-extensible-workflows/llm.md#registered-functions)
 
 
 ## License

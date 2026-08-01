@@ -62,8 +62,6 @@ export default function extension() {
   registerWorkflowExtension({
     version: '1.0.0',
     headline: 'Dynamic model router',
-    description:
-      'Resolves role/tier aliases to the best available model at launch.',
     modelAliases: {
       'developer-model': pick((t) => t.bestCode),
       'reviewer-model': pick((t) => t.bestReview),

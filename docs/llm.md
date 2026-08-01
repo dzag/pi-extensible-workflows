@@ -1,0 +1,279 @@
+# pi-extensible-workflows
+
+> Trusted Pi extension for configuring agent roles and registering reusable workflow capabilities.
+
+This file is the compact authoring and configuration reference for an LLM working with `pi-extensible-workflows`. It is intentionally not a workflow-language guide. Do not invent workflow scripts, orchestration patterns, or recovery procedures from this file. For workflow authoring, use the bundled skill at `packages/core/skills/pi-extensible-workflows/SKILL.md`.
+## Install and trust
+
+Requirements:
+
+- Node.js 22.19 or newer.
+- A trusted Pi installation and trusted project. The package is trusted code with the same filesystem and process access as Pi.
+
+Install the published extension:
+
+```sh
+pi install npm:pi-extensible-workflows
+```
+
+For local development:
+
+```sh
+git clone https://github.com/vekexasia/pi-extensible-workflows.git
+cd pi-extensible-workflows
+npm ci
+npm run check
+pi install "$PWD/packages/core"
+```
+
+A one-session source run is:
+
+```sh
+pi --no-extensions --extension "$PWD/packages/core/src/index.ts"
+```
+
+Only load extension code and role files that you trust. Workflow scripts run in a separate sandbox; extension factories, registered functions, hooks, and transports run in the trusted host.
+
+## Configuration files
+
+`PI_CODING_AGENT_DIR` changes the Pi agent directory. Otherwise use `~/.pi/agent`.
+
+- Global settings: `<agentDir>/pi-extensible-workflows/settings.json`
+- Trusted project settings: `<cwd>/.pi/pi-extensible-workflows/settings.json`
+- Global roles: `<agentDir>/pi-extensible-workflows/roles/<name>.md`
+- Trusted project roles: `<cwd>/.pi/pi-extensible-workflows/roles/<name>.md`
+
+Missing settings files use defaults. Settings JSON is strict: unknown keys, invalid JSON, and invalid values fail launch or resume. Project settings are ignored when the project is not trusted.
+
+Effective precedence is:
+
+1. Built-in defaults (`concurrency` defaults to `8`).
+2. Global settings.
+3. Trusted project settings for `concurrency`, `modelAliases`, and `disabledAgentResources`.
+4. Per-run options where the workflow API defines them.
+
+Project collections replace, rather than deep-merge, the matching global collection. An empty project object or array clears the inherited value.
+
+Supported settings shape:
+
+```json
+{
+  "concurrency": 8,
+  "modelAliases": {
+    "reviewer-model": "anthropic/claude-fable-5:high",
+    "cheap-model": "reviewer-model:low"
+  },
+  "disabledAgentResources": {
+    "skills": ["interactive-*", "!interactive-safe"],
+    "extensions": ["**/*", "!../../extensions/trusted.ts"]
+  },
+  "extensions": {
+    "herdr": {
+      "enableFullyInspectableMode": true
+    }
+  }
+}
+```
+
+The supported top-level settings are exactly `concurrency`, `modelAliases`, `disabledAgentResources`, and `extensions`. The currently supported extension settings are exactly `extensions.herdr.enableFullyInspectableMode` as a boolean. Adding a new settings namespace requires a core validation and type change; do not silently add arbitrary keys.
+
+### Concurrency
+
+`concurrency` is an integer from `1` through `16`. The default is `8`.
+
+### Models and aliases
+
+A model reference is static when it is a literal concrete `provider/model[:thinking]` value or a literal alias. Static references are resolved and checked during launch preflight. A role's `model` frontmatter value follows the same rules.
+
+`modelAliases` is a case-sensitive object. Names must match `[A-Za-z][A-Za-z0-9_-]*`. Values are concrete `provider/model` references or another alias, optionally with a thinking suffix such as `:high`. Unknown targets and cycles fail before execution. An alias-specific suffix overrides the target suffix; an explicit call-level thinking option has higher precedence.
+
+Static settings aliases override dynamic aliases with the same name. Use settings for fixed policy and an extension `modelAliases` entry when the target must be resolved from the live model inventory.
+
+#### Dynamic model selection
+
+A model is dynamic when its value cannot be determined during preflight, for example when an agent option is computed from runtime data, `args`, a spread, or another non-literal expression. The workflow is still launchable; the model is resolved when that agent starts against the run's captured model and alias inventory. The resolved model must be available or the agent fails with `UNKNOWN_MODEL`. Dynamic model values are not a new model-registration mechanism; use a static alias or an extension resolver when the policy itself must be named and reusable.
+
+Dynamic model aliases are resolved once per launch or resume, then captured for that execution segment. They are not re-resolved on every agent turn. A role can use a static alias or a dynamic alias in its `model` field.
+
+### Resource exclusions
+
+`disabledAgentResources.skills` contains skill-name minimatch selectors. `disabledAgentResources.extensions` contains normalized extension-path selectors. Selectors are evaluated in declaration order; the last match wins, and a leading `!` re-enables a match. `~` expands to the home directory. These exclusions affect workflow agents, not the parent Pi session.
+
+## Create an extension
+
+Use TypeScript or JavaScript as a normal Pi extension. The package import is `pi-extensible-workflows`.
+
+Rules:
+
+- Export a default factory.
+- Call `registerWorkflowExtension()` inside the factory, not at module top level.
+- Provide a strict semantic `version` and non-empty `headline`.
+- Register at least one capability: `functions`, `modelAliases`, `agentSetupHooks`, `agentAttemptActions`, or `roleDirectories`. Function descriptions remain on each registered function and power catalog discovery and CLI help.
+- Treat all extension code as trusted host code.
+- Use globally unique, stable names. Registration is frozen after `session_start`; late registration fails with `REGISTRY_FROZEN`.
+- Do not use the removed `workflows` or `variables` registration formats.
+
+Minimal extension with a reusable function:
+
+```ts
+import { Type } from "typebox";
+import { defineWorkflowFunction, registerWorkflowExtension } from "pi-extensible-workflows";
+
+const greet = defineWorkflowFunction({
+  description: "Return a greeting for one person.",
+  run(input) {
+    return `Hello, ${input.name}!`;
+  }
+  input: Type.Object(
+    { name: Type.String() },
+    { additionalProperties: false }
+  ),
+  output: Type.String(),
+});
+
+export default function extension() {
+  registerWorkflowExtension({
+    version: "1.0.0",
+    headline: "Greeting helpers",
+    functions: { greet }
+  });
+}
+```
+
+### Extension registration fields
+
+| Field | Required contract |
+| --- | --- |
+| `version` | Semantic version string such as `1.0.0`. |
+| `headline` | Non-empty short label. |
+| `functions` | Named host functions with JSON schemas and `run(input, context)`. |
+| `modelAliases` | Named dynamic resolvers with `resolve(context)`. |
+| `agentSetupHooks` | Named trusted setup hooks with optional finite `priority`. |
+| `agentAttemptActions` | Named `/workflow` actions with `label`, synchronous `visible(context)`, and `run(context)`. |
+| `roleDirectories` | Absolute filesystem paths or `file:` URLs containing packaged `<name>.md` roles. |
+
+Unknown top-level extension keys are rejected. Function names must be identifier-shaped, globally unique, and must not be reserved globals such as `agent`, `args`, `JSON`, `extensions`, or `workflow_catalog`. Model alias names must match `[A-Za-z][A-Za-z0-9_-]*`. Hook and action names must be identifier-shaped and globally unique.
+
+### Registered functions
+
+A function has exactly `description`, `input`, `output`, and `run`. Schemas must be JSON-compatible; the input schema must describe one object. Inputs and outputs are validated and cloned at the runtime boundary. `run` may return a JSON value or a promise.
+
+For TypeScript extensions, prefer TypeBox schemas with `defineWorkflowFunction()`, as in the example above. The helper infers the read-only `run` input type from `input` and checks its synchronous or asynchronous return type against `output`. Hand-written JSON Schema remains supported but does not provide this inference.
+
+The `run` callback also receives a read-only host context for functions that explicitly need orchestration. Keep workflow composition and workflow-specific rules in the bundled skill rather than copying them into an extension guide.
+
+Completed function calls are journaled and can replay without running the implementation again. Design external effects to be idempotent or bounded. A host crash after an external effect and before journaling can repeat that effect.
+
+### Dynamic model aliases
+
+Register a resolver like this:
+
+```ts
+modelAliases: {
+  reviewer: {
+    resolve({ availableModels, rootModel }) {
+      const preferred = "anthropic/opus";
+      if (availableModels.has(preferred)) return `${preferred}:high`;
+      return `${rootModel.provider}/${rootModel.model}`;
+    }
+  }
+}
+```
+
+The resolver context has `cwd`, `projectTrusted`, `rootModel`, `knownModels`, `availableModels`, and an `AbortSignal`. Resolve once per launch or resume. Return a non-empty normal model reference or another alias. Invalid results, cycles, unavailable targets, thrown errors, and cancellation fail the launch with a diagnostic naming the alias and extension.
+
+### Agent setup hooks
+
+Hooks run after normal model, tool, cwd, and role resolution but before the agent session is created. They run in ascending `priority` order; equal priorities use the hook name. The default priority is `10`.
+
+Use a custom JSON-compatible agent option as an explicit opt-in instead of changing every agent:
+
+```ts
+agentSetupHooks: {
+  advisor: {
+    setup(agent, context) {
+      if (context.signal.aborted || agent.options.advisor !== true) return;
+      const note = "\n\nAdvisor: call out one concrete risk and one next check.";
+      agent.sessionInput.systemPromptAppend =
+        (agent.sessionInput.systemPromptAppend ?? "") + note;
+    }
+  }
+}
+```
+
+Hooks may mutate the prompt, options, session input, or transport, but the immutable prepared launch remains the capability ceiling. Keep hooks short and cancellation-aware. Hook failures prevent session creation and are not native-session retries. Each agent retry starts from a fresh setup baseline and runs hooks again.
+
+### Packaged roles
+
+Use `roleDirectories` for extension-provided role defaults. Paths must be absolute or `file:` URLs; use `new URL("./roles/", import.meta.url)` so copied or installed extensions resolve correctly.
+
+```ts
+roleDirectories: [new URL("./roles/", import.meta.url)]
+```
+
+Extension roles are defaults. Matching global and trusted project roles override them. Duplicate role names across extension directories are rejected.
+
+## Create and modify roles
+
+A role is a Markdown file named `<role>.md` with optional YAML frontmatter and a prompt body:
+
+```md
+---
+description: Reviews code for correctness
+model: reviewer-model
+thinking: high
+tools: [read, grep]
+contextFiles: [global, project]
+disabledAgentResources:
+  skills: [interactive-skill]
+---
+
+Focus on correctness, regressions, and concrete next checks.
+```
+Supported core frontmatter fields:
+
+| Field | Type and behavior |
+| --- | --- |
+| `description` | Non-empty single-line string, at most 1024 characters. |
+| `model` | Configured alias or `provider/model[:thinking]`. |
+| `thinking` | One of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. |
+| `tools` | Array of non-empty Pi tool names. |
+| `overrideSystemPrompt` | Boolean. When true, use the role body instead of appending it to the native Pi system prompt. |
+| `contextFiles` | Array containing `global`, `cwd`, and/or `project`. |
+| `disabledAgentResources` | Object with `skills` and `extensions` selector arrays. |
+
+The role body is prompt guidance. Role files are trusted configuration and can change model, tools, context, resources, and system-prompt behavior.
+
+Role selection can be a string or an object:
+
+```js
+{ role: "reviewer" }
+{ role: { name: "reviewer", model: "cheap-model", thinking: null, tools: [] } }
+```
+
+For a role object, omit a field to inherit it, use `null` to unset it, or provide an explicit replacement including `[]` and `false`. The role name and body always come from the named file. Do not combine a role with top-level `model`, `thinking`, or `tools`; put those changes inside the role object.
+
+### Static and dynamic role references
+
+A role reference is static when the runtime can see a literal role name or a literal role object with a string `name`. It is dynamic when the role depends on runtime data, such as `args`, a computed property, a spread, or another non-literal expression. Dynamic role references are supported, but preflight cannot validate only one role, so launch validation checks every loaded role policy. At execution, the selected role must still exist.
+
+Dynamic roles do not create inline role definitions. The selected role name must resolve to a discovered role file, and its prompt body always comes from that file. The same precedence applies: packaged extension roles are defaults, global roles override them, and trusted project roles override both.
+
+Use a dynamic role when the choice must be made at runtime. Use a static role when possible because it gives earlier unknown-role, model, and tool errors and produces a smaller launch snapshot.
+
+`piewf doctor --role <name>` is the read-only way to inspect the effective role, model, tools, resources, setup hooks, and prepared system prompt. Add `--prompt <text>` when a prompt-dependent hook must be inspected.
+
+
+## Verification checklist
+
+When creating or changing an extension or role:
+
+1. Start from the copyable extension template.
+2. Keep registration inside the default extension factory.
+3. Use strict JSON schemas and JSON-compatible values.
+4. Check names for global collisions and reserved names.
+5. Keep trusted hooks opt-in, short, and cancellation-aware.
+6. Test registration, role discovery, schema validation, replay-sensitive behavior, and invalid configuration.
+7. Run `npm run check` from the repository root.
+
+The workflow DSL, workflow invocation examples, checkpoint handling, budgets, worktrees, and recovery are intentionally outside this file. Read the bundled workflow skill for those tasks.

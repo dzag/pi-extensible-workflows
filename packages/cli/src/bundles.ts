@@ -334,7 +334,6 @@ function workflowModule(workflow: WorkflowCatalogFunction, functionSource: strin
     "  registerWorkflowExtension({",
     `    version: ${JSON.stringify("1.0.0")},`,
     `    headline: ${JSON.stringify("Portable workflow bundle")},`,
-    `    description: ${JSON.stringify(workflow.description)},`,
     ...(withRoles ? [`    roleDirectories: [new URL("./roles", import.meta.url)],`] : []),
     ...(aliases.length ? [`    modelAliases: { ${aliases.map(([name, target]) => `${JSON.stringify(name)}: { resolve: () => ${JSON.stringify(target)} }`).join(", ")} },`] : []),
     "    functions: {",

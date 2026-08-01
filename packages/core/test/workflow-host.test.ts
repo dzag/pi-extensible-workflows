@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
 import type { InlineExtension, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
@@ -38,7 +38,7 @@ const typeCheckAgentContext = (context: WorkflowOrchestrationContext): void => {
   const typedFunction = defineWorkflowFunction({ description: "typed", input: inputSchema, output: functionOutputSchema, run: async (input) => ({ value: input.value }) });
   const exactRun: (input: Static<typeof inputSchema>) => Promise<Static<typeof functionOutputSchema>> = typedFunction.run;
   void exactRun;
-  const typeCheckExtension: WorkflowExtension = { version: "1.0.0", headline: "Typed", description: "Typed function", functions: { typed: typedFunction } };
+  const typeCheckExtension: WorkflowExtension = { version: "1.0.0", headline: "Typed", functions: { typed: typedFunction } };
   void typeCheckExtension;
   void defineWorkflowFunction({
     description: "wrong output", input: inputSchema, output: functionOutputSchema,
@@ -62,7 +62,6 @@ void typeCheckAgentContext;
 const typeCheckAgentSetupHook: WorkflowExtension = {
   version: "1.0.0",
   headline: "Typed setup hook",
-  description: "Compile-time setup hook contract",
   agentSetupHooks: {
     typed: {
       setup(agent) {
@@ -95,10 +94,15 @@ const typeCheckWorktreeContext = (context: WorkflowOrchestrationContext): void =
 };
 void typeCheckWorktreeContext;
 
+void test("rejects obsolete top-level extension metadata", () => {
+  const registry = new WorkflowRegistry();
+  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Obsolete metadata", description: "No longer accepted", modelAliases: { reviewer: { resolve: () => "openai/gpt" } } } as never); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+});
+
 void test("resolves dynamic model aliases against a launch inventory", async () => {
   const registry = new WorkflowRegistry();
   let calls = 0;
-  registry.register({ version: "1.0.0", headline: "Dynamic aliases", description: "Dynamic alias test", modelAliases: { reviewer: { async resolve(context) { calls += 1; assert.equal(context.cwd, "/project"); assert.equal(context.projectTrusted, true); assert.equal(context.rootModel.provider, "openai"); assert.ok(context.availableModels.has("anthropic/opus")); return context.availableModels.has("anthropic/opus") ? "anthropic/opus:high" : "openai/gpt"; } } } });
+  registry.register({ version: "1.0.0", headline: "Dynamic aliases", modelAliases: { reviewer: { async resolve(context) { calls += 1; assert.equal(context.cwd, "/project"); assert.equal(context.projectTrusted, true); assert.equal(context.rootModel.provider, "openai"); assert.ok(context.availableModels.has("anthropic/opus")); return context.availableModels.has("anthropic/opus") ? "anthropic/opus:high" : "openai/gpt"; } } } });
   const resolved = await registry.resolveModelAliases({ cwd: "/project", projectTrusted: true, rootModel: { provider: "openai", model: "gpt", thinking: "medium" }, knownModels: new Set(["openai/gpt", "anthropic/opus"]), availableModels: new Set(["openai/gpt", "anthropic/opus"]), signal: new AbortController().signal });
   assert.deepEqual(resolved, { reviewer: "anthropic/opus:high" });
   assert.equal(calls, 1);
@@ -112,20 +116,20 @@ void test("validates Promise.all agent fan-out and allows explicit parallel or s
 void test("registers and collision-checks latest-attempt actions", () => {
   const registry = new WorkflowRegistry();
   const action = { label: "Inspect", visible: () => true, run: () => undefined };
-  registry.register({ version: "1.0.0", headline: "Actions", description: "Action test", agentAttemptActions: { inspect: action } });
+  registry.register({ version: "1.0.0", headline: "Actions", agentAttemptActions: { inspect: action } });
   assert.equal(registry.agentAttemptActions().inspect, action);
-  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Duplicate actions", description: "Action test", agentAttemptActions: { inspect: action } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "DUPLICATE_NAME");
+  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Duplicate actions", agentAttemptActions: { inspect: action } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "DUPLICATE_NAME");
 });
 void test("accepts dynamic aliases with the static hyphenated alias contract", async () => {
   const registry = new WorkflowRegistry();
-  registry.register({ version: "1.0.0", headline: "Hyphenated aliases", description: "Dynamic alias test", modelAliases: { "reviewer-model": { resolve: () => "openai/gpt" } } });
+  registry.register({ version: "1.0.0", headline: "Hyphenated aliases", modelAliases: { "reviewer-model": { resolve: () => "openai/gpt" } } });
   assert.deepEqual(await registry.resolveModelAliases({ cwd: "/project", projectTrusted: false, rootModel: { provider: "openai", model: "gpt" }, knownModels: new Set(["openai/gpt"]), availableModels: new Set(["openai/gpt"]), signal: new AbortController().signal }), { "reviewer-model": "openai/gpt" });
 });
 void test("catalogs dynamic aliases without executing them and honors settings shadowing", async () => {
   const registry = new WorkflowRegistry();
   let calls = 0;
-  registry.register({ version: "1.0.0", headline: "Policy extension", description: "Selects a policy model", modelAliases: { reviewer: { resolve: async () => { calls += 1; return "openai/gpt"; } } } });
-  assert.deepEqual(registry.catalog().modelAliasEntries?.find(({ name, kind }) => name === "reviewer" && kind === "dynamic"), { name: "reviewer", kind: "dynamic", provenance: "extension: Policy extension", version: "1.0.0", headline: "Policy extension", extensionDescription: "Selects a policy model" });
+  registry.register({ version: "1.0.0", headline: "Policy extension", modelAliases: { reviewer: { resolve: async () => { calls += 1; return "openai/gpt"; } } } });
+  assert.deepEqual(registry.catalog().modelAliasEntries?.find(({ name, kind }) => name === "reviewer" && kind === "dynamic"), { name: "reviewer", kind: "dynamic", provenance: "extension: Policy extension", version: "1.0.0", headline: "Policy extension" });
   const context = { cwd: "/project", projectTrusted: true, rootModel: { provider: "openai", model: "gpt" }, knownModels: new Set(["openai/gpt"]), availableModels: new Set(["openai/gpt"]), signal: new AbortController().signal };
   assert.deepEqual(await registry.resolveModelAliases(context, new Set(["reviewer"])), {});
   assert.equal(calls, 0);
@@ -135,20 +139,20 @@ void test("catalogs dynamic aliases without executing them and honors settings s
 });
 void test("rejects duplicate and invalid dynamic alias registrations with extension provenance", async () => {
   const duplicate = new WorkflowRegistry();
-  duplicate.register({ version: "1.0.0", headline: "First policy", description: "First", modelAliases: { reviewer: { resolve: () => "openai/gpt" } } });
-  assert.throws(() => { duplicate.register({ version: "1.0.0", headline: "Second policy", description: "Second", modelAliases: { reviewer: { resolve: () => "openai/gpt" } } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "DUPLICATE_NAME");
+  duplicate.register({ version: "1.0.0", headline: "First policy", modelAliases: { reviewer: { resolve: () => "openai/gpt" } } });
+  assert.throws(() => { duplicate.register({ version: "1.0.0", headline: "Second policy", modelAliases: { reviewer: { resolve: () => "openai/gpt" } } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "DUPLICATE_NAME");
   const invalid = new WorkflowRegistry();
-  invalid.register({ version: "1.0.0", headline: "Invalid policy", description: "Invalid", modelAliases: { reviewer: { resolve: () => "" } } });
+  invalid.register({ version: "1.0.0", headline: "Invalid policy", modelAliases: { reviewer: { resolve: () => "" } } });
   await assert.rejects(invalid.resolveModelAliases({ cwd: "/project", projectTrusted: false, rootModel: { provider: "openai", model: "gpt" }, knownModels: new Set(["openai/gpt"]), availableModels: new Set(["openai/gpt"]), signal: new AbortController().signal }), (error: unknown) => error instanceof WorkflowError && error.code === "CONFIG_ERROR" && error.message.includes("Invalid policy"));
   const throwing = new WorkflowRegistry();
-  throwing.register({ version: "1.0.0", headline: "Throwing policy", description: "Throwing", modelAliases: { reviewer: { resolve: () => { throw new Error("resolver exploded"); } } } });
+  throwing.register({ version: "1.0.0", headline: "Throwing policy", modelAliases: { reviewer: { resolve: () => { throw new Error("resolver exploded"); } } } });
   await assert.rejects(throwing.resolveModelAliases({ cwd: "/project", projectTrusted: false, rootModel: { provider: "openai", model: "gpt" }, knownModels: new Set(["openai/gpt"]), availableModels: new Set(["openai/gpt"]), signal: new AbortController().signal }), (error: unknown) => error instanceof WorkflowError && error.code === "CONFIG_ERROR" && error.message.includes("resolver exploded"));
 });
 void test("attributes dynamic alias cycles to the registering extension", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-alias-cycle-"));
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
-  registerWorkflowExtension({ version: "1.0.0", headline: "Cycle policy", description: "Cycle", modelAliases: { first: { resolve: () => "second" }, second: { resolve: () => "first" } } });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Cycle policy", modelAliases: { first: { resolve: () => "second" }, second: { resolve: () => "first" } } });
   const execute = tools.find(({ name }) => name === "workflow")?.execute;
   assert.ok(execute);
   const context = { cwd: home, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }], getAvailable: () => [{ provider: "openai", id: "gpt" }] }, sessionManager: { getSessionId: () => "session" } };
@@ -170,20 +174,6 @@ void test("workflow guidance leads with the inline parallel-to-summary path", ()
   assert.match(WORKFLOW_TOOL_PROMPT_SNIPPET, /background by default/);
   assert.match(WORKFLOW_TOOL_PROMPT_SNIPPET, /foreground: true/);
   assert.match(WORKFLOW_TOOL_PROMPT_SNIPPET, /advanced/i);
-});
-void test("agent quick-start keeps the default launch as valid JSON and workflow source", () => {
-  const source = readFileSync(resolve(process.cwd(), "../../docs/agents.html"), "utf8");
-  const block = /<section id="quick-start">[\s\S]*?<pre><code class="language-json">([\s\S]*?)<\/code><\/pre>/.exec(source)?.[1];
-  assert.ok(block);
-  const json = block.replace(/<[^>]*>/g, "").replace(/&gt;/g, ">").replace(/&lt;/g, "<").replace(/&amp;/g, "&");
-  const launch = JSON.parse(json) as { [key: string]: unknown; name?: unknown; script?: unknown };
-  assert.deepEqual(Object.keys(launch).sort(), ["name", "script"]);
-  const { name, script } = launch;
-  if (typeof name !== "string" || typeof script !== "string") throw new Error("Quick-start launch must define name and script");
-  assert.match(script, /await parallel/);
-  assert.match(script, /await agent\(prompt/);
-  assert.doesNotMatch(script, /withWorktree|outputSchema|budget|checkpoint|workflow/);
-  assert.doesNotThrow(() => preflight(script, { models: new Set(), tools: new Set(), agentTypes: new Set() }, [], { name }));
 });
 
 void test("registers the workflow tool, command, and conditional skill", async () => {
@@ -380,7 +370,7 @@ void test("workflow_retry cleans up child startup when dynamic alias resolution 
   });
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
-  registerWorkflowExtension({ version: "1.0.0", headline: "Retry policy", description: "Retry alias policy", modelAliases: { "retry-model": { resolve: () => { resolverCalls += 1; if (resolverCalls === 2) throw new Error("retry resolver failure"); return "openai/gpt"; } } } });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Retry policy", modelAliases: { "retry-model": { resolve: () => { resolverCalls += 1; if (resolverCalls === 2) throw new Error("retry resolver failure"); return "openai/gpt"; } } } });
   const workflow = tools.find(({ name }) => name === "workflow");
   const retry = tools.find(({ name }) => name === "workflow_retry");
   assert.ok(workflow && retry);
@@ -506,7 +496,7 @@ void test("registers workflow_catalog only for active non-empty registries", asy
   await activeStart({}, activeContext);
   await activeStart({}, activeContext);
   assert.equal(activeTools.filter(({ name }) => name === "workflow_catalog").length, 1);
-  assert.throws(() => { registerWorkflowExtension({ version: "1.0.0", headline: "Late", description: "Late", functions: { x: { description: "x", input: { type: "object" }, output: { type: "string" }, run: () => "x" } } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "REGISTRY_FROZEN");
+  assert.throws(() => { registerWorkflowExtension({ version: "1.0.0", headline: "Late", functions: { x: { description: "x", input: { type: "object" }, output: { type: "string" }, run: () => "x" } } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "REGISTRY_FROZEN");
   const catalogTool = activeTools.find(({ name }) => name === "workflow_catalog");
   assert.ok(catalogTool?.execute);
   const catalog = JSON.parse((await catalogTool.execute()).content[0]?.text ?? "null") as { functions: Array<Record<string, unknown>>; modelAliasEntries?: Array<Record<string, unknown>> };
@@ -514,9 +504,9 @@ void test("registers workflow_catalog only for active non-empty registries", asy
   assert.deepEqual(catalog.modelAliasEntries?.find(({ name }) => name === "project-only"), { name: "project-only", kind: "static", provenance: "trusted project settings" });
   assert.doesNotMatch(JSON.stringify(catalog), /openai\/gpt/);
   assert.deepEqual(Object.keys(catalog.functions[0] ?? {}).sort(), ["description", "input", "name"]);
-  assert.doesNotMatch(JSON.stringify(catalog), /"output"|"extensionDescription"|"headline"|"version"|"script"|"run"|"resolve"|"source"|"main"|"ok"/);
+  assert.doesNotMatch(JSON.stringify(catalog), /"output"|"headline"|"version"|"script"|"run"|"resolve"|"source"|"main"|"ok"/);
   const functionDetail = JSON.parse((await catalogTool.execute("id" as never, { name: "hello" } as never)).content[0]?.text ?? "null") as Record<string, unknown>;
-  assert.deepEqual(Object.keys(functionDetail).sort(), ["description", "extensionDescription", "headline", "input", "name", "output", "version"]);
+  assert.deepEqual(Object.keys(functionDetail).sort(), ["description", "headline", "input", "name", "output", "version"]);
   assert.deepEqual(functionDetail.output, { type: "string" });
   const aliasDetail = JSON.parse((await catalogTool.execute("id" as never, { name: "project-only" } as never)).content[0]?.text ?? "null") as Record<string, unknown>;
   assert.deepEqual(aliasDetail, { name: "project-only", kind: "static", provenance: "trusted project settings" });
@@ -548,7 +538,7 @@ void test("registers workflow_catalog only for active non-empty registries", asy
   assert.match(compactDetail, /headline.*Reusable/);
   assert.doesNotMatch(compactDetail, /"properties"/);
   const expandedDetail = renderCatalog(functionDetail, true, "hello");
-  assert.match(expandedDetail, /Reusable test workflows/);
+  assert.match(expandedDetail, /headline.*Reusable/);
   assert.match(expandedDetail, /"properties"/);
   assert.match(expandedDetail, /Output schema/);
   const missingView = renderCatalog(missing, false, "missing");
@@ -557,7 +547,6 @@ void test("registers workflow_catalog only for active non-empty registries", asy
     ...functionDetail,
     description: "A_DESCRIPTION_THAT_MUST_REMAIN_VISIBLE",
     headline: "A_HEADLINE_THAT_MUST_REMAIN_VISIBLE",
-    extensionDescription: "AN_EXTENSION_DESCRIPTION_THAT_MUST_REMAIN_VISIBLE",
     input: { type: "object", properties: { detail: { type: "string", description: "THIS_TEXT_MUST_REMAIN_VISIBLE_WHEN_EXPANDED" } } },
     output: { type: "string", description: "OUTPUT_DESCRIPTION_MUST_REMAIN_VISIBLE" },
   };
@@ -565,7 +554,6 @@ void test("registers workflow_catalog only for active non-empty registries", asy
   const narrowVisible = stripAnsi(narrowExpanded).replace(/\s+/g, "");
   assert.match(narrowVisible, /THIS_TEXT_MUST_REMAIN_VISIBLE_WHEN_EXPANDED/);
   assert.match(narrowVisible, /A_HEADLINE_THAT_MUST_REMAIN_VISIBLE/);
-  assert.match(narrowVisible, /AN_EXTENSION_DESCRIPTION_THAT_MUST_REMAIN_VISIBLE/);
   assert.match(narrowVisible, /OUTPUT_DESCRIPTION_MUST_REMAIN_VISIBLE/);
   for (const line of narrowExpanded.split("\n")) assert.ok(stripAnsi(line).length <= 24, `rendered line exceeds width: ${line}`);
   const renderCall = catalogTool.renderCall;

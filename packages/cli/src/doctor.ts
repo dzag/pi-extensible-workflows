@@ -332,7 +332,7 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
   const dynamicAliases = new Set(registeredModelAliases.map(({ name }) => name).filter((name) => !Object.prototype.hasOwnProperty.call(aliases, name)));
   const modelAliases: WorkflowCatalogModelAlias[] = [
     ...Object.keys(aliases).map((name) => ({ name, kind: "static" as const, provenance: settingsSources.modelAliases })),
-    ...registeredModelAliases.map(({ name, version, headline, extensionDescription }) => ({ name, kind: "dynamic" as const, provenance: `extension: ${headline}`, version, headline, extensionDescription })),
+    ...registeredModelAliases.map(({ name, version, headline }) => ({ name, kind: "dynamic" as const, provenance: `extension: ${headline}`, version, headline })),
   ].sort((left, right) => left.name.localeCompare(right.name) || left.kind.localeCompare(right.kind));
   const roles: DoctorRole[] = [];
   const definitions = new Map<string, AgentDefinition>();

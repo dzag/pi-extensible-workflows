@@ -24,7 +24,7 @@ void test("registered extension functions can run as script globals with args", 
 void test("registered function schemas remain enforced inside scripts", async () => {
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never);
-  registerWorkflowExtension({ version: "1.0.0", headline: "Schema tests", description: "Schema tests", functions: { needsValue: { description: "Needs a value", input: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }, output: { type: "string" }, run: (input) => typeof input.value === "string" ? input.value : "" }, badResult: { description: "Bad result", input: { type: "object", additionalProperties: false }, output: { type: "string" }, run: () => 42 } } });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Schema tests", functions: { needsValue: { description: "Needs a value", input: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }, output: { type: "string" }, run: (input) => typeof input.value === "string" ? input.value : "" }, badResult: { description: "Bad result", input: { type: "object", additionalProperties: false }, output: { type: "string" }, run: () => 42 } } });
   const execute = tools.find(({ name }) => name === "workflow")?.execute;
   assert.ok(execute);
   const context = { cwd: mkdtempSync(join(tmpdir(), "pi-extensible-workflows-function-schema-")), model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
@@ -47,7 +47,7 @@ void test("registered globals preserve role definitions for agent calls across r
   };
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession), agentDir);
-  registerWorkflowExtension({ version: "1.0.0", headline: "Registered role retry", description: "Registered role retry reproduction", functions: { registeredRoleRetry: { description: "Run a developer role", input: { type: "object", additionalProperties: false }, output: { type: "string" }, run: async (_input, context) => { await context.agent("work", { role: "developer", retries: 0 }); return "done"; } } } });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Registered role retry", functions: { registeredRoleRetry: { description: "Run a developer role", input: { type: "object", additionalProperties: false }, output: { type: "string" }, run: async (_input, context) => { await context.agent("work", { role: "developer", retries: 0 }); return "done"; } } } });
   const workflow = tools.find(({ name }) => name === "workflow");
   const retry = tools.find(({ name }) => name === "workflow_retry");
   assert.ok(workflow && retry);
@@ -74,8 +74,8 @@ void test("attributes dynamic alias availability failures to the exact extension
   mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
     const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
     workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never, home, undefined, undefined, agentDir);
-    registerWorkflowExtension({ version: "1.0.0", headline: "Review extension", description: "Review policy", modelAliases: { review: { resolve: () => "openai/gpt" } } });
-    registerWorkflowExtension({ version: "1.0.0", headline: "Reviewer extension", description: "Reviewer policy", modelAliases: { reviewer: { resolve: () => "missing/model" } } });
+    registerWorkflowExtension({ version: "1.0.0", headline: "Review extension", modelAliases: { review: { resolve: () => "openai/gpt" } } });
+    registerWorkflowExtension({ version: "1.0.0", headline: "Reviewer extension", modelAliases: { reviewer: { resolve: () => "missing/model" } } });
     const execute = tools.find(({ name }) => name === "workflow")?.execute;
     assert.ok(execute);
     const context = { cwd: join(home, "project"), model: { provider: "openai", id: "gpt" }, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }], getAvailable: () => [{ provider: "openai", id: "gpt" }] }, sessionManager: { getSessionId: () => "session" } };
@@ -91,7 +91,7 @@ void test("production launch cancellation aborts a dynamic alias resolver", asyn
   const started = new Promise<void>((resolve) => { markStarted = resolve; });
     const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
     workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never, home, undefined, undefined, agentDir);
-    registerWorkflowExtension({ version: "1.0.0", headline: "Cancellation policy", description: "Cancellation policy", modelAliases: { "cancel-model": { resolve: ({ signal }) => new Promise<string>((_resolve, reject) => { markStarted(); signal.addEventListener("abort", () => { reject(new WorkflowError("CANCELLED", "cancelled")); }, { once: true }); }) } } });
+    registerWorkflowExtension({ version: "1.0.0", headline: "Cancellation policy", modelAliases: { "cancel-model": { resolve: ({ signal }) => new Promise<string>((_resolve, reject) => { markStarted(); signal.addEventListener("abort", () => { reject(new WorkflowError("CANCELLED", "cancelled")); }, { once: true }); }) } } });
     const execute = tools.find(({ name }) => name === "workflow")?.execute;
     assert.ok(execute);
     const controller = new AbortController();
@@ -108,8 +108,8 @@ void test("attributes colliding dynamic alias availability failures to the valid
   mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never, home, undefined, undefined, agentDir);
-  registerWorkflowExtension({ version: "1.0.0", headline: "Target extension", description: "Target policy", modelAliases: { target: { resolve: () => "openai/gpt" } } });
-  registerWorkflowExtension({ version: "1.0.0", headline: "Missing target extension", description: "Missing target policy", modelAliases: { x: { resolve: () => "missing/target" } } });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Target extension", modelAliases: { target: { resolve: () => "openai/gpt" } } });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Missing target extension", modelAliases: { x: { resolve: () => "missing/target" } } });
   const execute = tools.find(({ name }) => name === "workflow")?.execute;
   assert.ok(execute);
   const context = { cwd: join(home, "project"), model: { provider: "openai", id: "gpt" }, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }], getAvailable: () => [{ provider: "openai", id: "gpt" }] }, sessionManager: { getSessionId: () => "session" } };
@@ -134,7 +134,7 @@ void test("production launches dynamic aliases through role files with precedenc
       return { sessionId: `dynamic-${String(inputs.length)}`, sessionFile: `/sessions/dynamic-${String(inputs.length)}`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
     };
     workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; } } as never, home, async () => {}, testTransport(createSession), agentDir);
-    registerWorkflowExtension({ version: "1.0.0", headline: "Production policy", description: "Production dynamic aliases", modelAliases: { "policy-model": { resolve: () => { shadowedCalls += 1; return "anthropic/opus:high"; } }, "policy-chain": { resolve: () => "policy-model" }, "direct-model": { resolve: () => "anthropic/opus:high" } } });
+    registerWorkflowExtension({ version: "1.0.0", headline: "Production policy", modelAliases: { "policy-model": { resolve: () => { shadowedCalls += 1; return "anthropic/opus:high"; } }, "policy-chain": { resolve: () => "policy-model" }, "direct-model": { resolve: () => "anthropic/opus:high" } } });
     const execute = tools.find(({ name }) => name === "workflow")?.execute;
     assert.ok(execute);
     const context = { cwd, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }, { provider: "anthropic", id: "opus" }], getAvailable: () => [{ provider: "openai", id: "gpt" }, { provider: "anthropic", id: "opus" }] }, sessionManager: { getSessionId: () => "session" } };
@@ -166,7 +166,7 @@ void test("production resume reruns dynamic aliases, replays completed work, and
       return { sessionId: `resume-${String(inputs.length)}`, sessionFile: `/sessions/resume-${String(inputs.length)}`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
     };
     workflowExtension({ registerTool() {}, registerCommand(_name: string, value: { handler: (args: string, ctx: unknown) => Promise<void> }) { command = value.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], ui: {} } as never, home, async () => {}, testTransport(createSession), agentDir);
-    registerWorkflowExtension({ version: "1.0.0", headline: "Resume policy", description: "Resume dynamic aliases", modelAliases: { "dynamic-model": { resolve: () => { resolverCalls += 1; return "new/model"; } } } });
+    registerWorkflowExtension({ version: "1.0.0", headline: "Resume policy", modelAliases: { "dynamic-model": { resolve: () => { resolverCalls += 1; return "new/model"; } } } });
     const context = { cwd, hasUI: false, model: { provider: "root", id: "model" }, modelRegistry: { getAll: () => [{ provider: "root", id: "model" }, { provider: "old", id: "model" }, { provider: "new", id: "model" }], getAvailable: () => [{ provider: "root", id: "model" }, { provider: "new", id: "model" }] }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
     assert.ok(start && command);
     await start({}, context);
@@ -194,7 +194,7 @@ void test("production budget resume cancellation aborts a dynamic alias resolver
   try {
     const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
     workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, undefined, undefined, agentDir);
-    registerWorkflowExtension({ version: "1.0.0", headline: "Resume cancellation policy", description: "Resume cancellation policy", modelAliases: { "cancel-model": { resolve: ({ signal }) => new Promise<string>((_resolve, reject) => { markStarted(); signal.addEventListener("abort", () => { reject(new WorkflowError("CANCELLED", "cancelled")); }, { once: true }); }) } } });
+    registerWorkflowExtension({ version: "1.0.0", headline: "Resume cancellation policy", modelAliases: { "cancel-model": { resolve: ({ signal }) => new Promise<string>((_resolve, reject) => { markStarted(); signal.addEventListener("abort", () => { reject(new WorkflowError("CANCELLED", "cancelled")); }, { once: true }); }) } } });
     const resume = tools.find(({ name }) => name === "workflow_resume")?.execute;
     assert.ok(resume);
     const context = { cwd, model: { provider: "root", id: "model" }, modelRegistry: { getAll: () => [{ provider: "root", id: "model" }], getAvailable: () => [{ provider: "root", id: "model" }] }, sessionManager: { getSessionId: () => "session" } };
@@ -226,7 +226,7 @@ void test("registers global functions and replays each call as one validated ope
   let calls = 0;
   let receivedContext: unknown;
   registry.register({
-    version: "1.2.3", headline: "Git operations", description: "Orchestrate Git work",
+    version: "1.2.3", headline: "Git operations",
     functions: {
       status: {
         description: "Read status",
@@ -254,7 +254,7 @@ void test("registered function context.invoke validates nested calls and replays
   const registry = new WorkflowRegistry();
   let leafCalls = 0;
   registry.register({
-    version: "1.0.0", headline: "Composition", description: "Composition test",
+    version: "1.0.0", headline: "Composition",
     functions: {
       leaf: { description: "Leaf", input: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }, output: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }, run(input) { leafCalls += 1; return { value: `leaf:${input.value as string}` }; } },
       outer: { description: "Outer", input: { type: "object", properties: { value: { type: "string" }, fail: { type: "boolean" } }, required: ["value"], additionalProperties: false }, output: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }, async run(input, context) { const result = await context.invoke("leaf", { value: input.value as string }); if (input.fail === true) throw new WorkflowError("AGENT_FAILED", "outer failed"); return result; } },
@@ -280,20 +280,20 @@ void test("freezes registries and produces a deterministic flat catalog", () => 
   const second = new WorkflowRegistry();
   assert.equal(registry.frozen, false);
   registry.register({
-    version: "1.0.0", headline: "Catalog", description: "Catalog test",
+    version: "1.0.0", headline: "Catalog",
     functions: { inspect: { description: "Inspect", input: { type: "object" }, output: { type: "string" }, run: () => "ok" }, release: { description: "Release", input: { type: "object" }, output: { type: "string" }, run: () => "release" } },
   });
-  second.register({ version: "1.0.0", headline: "Catalog", description: "Catalog test", functions: { another: { description: "Release", input: { type: "object" }, output: { type: "string" }, run: () => "another" } } });
+  second.register({ version: "1.0.0", headline: "Catalog", functions: { another: { description: "Release", input: { type: "object" }, output: { type: "string" }, run: () => "another" } } });
   assert.deepEqual(registry.catalog().functions.map(({ name }) => ({ name })), [{ name: "inspect" }, { name: "release" }]);
   const index = registry.catalogIndex();
   assert.deepEqual(index.functions.map(({ name, description }) => ({ name, description })), [{ name: "inspect", description: "Inspect" }, { name: "release", description: "Release" }]);
   assert.deepEqual(Object.keys(index.functions[0] ?? {}).sort(), ["description", "input", "name"]);
-  assert.deepEqual(registry.catalogDetail("release"), { name: "release", version: "1.0.0", headline: "Catalog", extensionDescription: "Catalog test", description: "Release", input: { type: "object" }, output: { type: "string" } });
+  assert.deepEqual(registry.catalogDetail("release"), { name: "release", version: "1.0.0", headline: "Catalog", description: "Release", input: { type: "object" }, output: { type: "string" } });
   assert.deepEqual(registry.catalogDetail("missing"), { error: { code: "NOT_FOUND", name: "missing", message: "No registered workflow function is available: missing" } });
-  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Duplicate", description: "Duplicate", functions: { inspect: { description: "Duplicate", input: { type: "object" }, output: { type: "string" }, run: () => "duplicate" } } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "GLOBAL_COLLISION");
+  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Duplicate", functions: { inspect: { description: "Duplicate", input: { type: "object" }, output: { type: "string" }, run: () => "duplicate" } } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "GLOBAL_COLLISION");
   registry.freeze();
   assert.equal(registry.frozen, true);
-  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Late", description: "Late", functions: { x: { description: "x", input: { type: "object" }, output: { type: "string" }, run: () => "x" } } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "REGISTRY_FROZEN");
+  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Late", functions: { x: { description: "x", input: { type: "object" }, output: { type: "string" }, run: () => "x" } } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "REGISTRY_FROZEN");
   assert.throws(() => registry.function("release.check"), (error: unknown) => error instanceof WorkflowError && error.code === "MISSING_WORKFLOW");
 });
 void test("loads extension role directories as defaults beneath standard roles", () => {
@@ -312,18 +312,18 @@ void test("loads extension role directories as defaults beneath standard roles",
   writeFileSync(join(agentDir, "pi-extensible-workflows", "roles", "packaged.md"), "Global override body");
   writeFileSync(join(cwd, ".pi", "pi-extensible-workflows", "roles", "packaged.md"), "Project override body");
   const registry = new WorkflowRegistry();
-  registry.register({ version: "1.0.0", headline: "Roles", description: "Packaged roles", roleDirectories: [extensionDirectory, pathToFileURL(secondExtensionDirectory)] });
+  registry.register({ version: "1.0.0", headline: "Roles", roleDirectories: [extensionDirectory, pathToFileURL(secondExtensionDirectory)] });
   assert.deepEqual(registry.roleDirectories(), [extensionDirectory, secondExtensionDirectory]);
   assert.throws(() => loadAgentDefinitions(cwd, agentDir, true, registry.roleDirectories()), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA" && error.message.includes(extensionDirectory) && error.message.includes(secondExtensionDirectory));
   const reversed = new WorkflowRegistry();
-  reversed.register({ version: "1.0.0", headline: "Roles", description: "Packaged roles", roleDirectories: [secondExtensionDirectory, extensionDirectory] });
+  reversed.register({ version: "1.0.0", headline: "Roles", roleDirectories: [secondExtensionDirectory, extensionDirectory] });
   assert.throws(() => loadAgentDefinitions(cwd, agentDir, true, reversed.roleDirectories()), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA" && error.message.includes(extensionDirectory) && error.message.includes(secondExtensionDirectory));
   const roles = loadAgentDefinitions(cwd, agentDir, true, [secondExtensionDirectory]);
   assert.equal(roles["extension-only"]?.prompt, "Extension-only body");
   assert.equal(roles.packaged?.prompt, "Project override body");
-  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Invalid", description: "Invalid", roleDirectories: ["relative/roles"] }); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
-  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Invalid", description: "Invalid", roleDirectories: [new URL("https://example.com/roles")] }); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
-  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Invalid", description: "Invalid", roleDirectories: Array(1) }); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Invalid", roleDirectories: ["relative/roles"] }); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Invalid", roleDirectories: [new URL("https://example.com/roles")] }); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Invalid", roleDirectories: Array(1) }); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
 });
 void test("extension roles flow through host guidance, preflight, launch snapshots, and agent setup", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-extension-role-host-"));
@@ -343,7 +343,7 @@ void test("extension roles flow through host guidance, preflight, launch snapsho
     return { sessionId: input.sessionLabel, sessionFile: `/sessions/${input.sessionLabel}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async (text) => { prompts.push(text); }, steer: async () => {}, dispose() {} };
   };
   workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["read", "grep", "workflow"], on(name: string, candidate: unknown) { if (name === "before_agent_start") guidanceHandler = candidate as typeof guidanceHandler; if (name === "session_shutdown") shutdown = candidate as typeof shutdown; } } as never, home, async () => {}, testTransport(createSession), agentDir);
-  registerWorkflowExtension({ version: "1.0.0", headline: "Packaged roles", description: "Packaged role definitions", roleDirectories: [pathToFileURL(roleDirectory)] });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Packaged roles", roleDirectories: [pathToFileURL(roleDirectory)] });
   assert.ok(guidanceHandler);
   const guidance = guidanceHandler({ systemPrompt: "BASE SYSTEM" }, { cwd, isProjectTrusted: () => true })?.systemPrompt ?? "";
   assert.match(guidance, /`extension-reviewer`: Packaged review role/);
@@ -381,10 +381,10 @@ void test("labels standard role directory scan failures as standard roles", () =
 });
 void test("registers setup hooks by priority and stable name", () => {
   const registry = new WorkflowRegistry();
-  registry.register({ version: "1.0.0", headline: "Hooks", description: "Hooks", agentSetupHooks: { z: { setup() {} }, a: { priority: 10, setup() {} }, early: { priority: 1, setup() {} } } });
+  registry.register({ version: "1.0.0", headline: "Hooks", agentSetupHooks: { z: { setup() {} }, a: { priority: 10, setup() {} }, early: { priority: 1, setup() {} } } });
   assert.deepEqual(registry.agentSetupHooks().map(({ name, priority }) => ({ name, priority })), [{ name: "early", priority: 1 }, { name: "a", priority: 10 }, { name: "z", priority: 10 }]);
-  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Duplicate", description: "Duplicate", agentSetupHooks: { early: { setup() {} } } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "DUPLICATE_NAME");
-  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Hooks", description: "Hooks", agentSetupHooks: { bad: { priority: Number.NaN, setup() {} } } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Duplicate", agentSetupHooks: { early: { setup() {} } } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "DUPLICATE_NAME");
+  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Hooks", agentSetupHooks: { bad: { priority: Number.NaN, setup() {} } } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
 });
 void test("shares the registry between package imports and Pi's jiti loader", () => {
   const script = `
@@ -395,7 +395,7 @@ const { createJiti } = require(${JSON.stringify(join(process.cwd(), "../../node_
 const native = await import(${JSON.stringify(pathToFileURL(join(process.cwd(), "dist/src/index.js")).href)});
 const jiti = createJiti(import.meta.url, { moduleCache: false, tryNative: false });
 const source = await jiti.import(${JSON.stringify(join(process.cwd(), "src/index.ts"))});
-native.registerWorkflowExtension({ version: "1.0.0", headline: "Loader", description: "Loader boundary", functions: { verify: { description: "Verify", input: { type: "object" }, output: { type: "number" }, run: () => 1 } } });
+native.registerWorkflowExtension({ version: "1.0.0", headline: "Loader", functions: { verify: { description: "Verify", input: { type: "object" }, output: { type: "number" }, run: () => 1 } } });
 const catalog = source.workflowCatalog();
 if (catalog.functions.length !== 1 || catalog.functions[0]?.name !== "verify") throw new Error(JSON.stringify(catalog));
 `;
@@ -413,7 +413,7 @@ const cwd = process.cwd();
 const agentDir = mkdtempSync(join(tmpdir(), "pi-workflow-catalog-reload-"));
 mkdirSync(join(agentDir, "extensions"));
 writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [cwd] }));
-writeFileSync(join(agentDir, "extensions", "catalog.ts"), \`import { registerWorkflowExtension } from \${JSON.stringify(join(cwd, "dist/src/index.js"))};\\nconst extension = { version: "1.0.0", headline: "Reload", description: "Reload test", functions: { ping: { description: "Ping", input: { type: "object" }, output: { type: "string" }, run: () => "pong" } } };\\nexport default function() { registerWorkflowExtension(extension); }\`);
+writeFileSync(join(agentDir, "extensions", "catalog.ts"), \`import { registerWorkflowExtension } from \${JSON.stringify(join(cwd, "dist/src/index.js"))};\\nconst extension = { version: "1.0.0", headline: "Reload", functions: { ping: { description: "Ping", input: { type: "object" }, output: { type: "string" }, run: () => "pong" } } };\\nexport default function() { registerWorkflowExtension(extension); }\`);
 process.env.PI_OFFLINE = "1";
 const credentials = new InMemoryCredentialStore();
 const createRuntime = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {

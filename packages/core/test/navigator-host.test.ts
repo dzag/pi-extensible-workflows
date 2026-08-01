@@ -55,7 +55,7 @@ void test("session-scoped navigator shows metadata and confirms terminal deletio
   workflowExtension(pi as never, home, async (value) => { copied.push(value); });
   const actionRuns: Array<{ attempt: number; sessionId: string | undefined; live: boolean }> = [];
   const workingMessages: Array<string | undefined> = [];
-  registerWorkflowExtension({ version: "1.0.0", headline: "Navigator actions", description: "Navigator action test", agentAttemptActions: { inspectLatest: { label: "Inspect latest attempt", visible: (context) => context.attempt.attempt === 2, run: (context) => { actionRuns.push({ attempt: context.attempt.attempt, sessionId: context.session?.sessionId, live: context.liveSession !== undefined }); context.ui.setWorkingMessage?.("navigator working"); } } } });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Navigator actions", agentAttemptActions: { inspectLatest: { label: "Inspect latest attempt", visible: (context) => context.attempt.attempt === 2, run: (context) => { actionRuns.push({ attempt: context.attempt.attempt, sessionId: context.session?.sessionId, live: context.liveSession !== undefined }); context.ui.setWorkingMessage?.("navigator working"); } } } });
   let selectCall = 0;
   const ctx = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "session-a" }, ui: { notify() {}, setWorkingMessage(message?: string) { workingMessages.push(message); }, select: async (prompt: string, options: string[]) => { prompts.push(prompt); selections.push(options); selectCall += 1; if (selectCall === 1) return options.find((option) => option.includes("completed")); if (selectCall === 2) return "Agents..."; if (selectCall === 3) return options.find((option) => option.includes("#1")); if (selectCall === 4) return "Inspect latest attempt"; if (selectCall === 5) return "Back"; return prompt === "Workflows\n" ? "Close" : "Back"; }, confirm: async () => false } };
   const command = commands[0]?.handler;
@@ -102,7 +102,7 @@ void test("latest-attempt actions receive the active session and lose it after c
   const pi = { registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] };
   workflowExtension(pi as never, home, undefined, transport);
   const actionRuns: boolean[] = [];
-  registerWorkflowExtension({ version: "1.0.0", headline: "Active attempt actions", description: "Active attempt action test", agentAttemptActions: { inspectActiveAttempt147: { label: "Inspect active attempt", visible: (context) => context.run.workflowName === "active-attempt-actions", run: (context) => { actionRuns.push(context.liveSession === expectedSession); } } } });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Active attempt actions", agentAttemptActions: { inspectActiveAttempt147: { label: "Inspect active attempt", visible: (context) => context.run.workflowName === "active-attempt-actions", run: (context) => { actionRuns.push(context.liveSession === expectedSession); } } } });
   const workflow = tools.find(({ name }) => name === "workflow");
   const command = commands[0]?.handler;
   assert.ok(workflow && command);

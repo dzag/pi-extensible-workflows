@@ -473,7 +473,6 @@ export function createHerdrExtension(options: HerdrExtensionOptions = {}): Herdr
   return {
     version: "1.0.0",
     headline: "Herdr workflow integration",
-    description: "Open and inspect workflow agents in Herdr panes.",
     agentAttemptActions: {
       openSession: {
         label: "Open session in Herdr pane",

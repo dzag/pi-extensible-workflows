@@ -3,7 +3,6 @@ import { registerWorkflowExtension } from "pi-extensible-workflows";
 const templateExtension = {
   version: "1.0.0",
   headline: "Workflow extension template",
-  description: "A copyable registered function with a packaged role.",
   functions: {
     greet: {
       description: "Return a greeting for one person.",

@@ -30,7 +30,7 @@ export class WorkflowRegistry {
   readonly #hooks = new Map<string, RegisteredAgentSetupHook>();
   readonly #agentAttemptActions = new Map<string, AgentAttemptAction>();
   readonly #roleDirectories = new Map<string, WorkflowRoleDirectoryRegistration>();
-  readonly #modelAliases = new Map<string, { name: string; version: string; headline: string; extensionDescription: string; resolve: WorkflowModelAlias["resolve"] }>();
+  readonly #modelAliases = new Map<string, { name: string; version: string; headline: string; resolve: WorkflowModelAlias["resolve"] }>();
   #frozen = false;
 
   get frozen(): boolean { return this.#frozen; }
@@ -39,7 +39,7 @@ export class WorkflowRegistry {
   register(extension: WorkflowExtension): void {
     if (this.#frozen) fail("REGISTRY_FROZEN", "Workflow extension registration is closed after session_start");
     if (object(extension) && Object.prototype.hasOwnProperty.call(extension, "workflows")) fail("INVALID_METADATA", "Separate registered workflow definitions were removed; register a function with input and output schemas instead");
-    if (!object(extension) || Object.keys(extension).some((key) => !["version", "headline", "description", "functions", "modelAliases", "agentSetupHooks", "agentAttemptActions", "roleDirectories"].includes(key)) || typeof extension.version !== "string" || !SEMVER.test(extension.version) || typeof extension.headline !== "string" || !extension.headline.trim() || typeof extension.description !== "string" || !extension.description.trim()) fail("INVALID_METADATA", "Workflow extensions require a semantic version, headline, and description");
+    if (!object(extension) || Object.keys(extension).some((key) => !["version", "headline", "functions", "modelAliases", "agentSetupHooks", "agentAttemptActions", "roleDirectories"].includes(key)) || typeof extension.version !== "string" || !SEMVER.test(extension.version) || typeof extension.headline !== "string" || !extension.headline.trim()) fail("INVALID_METADATA", "Workflow extensions require a semantic version and non-empty headline");
     const functions = extension.functions ?? {};
     const modelAliases = extension.modelAliases ?? {};
     const agentSetupHooks = extension.agentSetupHooks ?? {};
@@ -76,9 +76,9 @@ export class WorkflowRegistry {
     }
     const stored = deepFreeze({ ...extension, functions, modelAliases, agentSetupHooks, agentAttemptActions, ...(roleDirectories.length ? { roleDirectories } : {}) });
     this.#extensions.add(stored);
-    for (const directory of roleDirectories) if (!this.#roleDirectories.has(directory)) this.#roleDirectories.set(directory, deepFreeze({ path: directory, extension: { version: extension.version, headline: extension.headline, description: extension.description } }));
+    for (const directory of roleDirectories) if (!this.#roleDirectories.has(directory)) this.#roleDirectories.set(directory, deepFreeze({ path: directory, extension: { version: extension.version, headline: extension.headline } }));
     for (const name of names) this.#globals.set(name, name);
-    for (const [name, alias] of Object.entries(modelAliases)) this.#modelAliases.set(name, { name, version: extension.version, headline: extension.headline, extensionDescription: extension.description, resolve: alias.resolve });
+    for (const [name, alias] of Object.entries(modelAliases)) this.#modelAliases.set(name, { name, version: extension.version, headline: extension.headline, resolve: alias.resolve });
     for (const [name, hook] of Object.entries(agentSetupHooks)) this.#hooks.set(name, { name, priority: hook.priority ?? 10, setup: hook.setup });
     for (const [name, action] of Object.entries(agentAttemptActions)) this.#agentAttemptActions.set(name, action);
   }
@@ -97,7 +97,7 @@ export class WorkflowRegistry {
   catalog(context?: WorkflowCatalogContext): WorkflowCatalog {
     const functions: WorkflowCatalogFunction[] = [];
     for (const extension of this.#extensions) {
-      for (const [name, fn] of Object.entries(extension.functions ?? {})) functions.push({ name, version: extension.version, headline: extension.headline, extensionDescription: extension.description, description: fn.description, input: structuredClone(fn.input) as JsonSchema, output: structuredClone(fn.output) as JsonSchema });
+      for (const [name, fn] of Object.entries(extension.functions ?? {})) functions.push({ name, version: extension.version, headline: extension.headline, description: fn.description, input: structuredClone(fn.input) as JsonSchema, output: structuredClone(fn.output) as JsonSchema });
     }
     let aliases: Readonly<Record<string, string>> | undefined;
     let settings: WorkflowCatalog["settings"];
@@ -108,7 +108,7 @@ export class WorkflowRegistry {
       if (resolved) { source = resolved.projectTrusted && resolved.sources.modelAliases === resolved.projectSettingsPath ? "trusted project settings" : "global settings"; settings = { concurrency: resolved.effective.concurrency, modelAliases: resolved.effective.modelAliases ?? {}, disabledAgentResources: resolved.effective.disabledAgentResources ?? { skills: [], extensions: [] }, globalSettingsPath: resolved.globalSettingsPath, projectSettingsPath: resolved.projectSettingsPath, projectTrusted: resolved.projectTrusted, sources: resolved.sources }; }
     } catch { aliases = undefined; }
     const staticEntries: WorkflowCatalogModelAlias[] = Object.keys(aliases ?? {}).map((name) => ({ name, kind: "static", provenance: source }));
-    const dynamicEntries: WorkflowCatalogModelAlias[] = [...this.#modelAliases.values()].map(({ name, version, headline, extensionDescription }) => ({ name, kind: "dynamic", provenance: `extension: ${headline}`, version, headline, extensionDescription }));
+    const dynamicEntries: WorkflowCatalogModelAlias[] = [...this.#modelAliases.values()].map(({ name, version, headline }) => ({ name, kind: "dynamic", provenance: `extension: ${headline}`, version, headline }));
     const modelAliasEntries = [...staticEntries, ...dynamicEntries].sort((left, right) => left.name.localeCompare(right.name) || left.kind.localeCompare(right.kind) || left.provenance.localeCompare(right.provenance));
     const sort = (left: { name: string }, right: { name: string }) => left.name.localeCompare(right.name);
     const catalog: WorkflowCatalog = { functions: functions.sort(sort), ...(modelAliasEntries.length ? { modelAliasEntries } : {}) };
@@ -164,7 +164,7 @@ export class WorkflowRegistry {
   roleDirectoryRegistrations(): readonly WorkflowRoleDirectoryRegistration[] {
     return [...this.#roleDirectories.values()];
   }
-  modelAliases(): readonly { name: string; version: string; headline: string; extensionDescription: string; resolve: WorkflowModelAlias["resolve"] }[] { return [...this.#modelAliases.values()].sort((left, right) => left.name.localeCompare(right.name)); }
+  modelAliases(): readonly { name: string; version: string; headline: string; resolve: WorkflowModelAlias["resolve"] }[] { return [...this.#modelAliases.values()].sort((left, right) => left.name.localeCompare(right.name)); }
   async resolveModelAliases(context: Readonly<WorkflowModelAliasResolverContext>, shadowed: ReadonlySet<string> = new Set()): Promise<Readonly<Record<string, string>>> {
     const resolved: Record<string, string> = {};
     const isAborted = (): boolean => context.signal.aborted;

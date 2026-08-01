@@ -10,13 +10,13 @@ import { testTransport, type TestPiSession } from "./test-transport.js";
 import { contextualWorkflowAction } from "./support.js";
 void test("rejects global collisions, invalid metadata, schemas, input, and output", async () => {
   const registry = new WorkflowRegistry();
-  const extension = { version: "1.0.0", headline: "Demo", description: "Demo functions", functions: { run: { description: "Run", input: { type: "object", properties: { value: { type: "string" } }, required: ["value"] }, output: { type: "string" }, run: () => 1 } } };
+  const extension = { version: "1.0.0", headline: "Demo", functions: { run: { description: "Run", input: { type: "object", properties: { value: { type: "string" } }, required: ["value"] }, output: { type: "string" }, run: () => 1 } } };
   registry.register(extension);
   assert.throws(() => { registry.register(extension); }, (error: unknown) => error instanceof WorkflowError && error.code === "GLOBAL_COLLISION");
-  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Other", description: "Other", functions: { run: extension.functions.run } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "GLOBAL_COLLISION");
+  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Other", functions: { run: extension.functions.run } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "GLOBAL_COLLISION");
   const crossType = new WorkflowRegistry();
   crossType.register(extension);
-  const variableExtension = { version: "1.0.0", headline: "Variables", description: "Variable globals", variables: { run: { description: "Run", schema: { type: "string" }, resolve: () => "ok" } } };
+  const variableExtension = { version: "1.0.0", headline: "Variables", variables: { run: { description: "Run", schema: { type: "string" }, resolve: () => "ok" } } };
   assert.throws(() => { crossType.register(variableExtension); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   for (const name of ["agent", "Date", "process", "extensions"]) {
     assert.throws(() => { new WorkflowRegistry().register({ ...extension, functions: { [name]: extension.functions.run } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "GLOBAL_COLLISION");

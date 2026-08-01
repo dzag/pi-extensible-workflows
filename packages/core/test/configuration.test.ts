@@ -476,7 +476,7 @@ void test("workflow catalog and session_start tolerate malformed settings", asyn
     let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
     let shutdown: (() => Promise<void>) | undefined;
     workflowExtension({ registerTool(tool: { name: string }) { tools.push(tool); }, registerCommand() {}, getActiveTools: () => ["workflow"], on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; } } as never, dir);
-    registerWorkflowExtension({ version: "1.0.0", headline: "Malformed settings", description: "Malformed settings test", functions: { verify: { description: "Verify", input: { type: "object" }, output: { type: "boolean" }, run: () => true } } });
+    registerWorkflowExtension({ version: "1.0.0", headline: "Malformed settings", functions: { verify: { description: "Verify", input: { type: "object" }, output: { type: "boolean" }, run: () => true } } });
     assert.ok(start && shutdown);
     await start({}, { cwd: dir, sessionManager: { getSessionId: () => "malformed" } });
     assert.equal(tools.some(({ name }) => name === "workflow_catalog"), true);
