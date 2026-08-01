@@ -94,9 +94,10 @@ const typeCheckWorktreeContext = (context: WorkflowOrchestrationContext): void =
 };
 void typeCheckWorktreeContext;
 
-void test("rejects obsolete top-level extension metadata", () => {
+void test("accepts but ignores legacy top-level extension descriptions", () => {
   const registry = new WorkflowRegistry();
-  assert.throws(() => { registry.register({ version: "1.0.0", headline: "Obsolete metadata", description: "No longer accepted", modelAliases: { reviewer: { resolve: () => "openai/gpt" } } } as never); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  registry.register({ version: "1.0.0", headline: "Legacy metadata", description: "Accepted for compatibility", modelAliases: { reviewer: { resolve: () => "openai/gpt" } } });
+  assert.deepEqual(registry.catalog().modelAliasEntries, [{ name: "reviewer", kind: "dynamic", provenance: "extension: Legacy metadata", version: "1.0.0", headline: "Legacy metadata" }]);
 });
 
 void test("resolves dynamic model aliases against a launch inventory", async () => {
