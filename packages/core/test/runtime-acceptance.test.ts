@@ -73,6 +73,24 @@ void test("production session_start cold-restores ownership and /workflow stop c
   assert.deepEqual(notices, [`Stopped workflow ${runId}.`]);
   await shutdown();
 });
+void test("failed session_start releases workflow registry ownership", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-session-start-failure-"));
+  const cwd = join(home, "project");
+  let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  workflowExtension(testExtensionApi({ registerTool() {}, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home);
+  assert.ok(start);
+  const failingContext = { cwd, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => { throw new Error("startup failed"); } }, ui: { notify() {} } };
+  await assert.rejects(start({}, failingContext), /startup failed/);
+  let recoveredStart: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let recoveredShutdown: (() => Promise<void>) | undefined;
+  workflowExtension(testExtensionApi({ registerTool() {}, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") recoveredStart = handler as typeof recoveredStart; if (name === "session_shutdown") recoveredShutdown = handler as typeof recoveredShutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home);
+  registerWorkflowExtension({ version: "1.0.0", headline: "Recovery", functions: { afterFailure: { description: "Verify recovery", input: { type: "object", additionalProperties: false }, output: { type: "string" }, run: () => "recovered" } } });
+  assert.ok(recoveredStart && recoveredShutdown);
+  const recoveredContext = { cwd, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
+  await recoveredStart({}, recoveredContext);
+  assert.ok(loadingRegistry().function("afterFailure"));
+  await recoveredShutdown();
+});
 
 void test("session recovery skips a partial run without hiding a valid /workflow resume", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-partial-recovery-"));

@@ -928,11 +928,11 @@ export default function workflowExtension(pi: WorkflowExtensionAPI, home?: strin
   pi.on("session_start", async (_event, ctx) => {
     if (sessionStarted) return;
     sessionStarted = true;
+    try {
     releaseWorkflowRegistry = retainWorkflowRegistry();
     registry.freeze();
     registerCatalog(ctx.cwd, projectTrusted(ctx));
     await ensureSessionLease(ctx.cwd, ctx.sessionManager.getSessionId());
-    try {
     for (const runId of await listRunIds(ctx.cwd, ctx.sessionManager.getSessionId(), home)) {
       if (runs.has(runId)) continue;
       const store = new RunStore(ctx.cwd, ctx.sessionManager.getSessionId(), runId, home);
@@ -993,7 +993,15 @@ export default function workflowExtension(pi: WorkflowExtensionAPI, home?: strin
         }
       }
     }
-    } catch (error) { await releaseSessionLease(); throw error; }
+    } catch (error) {
+      try { await releaseSessionLease(); } finally {
+        if (releaseWorkflowRegistry) {
+          releaseWorkflowRegistry();
+          releaseWorkflowRegistry = undefined;
+        }
+      }
+      throw error;
+    }
   });
   pi.on("before_agent_start", (event, ctx) => {
     if (!pi.getActiveTools().includes("workflow")) return;
