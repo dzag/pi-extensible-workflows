@@ -161,15 +161,16 @@ void test("production resume reruns dynamic aliases, replays completed work, and
   const inputs: SessionInput[] = [];
   let resolverCalls = 0;
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let shutdown: (() => Promise<void>) | undefined;
   let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
     const createSession = async (input: SessionInput): Promise<TestPiSession> => {
       inputs.push(input);
       return { sessionId: `resume-${String(inputs.length)}`, sessionFile: `/sessions/resume-${String(inputs.length)}`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
     };
-    workflowExtension(testExtensionApi({ registerTool() {}, registerCommand(_name: string, value: { handler: (args: string, ctx: unknown) => Promise<void> }) { command = value.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home, async () => {}, testTransport(createSession), agentDir);
+    workflowExtension(testExtensionApi({ registerTool() {}, registerCommand(_name: string, value: { handler: (args: string, ctx: unknown) => Promise<void> }) { command = value.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home, async () => {}, testTransport(createSession), agentDir);
     registerWorkflowExtension({ version: "1.0.0", headline: "Resume policy", modelAliases: { "dynamic-model": { resolve: () => { resolverCalls += 1; return "new/model"; } } } });
     const context = { cwd, hasUI: false, model: { provider: "root", id: "model" }, modelRegistry: { getAll: () => [{ provider: "root", id: "model" }, { provider: "old", id: "model" }, { provider: "new", id: "model" }], getAvailable: () => [{ provider: "root", id: "model" }, { provider: "new", id: "model" }] }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
-    assert.ok(start && command);
+    assert.ok(start && command && shutdown);
     await start({}, context);
     await contextualWorkflowAction(command, context, "run", "Resume");
     for (let attempt = 0; attempt < 1000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
@@ -180,6 +181,7 @@ void test("production resume reruns dynamic aliases, replays completed work, and
     assert.deepEqual(loaded.snapshot.modelAliases, { "dynamic-model": "new/model" });
     assert.deepEqual(loaded.run.events, [{ type: "warning", message: "Model alias mappings changed on resume: dynamic-model: old/model -> new/model" }]);
     loadingRegistry().freeze();
+    await shutdown();
 });
 void test("production budget resume cancellation aborts a dynamic alias resolver", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-dynamic-resume-cancel-"));

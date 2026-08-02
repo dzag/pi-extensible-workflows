@@ -189,7 +189,7 @@ export class WorkflowRegistry {
   }
 }
 export type WorkflowRegistryApi = Pick<WorkflowRegistry, "frozen" | "freeze" | "register" | "function" | "functions" | "catalog" | "catalogIndex" | "catalogDetail" | "globals" | "invokeFunction" | "modelAliases" | "resolveModelAliases" | "agentSetupHooks" | "agentAttemptActions" | "roleDirectories" | "roleDirectoryRegistrations">;
-interface WorkflowRegistryHost { api: WorkflowRegistryApi }
+interface WorkflowRegistryHost { api: WorkflowRegistryApi; activeHosts: number }
 const WORKFLOW_REGISTRY_KEY = Symbol.for("pi-extensible-workflows.workflow-registry");
 const globalRegistry = globalThis as typeof globalThis & Record<symbol, WorkflowRegistryHost | undefined>;
 function createWorkflowRegistryApi(registry: WorkflowRegistry): WorkflowRegistryApi {
@@ -213,13 +213,28 @@ function createWorkflowRegistryApi(registry: WorkflowRegistry): WorkflowRegistry
   };
 }
 function workflowRegistryHost(): WorkflowRegistryHost {
-  return globalRegistry[WORKFLOW_REGISTRY_KEY] ??= { api: createWorkflowRegistryApi(new WorkflowRegistry()) };
+  return globalRegistry[WORKFLOW_REGISTRY_KEY] ??= { api: createWorkflowRegistryApi(new WorkflowRegistry()), activeHosts: 0 };
 }
 export function resetWorkflowRegistry(): void {
   workflowRegistryHost().api = createWorkflowRegistryApi(new WorkflowRegistry());
 }
+export function resetWorkflowRegistryIfIdle(): void {
+  if (workflowRegistryHost().activeHosts === 0) resetWorkflowRegistry();
+}
 export function beginWorkflowExtensionLoading(): void {
-  if (workflowRegistryHost().api.frozen) resetWorkflowRegistry();
+  const host = workflowRegistryHost();
+  if (host.api.frozen && host.activeHosts === 0) resetWorkflowRegistry();
+}
+export function retainWorkflowRegistry(): () => void {
+  const host = workflowRegistryHost();
+  host.activeHosts += 1;
+  let retained = true;
+  return () => {
+    if (!retained) return;
+    retained = false;
+    host.activeHosts -= 1;
+    if (host.activeHosts === 0) resetWorkflowRegistry();
+  };
 }
 export function loadingRegistry(): WorkflowRegistryApi { return workflowRegistryHost().api; }
 beginWorkflowExtensionLoading();

@@ -13,7 +13,7 @@ import type { PersistedRun, WorktreeReference } from "./persistence.js";
 import { validateBudget, WorkflowBudgetRuntime } from "./budget.js";
 import { asWorkflowError, createLaunchSnapshot, errorCode, errorText, fail, jsonValue, modelAliasErrorName, modelCapability, object, parseModelReference, parseThinking, positiveInteger, validateModelAliases } from "./utils.js";
 import { loadAgentDefinitions, preflight, resolveAgentResourcePolicy, resolveWorkflowSettings, validateCheckpoint, validateModelAliasAvailability, validateWorkflowLaunchWithRegistry, workflowProjectSettingsPath, workflowSettingsPath } from "./validation.js";
-import { beginWorkflowExtensionLoading, loadingRegistry, resetWorkflowRegistry, type WorkflowRegistryApi } from "./registry.js";
+import { beginWorkflowExtensionLoading, loadingRegistry, resetWorkflowRegistryIfIdle, retainWorkflowRegistry, type WorkflowRegistryApi } from "./registry.js";
 import { agentIdentityPath, agentWorktree, encoded, executeShellCommand, persistActiveAgentAttempt, persistAgentAttempts, readShellResult, runWorkflow, shellIdentityPath } from "./execution.js";
 import { LAUNCH_SNAPSHOT_IDENTITY_VERSION, WorkflowError, roleNameOf, type AgentRecord, type AgentResourcePolicy, type AgentTransport, type JsonValue, type LaunchSnapshot, type ModelSpec, type RoleOverride, type RunState, type ShellIdentity, type ShellOptions, type ShellResult, type WorkflowErrorCode, type WorkflowFailureDiagnostics, type WorkflowMetadata, type WorkflowModelAliasResolverContext, type WorkflowSettings, type WorkflowSettingsResolution, type WorkflowWorktreeReference } from "./types.js";
 import {
@@ -231,6 +231,7 @@ export default function workflowExtension(pi: WorkflowExtensionAPI, home?: strin
     return skillPath ? { skillPaths: [skillPath] } : undefined;
   });
   const runs = new Map<string, WorkflowRunRecord>();
+  let releaseWorkflowRegistry: (() => void) | undefined;
   let providerRecoveryQueue = Promise.resolve();
   const enqueueProviderRecovery = <T>(task: () => Promise<T>): Promise<T> => { const next = providerRecoveryQueue.then(task, task); providerRecoveryQueue = next.then(() => undefined, () => undefined); return next; };
   // The recovery adapter implements only getAvailableSnapshot, refresh, getModel, and getError from ModelRuntime, plus setDefaultModelAndProvider from SettingsManager; the constructor below is the one third-party boundary because it cannot create another authenticated runtime.
@@ -927,6 +928,7 @@ export default function workflowExtension(pi: WorkflowExtensionAPI, home?: strin
   pi.on("session_start", async (_event, ctx) => {
     if (sessionStarted) return;
     sessionStarted = true;
+    releaseWorkflowRegistry = retainWorkflowRegistry();
     registry.freeze();
     registerCatalog(ctx.cwd, projectTrusted(ctx));
     await ensureSessionLease(ctx.cwd, ctx.sessionManager.getSessionId());
@@ -1248,8 +1250,14 @@ export default function workflowExtension(pi: WorkflowExtensionAPI, home?: strin
       }));
       await scheduler.flush();
     } finally {
-      await releaseSessionLease();
-      resetWorkflowRegistry();
+      try { await releaseSessionLease(); } finally {
+        if (releaseWorkflowRegistry) {
+          releaseWorkflowRegistry();
+          releaseWorkflowRegistry = undefined;
+        } else {
+          resetWorkflowRegistryIfIdle();
+        }
+      }
     }
   });
 }
