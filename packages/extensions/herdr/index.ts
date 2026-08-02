@@ -251,7 +251,7 @@ function createWorkflowWorkspaces(runner: HerdrCommandRunner): WorkspaceManager 
         return pane.workspaceId;
       });
       workspaces.set(run.runId, workspace);
-      try { return workspacePane(await opening); } catch (error) { workspaces.delete(run.runId); throw error; }
+      try { return workspacePane(await opening); } catch (error) { workspaces.delete(run.runId); await workspace.catch(() => undefined); throw error; }
     },
     async close(runId: string): Promise<void> {
       const workspace = workspaces.get(runId);
@@ -331,16 +331,42 @@ function herdrTransport(agent: AgentSetup, context: Readonly<AgentSetupContext>,
     id: "herdr",
     async createSession(prepared, sessionContext) {
       const session: HerdrSession = await local.createSession(prepared, sessionContext);
+      const suspendAndLaunch = async (prompt: string | undefined): Promise<PaneHandle> => {
+        let suspended = false;
+        try {
+          if (session.suspendForHandoff) { await session.suspendForHandoff(); suspended = true; }
+          else { await session.abort(); suspended = true; }
+          return await launchPane({ session, prepared, identity: context.identity, run: context.run, attempt: sessionContext.attempt, runner, fullyInspectable, env, signal: sessionContext.signal, prompt, workspaces, tuiIndex: context.tuiIndex, tuiLabel: context.tuiLabel });
+        } catch (error) {
+          if (suspended) { try { await session.resumeFromHandoff?.(); } catch { /* Preserve the pane launch failure. */ } }
+          throw error;
+        }
+      };
+      const inFlight = new Set<Promise<PaneHandle>>();
+      let disposed = false;
+      const isDisposed = (): boolean => disposed;
+      let sharedLaunch: Promise<PaneHandle> | undefined;
+      const beginLaunch = (prompt: string | undefined, retry = false): Promise<PaneHandle> => {
+        if (isDisposed()) return Promise.reject(new Error("Herdr workflow session is disposed"));
+        // Joined callers share the first launch; the executor normally serializes prompts, so later text is not sent separately.
+        if (sharedLaunch) return sharedLaunch;
+        const next = (async () => {
+          try { return await suspendAndLaunch(prompt); }
+          catch (error) { if (!retry || isDisposed()) throw error; return suspendAndLaunch(prompt); }
+        })();
+        sharedLaunch = next;
+        inFlight.add(next);
+        void next.then(() => { inFlight.delete(next); if (sharedLaunch === next) sharedLaunch = undefined; }, () => { inFlight.delete(next); if (sharedLaunch === next) sharedLaunch = undefined; });
+        return next;
+      };
       let opened;
       try {
-        await session.suspendForHandoff?.();
-        if (!session.suspendForHandoff) await session.abort();
-        opened = await launchPane({ session, prepared, identity: context.identity, run: context.run, attempt: sessionContext.attempt, runner, fullyInspectable, env, signal: sessionContext.signal, prompt: prepared.initialPrompt, workspaces, tuiIndex: context.tuiIndex, tuiLabel: context.tuiLabel });
+        opened = await beginLaunch(prepared.initialPrompt);
       } catch (error) {
-        await session.dispose();
+        await session.dispose().catch(() => undefined);
         throw error;
       }
-      let disposed = false;
+      let disposal: Promise<void> | undefined;
       let active: PaneHandle | undefined = opened;
       return {
         ...session,
@@ -350,16 +376,26 @@ function herdrTransport(agent: AgentSetup, context: Readonly<AgentSetupContext>,
           if (disposed) throw new Error("Herdr workflow session is disposed");
           let current = active;
           if (!current) {
-            await session.suspendForHandoff?.();
-            current = await launchPane({ session, prepared, identity: context.identity, run: context.run, attempt: sessionContext.attempt, runner, fullyInspectable, env, signal: sessionContext.signal, prompt: text, workspaces, tuiIndex: context.tuiIndex, tuiLabel: context.tuiLabel });
+            const pending = inFlight.values().next().value;
+            current = pending ? await pending : await beginLaunch(text, true);
           }
           active = current;
+          let monitorFailed = false;
+          let monitorError: unknown;
+          let resumeFailed = false;
+          let resumeError: unknown;
           try {
             await current.monitor;
+          } catch (error) {
+            monitorFailed = true;
+            monitorError = error;
           } finally {
-            await session.resumeFromHandoff?.();
-            if (active === current) active = undefined;
+            try { await session.resumeFromHandoff?.(); }
+            catch (error) { resumeFailed = true; resumeError = error; }
+            finally { if (active === current) active = undefined; }
           }
+          if (monitorFailed) throw monitorError;
+          if (resumeFailed) throw resumeError;
           let assistant = session.getLastAssistant?.();
           const resultTool = prepared.resultTool;
           const resultSubmitted = resultTool !== undefined && hasNamedToolCall(assistant, resultTool.name);
@@ -372,13 +408,21 @@ function herdrTransport(agent: AgentSetup, context: Readonly<AgentSetupContext>,
         },
         async abort() { await session.abort(); },
         async dispose() {
-          if (disposed) return;
+          if (disposal) { await disposal; return; }
           disposed = true;
-          if (active) {
-            await active.closeRemote();
-            await active.close();
-          }
-          await session.dispose();
+          disposal = (async () => {
+            const pendingLaunches = [...inFlight];
+            if (pendingLaunches.length > 0) {
+              const results = await Promise.allSettled(pendingLaunches);
+              if (!active) { for (const result of results) { if (result.status === "fulfilled") { active = result.value; break; } } }
+            }
+            if (active) {
+              await active.closeRemote();
+              await active.close();
+            }
+            await session.dispose();
+          })();
+          await disposal;
         }
       };
     },

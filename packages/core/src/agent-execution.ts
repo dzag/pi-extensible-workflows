@@ -4,9 +4,10 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
-import { createAgentSession, DefaultPackageManager, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultPackageManager, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager, type SessionStartEvent, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 type AgentMessage = { role: string; content?: unknown; stopReason?: string; errorMessage?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: { total: number } } };
+type LocalSessionShutdownReason = "quit" | "resume";
 export interface PiSession {
   readonly sessionId: string;
   readonly sessionFile: string | undefined;
@@ -24,7 +25,7 @@ export interface PiSession {
   prompt(text: string): Promise<void>;
   steer?(text: string): Promise<void>;
   abort?(): Promise<void>;
-  dispose(): void;
+  dispose(): Promise<void>;
 };
 export interface PiPromptInspection {
   readonly prompt: string;
@@ -167,6 +168,12 @@ function accounting(stats: WorkflowAgentSessionStats): AgentAccounting {
   return { input: stats.tokens.input, output: stats.tokens.output, cacheRead: stats.tokens.cacheRead, cacheWrite: stats.tokens.cacheWrite, cost: stats.cost };
 }
 function canonicalSourcePath(path: string): string { try { return realpathSync(path); } catch { return resolve(path); } }
+const extensionDirectory = dirname(fileURLToPath(import.meta.url));
+const workflowPackageRoot = basename(dirname(extensionDirectory)) === "dist" ? resolve(extensionDirectory, "../..") : resolve(extensionDirectory, "..");
+const WORKFLOW_HOST_ENTRIES = new Set([
+  canonicalSourcePath(resolve(workflowPackageRoot, "src/index.ts")),
+  canonicalSourcePath(resolve(workflowPackageRoot, "dist/src/index.js")),
+]);
 function canonicalExtensionSelector(selector: string): string {
   const negated = selector.startsWith("!");
   const body = negated ? selector.slice(1) : selector;
@@ -240,7 +247,9 @@ async function preparePiPrompt(native: PiSession, text: string): Promise<PiPromp
   } finally { unsubscribe?.(); }
 }
 
-export async function createLocalPiSession(input: SessionInput): Promise<PiSession> {
+interface LocalPiSessionHandle { readonly session: PiSession; shutdown(reason: LocalSessionShutdownReason, targetSessionFile?: string): Promise<void> }
+export async function createLocalPiSession(input: SessionInput): Promise<PiSession> { return (await createLocalPiSessionHandle(input)).session; }
+async function createLocalPiSessionHandle(input: SessionInput, sessionStartEvent?: SessionStartEvent): Promise<LocalPiSessionHandle> {
   const agentDir = input.agentDir ?? getAgentDir();
   const systemPromptSource = workflowSystemPromptPath(input.cwd, agentDir, input.resourcePolicy?.projectTrusted ?? true);
   const systemPromptOptions = input.systemPrompt !== undefined ? { systemPromptOverride: () => input.systemPrompt } : systemPromptSource !== undefined ? { systemPrompt: systemPromptSource } : {};
@@ -252,8 +261,8 @@ export async function createLocalPiSession(input: SessionInput): Promise<PiSessi
   if (!model) throw new WorkflowError("UNKNOWN_MODEL", `Unknown model: ${input.model.provider}/${input.model.model}`);
   const customTools = [...(input.customTools ?? []), ...(input.resultTool ? [input.resultTool] : [])];
   const tools = [...new Set([...input.tools, ...customTools.map(({ name }) => name)])];
-  let settingsManager: SettingsManager | undefined;
-  let resourceLoader: DefaultResourceLoader | undefined;
+  let settingsManager: SettingsManager;
+  let resourceLoader: DefaultResourceLoader;
   const policy = input.resourcePolicy;
   if (policy) {
     settingsManager = SettingsManager.create(input.cwd, agentDir, { projectTrusted: false });
@@ -263,7 +272,7 @@ export async function createLocalPiSession(input: SessionInput): Promise<PiSessi
     const discoveredExtensions = [...new Set(resolved.extensions.filter(({ enabled, metadata }) => enabled && (policy.projectTrusted || metadata.scope !== "project")).map(({ path }) => canonicalSourcePath(path)))];
     const extensionSelectors = policy.effective.extensions.map((selector) => ({ original: selector, matching: canonicalExtensionSelector(selector) }));
     const excludedExtensions = new Set(disabledResources(extensionSelectors.map(({ matching }) => matching), discoveredExtensions));
-    const extensionPaths = discoveredExtensions.filter((path) => !excludedExtensions.has(path));
+    const extensionPaths = discoveredExtensions.filter((path) => !excludedExtensions.has(path) && !WORKFLOW_HOST_ENTRIES.has(path));
     const unmatchedExtensions = extensionSelectors.filter(({ matching }) => unmatchedResourcePatterns([matching], discoveredExtensions).length > 0).map(({ original }) => original);
     Object.assign(policy, { excludedExtensions: [...excludedExtensions], unmatchedExtensions });
     const skillPaths = [...new Set(resolved.skills.filter(({ enabled, metadata }) => enabled && (policy.projectTrusted || metadata.scope !== "project")).map(({ path }) => path))];
@@ -291,27 +300,52 @@ export async function createLocalPiSession(input: SessionInput): Promise<PiSessi
       ...systemPromptOptions,
     });
     await resourceLoader.reload();
-  } else if (input.systemPrompt !== undefined || systemPromptSource !== undefined || input.systemPromptAppend || input.extensionFactories?.length || input.additionalSkillPaths?.length || input.contextFiles !== undefined) {
-    resourceLoader = new DefaultResourceLoader({ cwd: input.cwd, agentDir, ...(input.additionalSkillPaths?.length ? { additionalSkillPaths: [...input.additionalSkillPaths] } : {}), ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}), ...(contextFilesOverride ? { agentsFilesOverride: contextFilesOverride } : {}), ...systemPromptOptions, ...(input.systemPromptAppend ? { appendSystemPromptOverride: (base) => [...base, input.systemPromptAppend ?? ""] } : {}) });
+  } else {
+    settingsManager = SettingsManager.create(input.cwd, agentDir, { projectTrusted: true });
+    const packageManager = new DefaultPackageManager({ cwd: input.cwd, agentDir, settingsManager });
+    const resolved = await packageManager.resolve();
+    const extensionPaths = [...new Set(resolved.extensions.filter(({ enabled }) => enabled).map(({ path }) => canonicalSourcePath(path)).filter((path) => !WORKFLOW_HOST_ENTRIES.has(path)))];
+    resourceLoader = new DefaultResourceLoader({ cwd: input.cwd, agentDir, settingsManager, noExtensions: true, additionalExtensionPaths: extensionPaths, ...(input.additionalSkillPaths?.length ? { additionalSkillPaths: [...input.additionalSkillPaths] } : {}), ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}), ...(contextFilesOverride ? { agentsFilesOverride: contextFilesOverride } : {}), ...systemPromptOptions, ...(input.systemPromptAppend ? { appendSystemPromptOverride: (base) => [...base, input.systemPromptAppend ?? ""] } : {}) });
     await resourceLoader.reload();
   }
-  const { session } = await createAgentSession({ ...(input.options ?? {}), cwd: input.cwd, agentDir, modelRuntime, model, ...(settingsManager ? { settingsManager } : {}), ...(input.model.thinking ? { thinkingLevel: input.model.thinking } : {}), tools, ...(customTools.length ? { customTools } : {}), ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}), ...(resourceLoader ? { resourceLoader } : {}), sessionManager: manager });
-  const resourcePaths = resourceLoader ? { extensions: resourceLoader.getExtensions().extensions.filter(({ path }) => !path.startsWith("<")).map(({ resolvedPath }) => canonicalSourcePath(resolvedPath)), skills: resourceLoader.getSkills().skills.map(({ filePath }) => canonicalSourcePath(filePath)) } : undefined;
-  const resourceInspection = (): PiResourceInspection => {
-    const extensions = resourceLoader?.getExtensions();
-    const skills = resourceLoader?.getSkills();
-    const diagnostics = [...(extensions?.errors ?? []).map(({ path, error }) => ({ type: "error" as const, message: error, source: path })), ...(skills?.diagnostics ?? []).map(({ type, path, message }) => ({ type, message, ...(path ? { source: path } : {}) }))];
-    const systemSource = systemPromptSource;
-    return { extensions: resourceLoader?.getExtensions().extensions.filter(({ path }) => !path.startsWith("<")).map(({ resolvedPath }) => canonicalSourcePath(resolvedPath)) ?? [], skills: skills?.skills.map(({ name }) => name) ?? [], diagnostics, ...(systemSource ? { systemPromptSource: systemSource } : resourceLoader?.getSystemPrompt() !== undefined ? { systemPromptSource: "Pi resource loader" } : {}) };
+  const { session } = await createAgentSession({ ...(input.options ?? {}), cwd: input.cwd, agentDir, modelRuntime, model, settingsManager, ...(input.model.thinking ? { thinkingLevel: input.model.thinking } : {}), tools, ...(customTools.length ? { customTools } : {}), ...(input.extensionFactories?.length ? { extensionFactories: input.extensionFactories } : {}), resourceLoader, ...(sessionStartEvent ? { sessionStartEvent } : {}), sessionManager: manager });
+  const nativeDispose = session.dispose.bind(session);
+  let disposal: Promise<void> | undefined;
+  const shutdown = (reason: LocalSessionShutdownReason, targetSessionFile?: string): Promise<void> => {
+    if (disposal) return disposal;
+    disposal = (async () => {
+      try {
+        if (session.extensionRunner.hasHandlers("session_shutdown")) await session.extensionRunner.emit({ type: "session_shutdown", reason, ...(targetSessionFile === undefined ? {} : { targetSessionFile }) });
+      } finally {
+        nativeDispose();
+      }
+    })();
+    return disposal;
   };
-  return Object.assign(session, {
+  Object.assign(session, { dispose: () => shutdown("quit") });
+  try {
+    await session.bindExtensions({ mode: "print" });
+  } catch (error) {
+    await shutdown("quit").catch(() => undefined);
+    throw error;
+  }
+  const resourcePaths = { extensions: resourceLoader.getExtensions().extensions.filter(({ path }) => !path.startsWith("<")).map(({ resolvedPath }) => canonicalSourcePath(resolvedPath)), skills: resourceLoader.getSkills().skills.map(({ filePath }) => canonicalSourcePath(filePath)) };
+  const resourceInspection = (): PiResourceInspection => {
+    const extensions = resourceLoader.getExtensions();
+    const skills = resourceLoader.getSkills();
+    const diagnostics = [...extensions.errors.map(({ path, error }) => ({ type: "error" as const, message: error, source: path })), ...skills.diagnostics.map(({ type, path, message }) => ({ type, message, ...(path ? { source: path } : {}) }))];
+    const systemSource = systemPromptSource;
+    return { extensions: resourceLoader.getExtensions().extensions.filter(({ path }) => !path.startsWith("<")).map(({ resolvedPath }) => canonicalSourcePath(resolvedPath)), skills: skills.skills.map(({ name }) => name), diagnostics, ...(systemSource ? { systemPromptSource: systemSource } : resourceLoader.getSystemPrompt() !== undefined ? { systemPromptSource: "Pi resource loader" } : {}) };
+  };
+  const managedSession = Object.assign(session, {
     getLeafId: () => manager.getLeafId(),
     getToolDefinitions: () => session.getAllTools().map(({ name, description, parameters, promptGuidelines }) => ({ name, description, parameters, ...(promptGuidelines ? { promptGuidelines } : {}) })),
     preparePrompt: (text: string) => preparePiPrompt(session as unknown as PiSession, text),
     getResourceInspection: resourceInspection,
-    ...(resourcePaths ? { herdrResourcePaths: resourcePaths } : {}),
-    ...(resourceLoader ? { herdrContextFiles: resourceLoader.getAgentsFiles().agentsFiles } : {}),
+    herdrResourcePaths: resourcePaths,
+    herdrContextFiles: resourceLoader.getAgentsFiles().agentsFiles,
   }) as unknown as PiSession;
+  return { session: managedSession, shutdown };
 }
 function workflowAgentMessage(message: AgentMessage | undefined): WorkflowAgentMessage | undefined { return message ? { role: message.role, ...(message.content === undefined ? {} : { content: message.content }), ...(message.stopReason === undefined ? {} : { stopReason: message.stopReason }), ...(message.errorMessage === undefined ? {} : { errorMessage: message.errorMessage }), ...(message.usage === undefined ? {} : { usage: message.usage }) } : undefined; }
 function latestUsableAssistant(messages: readonly AgentMessage[]): WorkflowAgentMessage | undefined { for (let index = messages.length - 1; index >= 0; index -= 1) { const candidate = workflowAgentMessage(messages[index]); if (candidate?.role === "assistant" && !isEmptyAbortedAssistant(candidate)) return candidate; } return undefined; }
@@ -331,26 +365,126 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
     ...(prepared.systemPromptAppend ? { systemPromptAppend: prepared.systemPromptAppend } : {}), ...(prepared.extensionFactories?.length ? { extensionFactories: [...prepared.extensionFactories] } : {}),
     ...(prepared.additionalSkillPaths?.length ? { additionalSkillPaths: [...prepared.additionalSkillPaths] } : {}), ...(prepared.contextFiles === undefined ? {} : { contextFiles: [...prepared.contextFiles] }), ...(prepared.resourcePolicy ? { resourcePolicy: structuredClone(prepared.resourcePolicy) } : {}), ...(prepared.options ? { options: { ...prepared.options } } : {}),
   };
-  let native = await createLocalPiSession(input);
+  let nativeHandle = await createLocalPiSessionHandle(input);
+  let native = nativeHandle.session;
+  let nativeShutdownReason: LocalSessionShutdownReason | undefined;
   let disposal: Promise<void> | undefined;
   let aborting: Promise<void> | undefined;
-  let suspended = false;
+  let lifecycle: Promise<void> | undefined;
+  let state: "active" | "suspending" | "suspended" | "resuming" | "disposing" | "disposed" = "active";
+  let suspendOperation: Promise<void> | undefined;
+  let resumeOperation: Promise<void> | undefined;
+  let resumingActive = false;
   const prompts = new Set<Promise<WorkflowAgentTurnResult>>();
   const listeners = new Set<(event: WorkflowAgentSessionEvent) => void | Promise<void>>();
-  let disposed = false;
   let coreUnsubscribe: (() => void) | undefined;
   let sessionUnsubscribe: (() => void) | undefined;
   const notify = async (event: WorkflowAgentSessionEvent) => { for (const listener of listeners) await listener(event); };
-  const bindNative = (next: PiSession) => {
+  const unbindNative = () => {
     coreUnsubscribe?.();
     sessionUnsubscribe?.();
+    coreUnsubscribe = undefined;
+    sessionUnsubscribe = undefined;
+  };
+  const bindNative = (next: PiSession) => {
+    unbindNative();
     coreUnsubscribe = next.agent?.subscribe?.((event) => notify(localSessionEvent(event)));
     sessionUnsubscribe = next.subscribe?.((event) => { if (typeof event === "object" && event !== null && (event as { type?: unknown }).type === "agent_settled") void notify(localSessionEvent(event)); });
   };
+  const enqueue = (operation: () => Promise<void>): Promise<void> => {
+    const previous = lifecycle;
+    const next = previous ? previous.then(operation, operation) : operation();
+    lifecycle = next;
+    void next.then(() => { if (lifecycle === next) lifecycle = undefined; }, () => { if (lifecycle === next) lifecycle = undefined; });
+    return next;
+  };
+  const shutdownNative = (reason: LocalSessionShutdownReason, targetSessionFile?: string): Promise<void> => {
+    nativeShutdownReason = reason;
+    return nativeHandle.shutdown(reason, targetSessionFile);
+  };
   bindNative(native);
   const startAbort = () => {
-    if (suspended) return Promise.resolve();
+    if (state !== "active" && state !== "suspending" && !(state === "resuming" && resumingActive)) return Promise.resolve();
     return aborting ??= Promise.resolve().then(() => native.abort?.()).then(() => undefined).finally(() => { aborting = undefined; });
+  };
+  const suspend = async (): Promise<void> => {
+    if (state === "disposing" || state === "disposed") throw new WorkflowError("INTERNAL_ERROR", "Local workflow session is closing");
+    if (state === "suspended" || !native.sessionFile) return;
+    if (state === "suspending") { await suspendOperation; return; }
+    if (state === "resuming") { await resumeOperation; return suspend(); }
+    const sessionFile = native.sessionFile;
+    state = "suspending";
+    suspendOperation = enqueue(async () => {
+      await Promise.allSettled(prompts);
+      if (state !== "suspending") {
+        if (isClosing()) throw new WorkflowError("INTERNAL_ERROR", "Local workflow session is closing");
+        return;
+      }
+      unbindNative();
+      try { await shutdownNative("resume", sessionFile); }
+      catch (error) { if (!isClosing()) state = "suspended"; throw error; }
+      if (!isClosing()) state = "suspended";
+    });
+    await suspendOperation;
+  };
+  const isActive = () => state === "active";
+  const isClosing = () => state === "disposing" || state === "disposed";
+  const resume = async (): Promise<void> => {
+    if (state === "suspending") { await suspendOperation; return resume(); }
+    if (state === "resuming") { if (resumeOperation) await resumeOperation; return; }
+    if (state === "disposing" || state === "disposed" || !native.sessionFile) return;
+    const sessionFile = native.sessionFile;
+    const wasSuspended = state === "suspended";
+    resumingActive = !wasSuspended;
+    state = "resuming";
+    const operation = enqueue(async () => {
+      try {
+        await Promise.allSettled(prompts);
+        if (!wasSuspended) {
+          unbindNative();
+          await shutdownNative("resume", sessionFile);
+        }
+        if (isClosing()) return;
+        const nextHandle = await createLocalPiSessionHandle({ ...input, sessionPath: sessionFile }, { type: "session_start", reason: "resume", previousSessionFile: sessionFile });
+        nativeHandle = nextHandle;
+        native = nextHandle.session;
+        nativeShutdownReason = undefined;
+        if (isClosing()) { await shutdownNative("quit"); return; }
+        bindNative(native);
+        state = "active";
+      } catch (error) {
+        if (state === "resuming") state = "suspended";
+        throw error;
+      }
+    });
+    resumeOperation = operation;
+    try { await operation; } finally { if (resumeOperation === operation) { resumeOperation = undefined; resumingActive = false; } }
+  };
+  const disposeSession = async (): Promise<void> => {
+    if (disposal) { await disposal; return; }
+    if (state === "disposed") return;
+    const abort = startAbort();
+    state = "disposing";
+    disposal = enqueue(async () => {
+      try {
+        try { await abort; } catch { /* Abort failure must not prevent the prompt from settling. */ }
+        await Promise.allSettled(prompts);
+        unbindNative();
+        if (nativeShutdownReason === "resume") {
+          const sessionFile = native.sessionFile;
+          if (sessionFile) {
+            const nextHandle = await createLocalPiSessionHandle({ ...input, sessionPath: sessionFile }, { type: "session_start", reason: "resume", previousSessionFile: sessionFile });
+            nativeHandle = nextHandle;
+            native = nextHandle.session;
+            nativeShutdownReason = undefined;
+          }
+        }
+        if (nativeShutdownReason === undefined) await shutdownNative("quit");
+      } finally {
+        state = "disposed";
+      }
+    });
+    await disposal;
   };
   const reference: WorkflowAgentSessionReference = { transport: "local", sessionId: native.sessionId, ...(native.sessionFile ? { locator: { sessionFile: native.sessionFile } } : {}) };
   const session = {
@@ -363,40 +497,20 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
     subscribe(listener: (event: WorkflowAgentSessionEvent) => void) { listeners.add(listener); listener({ type: "state_changed", state: workflowAgentState(native, prepared) }); return () => listeners.delete(listener); },
     subscribeAsync(listener: (event: WorkflowAgentSessionEvent) => void | Promise<void>) { listeners.add(listener); void Promise.resolve(listener({ type: "state_changed", state: workflowAgentState(native, prepared) })).catch(() => undefined); return () => listeners.delete(listener); },
     async prompt(text: string) {
-      if (disposed) throw new WorkflowError("INTERNAL_ERROR", "Local workflow session is disposed");
-      const prompt = Promise.resolve().then(async () => { await native.prompt(text); const assistant = latestUsableAssistant(native.messages); return assistant ? { assistant } : {}; });
+      if (!isActive()) throw new WorkflowError("INTERNAL_ERROR", "Local workflow session is not active");
+      const prompt = (async () => { await native.prompt(text); const assistant = latestUsableAssistant(native.messages); return assistant ? { assistant } : {}; })();
       prompts.add(prompt);
       try { return await prompt; } finally { prompts.delete(prompt); }
     },
-    async steer(text: string) { if (!native.steer) throw new WorkflowError("INTERNAL_ERROR", "Local workflow session does not support steering"); await native.steer(text); },
-    async abort() { if (disposed) return; await startAbort(); },
-    async suspendForHandoff() {
-      if (disposed || suspended || !native.sessionFile) return;
-      coreUnsubscribe?.();
-      sessionUnsubscribe?.();
-      native.dispose();
-      suspended = true;
+    async steer(text: string) {
+      if (!isActive()) throw new WorkflowError("INTERNAL_ERROR", "Local workflow session is not active");
+      if (!native.steer) throw new WorkflowError("INTERNAL_ERROR", "Local workflow session does not support steering");
+      await native.steer(text);
     },
-    async resumeFromHandoff() {
-      const sessionFile = native.sessionFile;
-      if (disposed || !sessionFile) return;
-      await Promise.allSettled(prompts);
-      if (!suspended) native.dispose();
-      native = await createLocalPiSession({ ...input, sessionPath: sessionFile });
-      suspended = false;
-      bindNative(native);
-    },
-    async dispose() {
-      disposal ??= (async () => {
-        disposed = true;
-        try { await startAbort(); } catch { /* Abort failure must not prevent the prompt from settling. */ }
-        await Promise.allSettled(prompts);
-        coreUnsubscribe?.();
-        sessionUnsubscribe?.();
-        native.dispose();
-      })();
-      await disposal;
-    },
+    async abort() { if (!isActive()) return; await startAbort(); },
+    suspendForHandoff: suspend,
+    resumeFromHandoff: resume,
+    dispose: disposeSession,
   };
   return session;
 }
@@ -837,11 +951,9 @@ export class WorkflowAgentExecutor {
           if (!budgetError && typed.code !== "BUDGET_EXHAUSTED") { try { options.budget?.afterTurn(attemptAccounting, true); } catch (budgetFailure) { budgetError ??= budgetFailure instanceof WorkflowError ? budgetFailure : new WorkflowError("BUDGET_EXHAUSTED", budgetFailure instanceof Error ? budgetFailure.message : String(budgetFailure)); } }
           const failedAttempt = attemptRecord(setup?.transport.id ?? this.transport.id, attempt, session, setupSummary, attemptAccounting, undefined, { code: typed.code, message: typed.message });
           attempts.push(failedAttempt);
-          try {
-            try { await options.onAttempt?.(failedAttempt); } finally { await session.dispose(); }
-          } catch (persistenceError) {
-            throw errorWithAttempts(persistenceError, attempts);
-          }
+          try { await options.onAttempt?.(failedAttempt); }
+          catch (persistenceError) { throw errorWithAttempts(persistenceError, attempts); }
+          finally { await session.dispose().catch(() => undefined); }
         }
         if (options.worktreeOwner && typed.code !== "WORKTREE_FAILED") await this.root.runStore?.snapshotWorktree(options.worktreeOwner).catch(() => undefined);
         const terminal = terminalProviderError(typed);
