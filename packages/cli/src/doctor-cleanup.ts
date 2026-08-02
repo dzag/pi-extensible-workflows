@@ -131,6 +131,15 @@ function validateRunRecord(run: PersistedRun): void {
     if (!Array.isArray(value.phaseHistory)) throw new Error("Persisted phase history is invalid");
     for (const phase of value.phaseHistory) { if (!object(phase) || typeof phase.phase !== "string" || !phase.phase) throw new Error("Persisted phase history is invalid"); nonNegativeInteger(phase.afterAgent, "Persisted phase history afterAgent"); }
   }
+  if (value.phaseHistoryIndex !== undefined) nonNegativeInteger(value.phaseHistoryIndex, "Persisted phase history index");
+  if (value.activeShellsByPhase !== undefined) {
+    if (!Array.isArray(value.activeShellsByPhase)) throw new Error("Persisted phase shell activity is invalid");
+    for (const activity of value.activeShellsByPhase) {
+      if (!object(activity) || !Number.isSafeInteger(activity.phaseIndex) || Number(activity.phaseIndex) < -1) throw new Error("Persisted phase shell activity is invalid");
+      positiveInteger(activity.active, "Persisted phase shell activity count");
+      finiteNumber(activity.startedAt, "Persisted phase shell activity start");
+    }
+  }
   if (value.error !== undefined && (!object(value.error) || typeof value.error.code !== "string" || typeof value.error.message !== "string")) throw new Error("Persisted run error is invalid");
   validateBudget(value.budget);
   if (value.budgetVersion !== undefined) positiveInteger(value.budgetVersion, "Persisted budget version");

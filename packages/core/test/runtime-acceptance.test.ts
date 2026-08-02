@@ -103,7 +103,39 @@ void test("session recovery skips a partial run without hiding a valid /workflow
     await shutdown();
   }
 });
-
+void test("cold resume keeps active shell in persisted phase occurrence", { timeout: 10_000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-phase-shell-resume-"));
+  const cwd = join(home, "project");
+  mkdirSync(cwd, { recursive: true });
+  const sessionId = "session-a";
+  const runId = "run-a";
+  const store = new RunStore(cwd, sessionId, runId, home);
+  const command = `${process.execPath} -e ${JSON.stringify("setTimeout(() => {}, 2000)")}`;
+  const script = `phase("build"); await shell(${JSON.stringify(command)}); return true;`;
+  await store.create({ id: runId, workflowName: "phase-shell-resume", cwd, sessionId, state: "interrupted", phase: "build", phaseHistory: [{ phase: "build", afterAgent: 0 }, { phase: "verify", afterAgent: 0 }, { phase: "build", afterAgent: 0 }], phaseHistoryIndex: 0, agents: [], agentSessions: [] }, createLaunchSnapshot({ script, args: null, metadata: { name: "phase-shell-resume" }, settings: { concurrency: 1 }, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
+  let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let commandHandler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+  let shutdown: (() => Promise<void>) | undefined;
+  const context = { cwd, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => sessionId }, ui: { notify() {} } };
+  workflowExtension({ on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, registerTool() {}, registerCommand(_name: string, value: { handler: typeof commandHandler }) { commandHandler = value.handler; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  assert.ok(start && commandHandler && shutdown);
+  try {
+    await start({}, context);
+    const resuming = contextualWorkflowAction(commandHandler, context, runId, "Resume", "Background");
+    let active: Awaited<ReturnType<typeof store.load>>["run"] | undefined;
+    for (let attempt = 0; attempt < 200 && !active; attempt += 1) {
+      const current = (await store.load()).run;
+      if (current.activeShellsByPhase?.length) active = current; else await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(active);
+    assert.deepEqual(active.activeShellsByPhase?.map(({ phaseIndex, active: count }) => [phaseIndex, count]), [[0, 1]]);
+    assert.equal(active.phaseHistoryIndex, 0);
+    await resuming;
+    await waitForRunState(store, "completed");
+  } finally {
+    await shutdown();
+  }
+});
 void test("cold resume persists effective role, fallback, nested, retry, and explicit policies", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-policy-reporting-"));
   const cwd = join(home, "project");

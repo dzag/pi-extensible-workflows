@@ -1,7 +1,7 @@
 import { keyHint, truncateToVisualLines, type Theme } from "@earendil-works/pi-coding-agent";
 import { type AwaitingCheckpoint, type PersistedRun, type RunStore, type WorktreeReference } from "./persistence.js";
 import { budgetUsage } from "./budget.js";
-import { WORKFLOW_AGENT_STALL_THRESHOLD_MS, type AgentRecord, type LaunchSnapshot, type WorkflowCatalogFunction, type WorkflowCatalogIndex } from "./types.js";
+import { WORKFLOW_AGENT_STALL_THRESHOLD_MS, type AgentRecord, type LaunchSnapshot, type WorkflowCatalogFunction, type WorkflowCatalogIndex, type WorkflowPhaseShellActivity } from "./types.js";
 import { object } from "./utils.js";
 import {
   buildWorkflowPhaseModel,
@@ -80,13 +80,15 @@ function formatWorkflowRuntime(durationMs: number): string {
   const remainingMinutes = minutes % 60;
   return `${String(hours)}h${remainingMinutes ? ` ${String(remainingMinutes)}m` : ""}`;
 }
-function formatShellActivity(run: Pick<PersistedRun, "activeShells" | "activeShellStartedAt">, spinner: string, styles: WorkflowProgressStyles, now: number): string | undefined {
-  const activeShells = run.activeShells ?? 0;
-  if (activeShells <= 0) return undefined;
-  const startedAt = run.activeShellStartedAt;
+function formatShellActivity(activeShells: number | undefined, startedAt: number | undefined, spinner: string, styles: WorkflowProgressStyles, now: number): string | undefined {
+  const count = activeShells ?? 0;
+  if (count <= 0) return undefined;
   const started = startedAt !== undefined && Number.isFinite(startedAt) ? new Date(startedAt) : undefined;
   const timing = started && startedAt !== undefined && !Number.isNaN(started.getTime()) ? ` ${styles.dim(`started=${started.toISOString()} elapsed=${formatWorkflowRuntime(Math.max(0, now - startedAt))}`)}` : "";
-  return `  ${styles.accent(spinner)} shell ${styles.accent("[running]")} ${styles.dim(`(${String(activeShells)} active)`)}${timing}`;
+  return `${styles.accent(spinner)} shell ${styles.accent("[running]")} ${styles.dim(`(${String(count)} active)`)}${timing}`;
+}
+function phaseShellActivity(run: Pick<PersistedRun, "activeShellsByPhase">, phaseIndex: number): WorkflowPhaseShellActivity | undefined {
+  return run.activeShellsByPhase?.find((activity) => activity.phaseIndex === phaseIndex && activity.active > 0);
 }
 function formatLogTimestamp(timestamp: number | undefined): string {
   if (timestamp === undefined || !Number.isFinite(timestamp)) return "--:--:--";
@@ -119,8 +121,9 @@ export function formatWorkflowProgress(run: PersistedRun, spinner = "◇", style
   const lines = [`${iconStyle(workflowIcon)} ${header} ${state}${runtime}`];
   const budgetWarning = run.state === "budget_exhausted" || (run.budgetEvents ?? []).some((event) => event.type === "hard_exhausted");
   lines.push(...formatCompactBudgetStatus(run).map((line) => `  ${budgetWarning ? styles.warning(line) : line}`));
-  const shellActivity = formatShellActivity(run, spinner, styles, now);
-  if (shellActivity) lines.push(shellActivity);
+  const scopedShells = (run.activeShellsByPhase?.length ?? 0) > 0;
+  const shellActivity = scopedShells ? undefined : formatShellActivity(run.activeShells, run.activeShellStartedAt, spinner, styles, now);
+  if (shellActivity) lines.push(`  ${shellActivity}`);
   const byId = new Map(run.agents.map((agent) => [agent.id, agent]));
   const renderAgents = (agents: readonly AgentRecord[], offset: number, nested: boolean) => renderGroupedAgents(agents, ({ agent, index, depth }, grouped) => {
     const icon = agentStateGlyph(agent.state, spinner);
@@ -131,12 +134,25 @@ export function formatWorkflowProgress(run: PersistedRun, spinner = "◇", style
     return `${indent}#${String(offset + index + 1)} ${state(icon)} ${name} ${state(`[${agent.state}]`)}${activity ? ` ${activity}` : ""}`;
   }, run.agents, (label) => styles.muted(label)).map((line) => nested ? `  ${line}` : line);
   const phases = run.phaseHistory?.length ? run.phaseHistory : run.phase ? [{ phase: run.phase, afterAgent: 0 }] : [];
+  if (scopedShells) {
+    const preflight = phaseShellActivity(run, -1);
+    if (preflight) {
+      lines.push(`  ${styles.muted("[Preflight]")}`);
+      const rendered = formatShellActivity(preflight.active, preflight.startedAt, spinner, styles, now);
+      if (rendered) lines.push(`    ${rendered}`);
+    }
+  }
   let renderedAgents = 0;
   let nested = false;
-  for (const phase of phases) {
+  for (const [phaseIndex, phase] of phases.entries()) {
     const boundary = Math.max(renderedAgents, Math.min(run.agents.length, phase.afterAgent));
     lines.push(...renderAgents(run.agents.slice(renderedAgents, boundary), renderedAgents, nested));
     lines.push(`  ${styles.muted(`[Phase: ${phase.phase}]`)}`);
+    const phaseShell = scopedShells ? phaseShellActivity(run, phaseIndex) : undefined;
+    if (phaseShell) {
+      const rendered = formatShellActivity(phaseShell.active, phaseShell.startedAt, spinner, styles, now);
+      if (rendered) lines.push(`    ${rendered}`);
+    }
     renderedAgents = boundary;
     nested = true;
   }
@@ -526,8 +542,8 @@ export function formatNavigatorDashboard(run: PersistedRun, checkpoints: readonl
   const runtime = run.usage ? `runtime=${formatWorkflowRuntime(run.usage.durationMs)}` : "";
   const meta = [run.state, run.phase ? `phase: ${run.phase}` : "", `${String(done)}/${String(run.agents.length)} agents`, runtime, hasAccounting ? formatAccounting(totalAccounting) : "", totalAccounting.cost > 0 ? `$${totalAccounting.cost.toFixed(2)}` : ""].filter(Boolean).join(" · ");
   const lines = [header, meta, ...formatCompactBudgetStatus(run)];
-  const shellActivity = formatShellActivity(run, "⠦", PLAIN_WORKFLOW_PROGRESS_STYLES, now);
-  if (shellActivity) lines.push(shellActivity);
+  const shellActivity = formatShellActivity(run.activeShells, run.activeShellStartedAt, "⠦", PLAIN_WORKFLOW_PROGRESS_STYLES, now);
+  if (shellActivity) lines.push(`  ${shellActivity}`);
   if (run.error) lines.push(`Error: ${run.error.code}: ${run.error.message}`);
   if (run.events?.length) lines.push(...run.events.filter((event) => event.type === "warning").map((event) => `Warning: ${event.message}`));
   lines.push("");
@@ -563,8 +579,8 @@ export function formatNavigatorRun(loaded: { run: PersistedRun; snapshot: Readon
     `Launch models: ${snapshot.models.join(", ") || "(none)"}`,
     `Settings: concurrency=${String(snapshot.settings.concurrency)}`,
   ];
-  const shellActivity = formatShellActivity(run, "⠦", PLAIN_WORKFLOW_PROGRESS_STYLES, now);
-  if (shellActivity) lines.push(shellActivity);
+  const shellActivity = formatShellActivity(run.activeShells, run.activeShellStartedAt, "⠦", PLAIN_WORKFLOW_PROGRESS_STYLES, now);
+  if (shellActivity) lines.push(`  ${shellActivity}`);
   if (run.error) lines.push(`Run error: ${run.error.code}: ${run.error.message}`);
   if (run.events?.length) lines.push(...run.events.filter((event) => event.type === "warning").map((event) => `Warning: ${event.message}`));
   const aliases = snapshot.modelAliases ?? snapshot.settings.modelAliases;
@@ -608,6 +624,7 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
   const selectedByAgent = selection.agentId ? tree.nodes.find((node) => node.kind === "agent" && node.agentId === selection.agentId && (!selection.phaseId || node.phaseId === selection.phaseId)) : undefined;
   const selectedNode = (selection.nodeId ? tree.byId.get(selection.nodeId) : undefined) ?? selectedByAgent ?? (phase ? tree.byId.get(workflowPhaseTreePath("phase", phase.id, [])) : undefined) ?? tree.byId.get("workflow") ?? (model.currentPhaseId ? tree.byId.get(workflowPhaseTreePath("phase", model.currentPhaseId, [])) : undefined) ?? tree.nodes[0];
   const selectedPhase = selectedNode?.phase ?? (selectedNode ? model.phases.find((candidate) => candidate.id === selectedNode.phaseId) : undefined);
+  const currentPhase = model.currentPhaseIndex === undefined ? undefined : model.phases[model.currentPhaseIndex];
   const visibleNodes = workflowPhaseTreeVisibleNodes(tree, expanded);
   const nodeAgents = (node: WorkflowPhaseTreeNode): AgentRecord[] => {
     const agents: AgentRecord[] = [];
@@ -620,7 +637,7 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
     return agents;
   };
   const nodeStatus = (node: WorkflowPhaseTreeNode): string => phaseStyle(node.state)(node.state);
-  const nodeIcon = (node: WorkflowPhaseTreeNode): string => node.children.length ? expanded.has(node.id) ? "▾" : "▸" : node.kind === "agent" ? "•" : " ";
+  const nodeIcon = (node: WorkflowPhaseTreeNode): string => node.children.length ? expanded.has(node.id) ? "▾" : "▸" : node.kind === "agent" ? "•" : node.kind === "shell" ? "◇" : " ";
   const treeLine = (node: WorkflowPhaseTreeNode): string => {
     const selected = node.id === selectedNode?.id;
     const state = progressStyleForState(node.state, styles);
@@ -645,6 +662,9 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
       const hint = node.children.length ? "enter expand/collapse" : "enter phase details";
       return [styles.bold(`Selected operation: ${node.operationPath.join(" > ")}`), `Phase: ${node.phase?.name ?? node.phaseId}`, `Status: ${nodeStatus(node)}`, `agents completed=${String(states.completed)} running=${String(states.running)} failed=${String(states.failed)} cancelled=${String(states.cancelled)} pending=${String(states.pending)}`, `Agents: ${String(agents.length)}`, ...(selection.actions ? [] : [styles.muted(hint)])];
     }
+    if (node.kind === "shell") {
+      return [styles.bold("Selected shell"), formatShellActivity(node.shellActivity?.active, node.shellActivity?.startedAt, "⠦", styles, now) ?? "shell [running]"];
+    }
     const agent = node.agent;
     if (!agent) return [styles.muted("Agent details are unavailable")];
     const duration = agentDuration(agent, now);
@@ -659,11 +679,12 @@ export function formatWorkflowPhaseDashboard(run: PersistedRun, snapshot: Readon
   const lines: string[] = [styles.bold(styles.accent(`Workflow: ${run.workflowName}`))];
   if (run.error) lines.push(styles.error(`ERROR ${run.error.code}: ${run.error.message}`));
   const runtime = run.usage ? ` runtime=${formatWorkflowRuntime(run.usage.durationMs)}` : "";
-  lines.push(`phase: ${run.phase ?? selectedPhase?.name ?? "none"}`, `Run state: ${run.state}${runtime}`, `Phases: ${statusSummary}`);
+  lines.push(`phase: ${run.phase ?? selectedPhase?.name ?? currentPhase?.name ?? "none"}`, `Run state: ${run.state}${runtime}`, `Phases: ${statusSummary}`);
   for (const event of run.events?.filter((event) => event.type === "warning") ?? []) lines.push(styles.warning(`Warning: ${event.message}`));
   lines.push(...formatCompactBudgetStatus(run));
-  const shellActivity = formatShellActivity(run, "⠦", styles, now);
-  if (shellActivity) lines.push(shellActivity);
+  const scopedShells = (run.activeShellsByPhase?.length ?? 0) > 0;
+  const shellActivity = scopedShells ? undefined : formatShellActivity(run.activeShells, run.activeShellStartedAt, "⠦", styles, now);
+  if (shellActivity) lines.push(`  ${shellActivity}`);
   const renderTree = (limit: number): string[] => [styles.bold("Tree"), ...(visibleNodes.length ? visibleNodes.flatMap((node) => wrap(treeLine(node), limit)) : [styles.muted("(empty)")])];
   const actionRows = (): string[] => {
     const actions = selection.actions;

@@ -400,9 +400,14 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         const persisted = await persistRunState(store, metadata, (current) => {
           previousPhase = current.phase;
           const history = current.phaseHistory ?? [];
-          if (history[cursor]?.phase === phase) { cursor += 1; return { ...current, phase }; }
+          if (history[cursor]?.phase === phase) {
+            const phaseHistoryIndex = cursor;
+            cursor += 1;
+            return { ...current, phase, phaseHistoryIndex };
+          }
+          const phaseHistoryIndex = history.length;
           cursor = history.length + 1;
-          return { ...current, phase, phaseHistory: [...history, { phase, afterAgent: current.agents.length }] };
+          return { ...current, phase, phaseHistoryIndex, phaseHistory: [...history, { phase, afterAgent: current.agents.length }] };
         });
         await eventPublisher.phase(store, metadata, previousPhase, phase);
         runs.get(store.runId)?.update?.(workflowToolUpdate(persisted));
@@ -431,9 +436,17 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
       const replayed = await store.replay(path);
       if (replayed) return readShellResult(replayed.value);
       const shellStartedAt = Date.now();
+      let shellPhaseIndex = -1;
       const started = await persistRunState(store, metadata, (current) => {
+        const history = current.phaseHistory ?? [];
+        if (current.phase !== undefined) shellPhaseIndex = current.phaseHistoryIndex ?? (history.length ? history.length - 1 : 0);
+        const phaseActivities = [...(current.activeShellsByPhase ?? [])];
+        const phaseActivityIndex = phaseActivities.findIndex(({ phaseIndex }) => phaseIndex === shellPhaseIndex);
+        const nextPhaseActivities = phaseActivityIndex >= 0
+          ? phaseActivities.map((activity, index) => index === phaseActivityIndex ? { ...activity, active: activity.active + 1 } : activity)
+          : [...phaseActivities, { phaseIndex: shellPhaseIndex, active: 1, startedAt: shellStartedAt }];
         const activeShells = current.activeShells ?? 0;
-        return { ...current, activeShells: activeShells + 1, ...(activeShells > 0 && current.activeShellStartedAt !== undefined ? {} : { activeShellStartedAt: shellStartedAt }) };
+        return { ...current, activeShells: activeShells + 1, ...(activeShells > 0 && current.activeShellStartedAt !== undefined ? {} : { activeShellStartedAt: shellStartedAt }), activeShellsByPhase: nextPhaseActivities };
       });
       runs.get(store.runId)?.update?.(workflowToolUpdate(withLiveActivities(started)));
       try {
@@ -443,11 +456,22 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
         return result;
       } finally {
         const stopped = await persistRunState(store, metadata, (current) => {
+          const phaseActivities = [...(current.activeShellsByPhase ?? [])];
+          const phaseActivityIndex = phaseActivities.findIndex(({ phaseIndex }) => phaseIndex === shellPhaseIndex);
+          const phaseActivity = phaseActivities[phaseActivityIndex];
+          const nextPhaseActivities = phaseActivityIndex < 0 ? phaseActivities : phaseActivity && phaseActivity.active > 1
+            ? phaseActivities.map((activity, index) => index === phaseActivityIndex ? { ...activity, active: activity.active - 1 } : activity)
+            : phaseActivities.filter((_, index) => index !== phaseActivityIndex);
           const activeShells = Math.max(0, (current.activeShells ?? 0) - 1);
-          if (activeShells > 0) return { ...current, activeShells };
+          if (activeShells > 0) {
+            const next = { ...current, activeShells };
+            if (nextPhaseActivities.length) next.activeShellsByPhase = nextPhaseActivities; else delete next.activeShellsByPhase;
+            return next;
+          }
           const next = { ...current };
           delete next.activeShells;
           delete next.activeShellStartedAt;
+          delete next.activeShellsByPhase;
           return next;
         });
         runs.get(store.runId)?.update?.(workflowToolUpdate(withLiveActivities(stopped)));
@@ -909,17 +933,19 @@ export default function workflowExtension(pi: ExtensionAPI, home?: string, clipb
           const next = { ...current, state: "interrupted" as const };
           delete next.activeShells;
           delete next.activeShellStartedAt;
+          delete next.activeShellsByPhase;
           return next;
         });
         loaded = { ...loaded, run: (await store.load()).run };
         await eventPublisher.runState(store, loaded.snapshot.metadata, previousState, "interrupted", "session_shutdown");
         loaded = { ...loaded, run: (await store.load()).run };
-      } else if (loaded.run.activeShells !== undefined || loaded.run.activeShellStartedAt !== undefined) {
+      } else if (loaded.run.activeShells !== undefined || loaded.run.activeShellStartedAt !== undefined || loaded.run.activeShellsByPhase !== undefined) {
         await store.updateState((current) => {
           if (["completed", "failed", "stopped"].includes(current.state)) return current;
           const next = { ...current };
           delete next.activeShells;
           delete next.activeShellStartedAt;
+          delete next.activeShellsByPhase;
           return next;
         });
         loaded = { ...loaded, run: (await store.load()).run };

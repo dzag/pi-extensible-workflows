@@ -14,6 +14,7 @@ import {
   preserveWorkflowPhaseTreeSelection,
   navigateWorkflowPhaseTree,
   workflowPhaseTreeVisibleNodes,
+  workflowPhaseTreeInitialExpanded,
   preflight,
   preserveWorkflowPhaseSelection,
   workflowScriptArtifact,
@@ -177,6 +178,28 @@ void test("phase dashboard shows active shell start and elapsed time", () => {
   assert.match(rendered, /shell \[running\] \(1 active\)/);
   assert.match(rendered, /started=1970-01-01T00:00:00\.000Z/);
   assert.match(rendered, /elapsed=1m 5s/);
+});
+void test("phase dashboard nests active shells under their phase occurrence", () => {
+  const current = { ...run("running", [agent("done"), agent("later")], [{ phase: "build", afterAgent: 0 }, { phase: "verify", afterAgent: 1 }]), activeShellsByPhase: [{ phaseIndex: 0, active: 2, startedAt: 0 }] };
+  const model = buildWorkflowPhaseModel(current, ["build", "verify"]);
+  assert.deepEqual(model.phases.map(({ name, state, shellActivity }) => [name, state, shellActivity?.active]), [["build", "running", 2], ["verify", "running", undefined]]);
+  const tree = buildWorkflowPhaseTree(model);
+  const visible = workflowPhaseTreeVisibleNodes(tree, workflowPhaseTreeInitialExpanded(tree));
+  assert.deepEqual(visible.filter(({ kind }) => kind === "shell").map(({ label, phaseId }) => [label, phaseId]), [["shell [running] (2 active)", "build#1"]]);
+  const rendered = formatWorkflowPhaseDashboard(current, snapshot(["build", "verify"]), 120, {}, undefined, 65_432).join("\n");
+  assert.match(rendered, /build[\s\S]*shell \[running\] \(2 active\)/);
+});
+void test("phase dashboard places preflight shells in a fallback phase", () => {
+  const current = { ...run("running"), activeShellsByPhase: [{ phaseIndex: -1, active: 1, startedAt: 0 }] };
+  const model = buildWorkflowPhaseModel(current, snapshot(["build"]));
+  assert.equal(model.phases[0]?.name, "Preflight");
+  assert.match(formatWorkflowPhaseDashboard(current, snapshot(["build"]), 120, {}, undefined, 65_432).join("\n"), /Preflight[\s\S]*shell \[running\] \(1 active\)/);
+});
+void test("phase shell activity follows repeated phase occurrences", () => {
+  const current = { ...run("running"), phaseHistory: [{ phase: "build", afterAgent: 0 }, { phase: "build", afterAgent: 0 }], activeShellsByPhase: [{ phaseIndex: 1, active: 1, startedAt: 0 }] };
+  const model = buildWorkflowPhaseModel(current, ["build", "build"]);
+  assert.equal(model.phases[0]?.shellActivity, undefined);
+  assert.equal(model.phases[1]?.shellActivity?.active, 1);
 });
 void test("phase and agent selections survive read-model polling", () => {
   const before = buildWorkflowPhaseModel(run("running", [agent("one")], [{ phase: "build", afterAgent: 0 }]), ["build", "review"]);

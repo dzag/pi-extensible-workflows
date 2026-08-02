@@ -109,10 +109,20 @@ void test("workflow progress shows active shell operations with start and elapse
   assert.match(progress, /elapsed=1m 5s/);
   assert.match(formatNavigatorDashboard(run, [], [], now), /started=1970-01-01T00:00:00\.000Z.*elapsed=1m 5s/);
   assert.doesNotMatch(progress, /command-secret/);
+  const scoped = { ...run, activeShellsByPhase: [{ phaseIndex: 0, active: 2, startedAt: 0 }] };
+  assert.match(formatNavigatorDashboard(scoped, [], [], now), /shell \[running\] \(2 active\)/);
+  const snapshot = createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "shell-progress" }, settings: DEFAULT_SETTINGS, models: [], tools: [], agentTypes: [], schemas: [] });
+  assert.match(formatNavigatorRun({ run: scoped, snapshot }, [], [], now), /shell \[running\] \(2 active\)/);
   const legacy = { ...run };
   delete legacy.activeShells;
   delete legacy.activeShellStartedAt;
   assert.doesNotMatch(formatWorkflowProgress(legacy), /shell \[running\]/);
+});
+void test("workflow progress nests active shell under its phase occurrence", () => {
+  const run = { id: "run", workflowName: "shell-phase", cwd: "/repo", sessionId: "session", state: "running" as const, agents: [], agentSessions: [], phase: "verify", phaseHistory: [{ phase: "build", afterAgent: 0 }, { phase: "verify", afterAgent: 0 }], activeShells: 1, activeShellStartedAt: 0, activeShellsByPhase: [{ phaseIndex: 1, active: 1, startedAt: 0 }] } as Parameters<typeof formatWorkflowProgress>[0];
+  const progress = formatWorkflowProgress(run, "◇", undefined, 65_432);
+  assert.match(progress, /\[Phase: verify\]\n\s{4}◇ shell \[running\] \(1 active\)/);
+  assert.doesNotMatch(progress, /\n\s{2}◇ shell \[running\]/);
 });
 void test("navigator keeps agent rows compact while preserving identity and state", () => {
   const run = { id: "run", workflowName: "policy", cwd: "/repo", sessionId: "session", state: "running", agents: [{ id: "run:1", name: "review", path: "run:1", state: "running", role: "reviewer", model: { provider: "anthropic", model: "opus", thinking: "high" }, tools: ["read", "grep"], attempts: 1 }], agentSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
@@ -211,7 +221,7 @@ void test("foreground workflow progress reports a shell waiting after agents set
   const updates: PersistedRun[] = [];
   let reportActive!: () => void;
   const active = new Promise<void>((resolve) => { reportActive = resolve; });
-  const running = workflow.execute("id", { name: "shell-progress", script: `await agent("finish", {label:"worker"}); await shell(${JSON.stringify(command)}); return true;`, foreground: true }, new AbortController().signal, (update: { details: { run: PersistedRun } }) => {
+  const running = workflow.execute("id", { name: "shell-progress", script: `phase("build"); await agent("finish", {label:"worker"}); phase("verify"); await shell(${JSON.stringify(command)}); return true;`, foreground: true }, new AbortController().signal, (update: { details: { run: PersistedRun } }) => {
     const run = update.details.run;
     updates.push(run);
     if (run.activeShells === 1) reportActive();
@@ -221,14 +231,17 @@ void test("foreground workflow progress reports a shell waiting after agents set
   const live = updates.find(({ activeShells }) => activeShells === 1);
   assert.ok(live);
   assert.equal(live.agents.every((agent) => agent.state === "completed"), true);
+  assert.deepEqual(live.activeShellsByPhase?.map(({ phaseIndex, active }) => [phaseIndex, active]), [[1, 1]]);
+  assert.equal(live.phaseHistoryIndex, 1);
   const shellStartedAt = live.activeShellStartedAt;
   assert.equal(typeof shellStartedAt, "number");
   assert.ok(typeof shellStartedAt === "number" && shellStartedAt <= Date.now());
-  assert.match(formatWorkflowProgress(live), /shell \[running\] \(1 active\)/);
+  assert.match(formatWorkflowProgress(live), /\[Phase: verify\]\n\s{4}.*shell \[running\] \(1 active\)/);
   writeFileSync(releasePath, "release");
   const result = await running as { details: { run: PersistedRun } };
   assert.equal(result.details.run.activeShells, undefined);
   assert.equal(result.details.run.activeShellStartedAt, undefined);
+  assert.equal(result.details.run.activeShellsByPhase, undefined);
   assert.equal(updates.some(({ activeShells }) => activeShells === undefined), true);
 });
 
