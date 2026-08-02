@@ -13,6 +13,9 @@ import {
 import {
   DEFAULT_SETTINGS,
   createLocalPiSession,
+  errorText,
+  isNodeError,
+  isObject,
   loadSettings,
   prepareAgentSetupForInspection,
   resolveAgentResourcePolicy,
@@ -106,14 +109,19 @@ function isDynamicModelAlias(value: string, aliases: ReadonlySet<string>): boole
   const name = match?.[1];
   return Boolean(name && (match[2] === undefined || parseThinking(match[2]) !== undefined) && aliases.has(name));
 }
+function isCredential(value: unknown): value is Credential {
+  if (!isObject(value)) return false;
+  if (value.type === "api_key") return (value.key === undefined || typeof value.key === "string") && (value.env === undefined || isObject(value.env) && Object.values(value.env).every((entry) => typeof entry === "string"));
+  return value.type === "oauth" && typeof value.refresh === "string" && typeof value.access === "string" && typeof value.expires === "number";
+}
 async function readCredentials(agentDir: string): Promise<InMemoryCredentialStore> {
   const credentials = new InMemoryCredentialStore();
   try {
     const parsed: unknown = JSON.parse(readFileSync(join(agentDir, "auth.json"), "utf8"));
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("Pi auth.json must be an object");
-    await Promise.all(Object.entries(parsed).map(([provider, credential]) => credentials.modify(provider, async () => credential as Credential)));
+    if (!isObject(parsed)) throw new Error("Pi auth.json must be an object");
+    await Promise.all(Object.entries(parsed).flatMap(([provider, credential]) => isCredential(credential) ? [credentials.modify(provider, async () => credential)] : []));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (!isNodeError(error, "ENOENT")) throw error;
   }
   return credentials;
 }
@@ -121,15 +129,15 @@ async function readCredentials(agentDir: string): Promise<InMemoryCredentialStor
 function savedTrust(cwd: string, agentDir: string): boolean | undefined {
   let parsed: unknown;
   try { parsed = JSON.parse(readFileSync(join(agentDir, "trust.json"), "utf8")); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("Pi trust.json must be an object");
+  catch (error) { if (isNodeError(error, "ENOENT")) return undefined; throw error; }
+  if (!isObject(parsed)) throw new Error("Pi trust.json must be an object");
   let current = canonical(cwd);
   while (current !== dirname(current)) {
-    const value = (parsed as Record<string, unknown>)[current];
+    const value = parsed[current];
     if (value === true || value === false) return value;
     current = dirname(current);
   }
-  const value = (parsed as Record<string, unknown>)[current];
+  const value = parsed[current];
   return value === true || value === false ? value : undefined;
 }
 
@@ -182,7 +190,7 @@ async function discoverPi(cwd: string, agentDir: string): Promise<DoctorPiState>
 
 function roleFiles(dir: string): string[] {
   try { return readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isFile() && extname(entry.name) === ".md").map((entry) => join(dir, entry.name)).sort(); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+  catch (error) { if (isNodeError(error, "ENOENT")) return []; throw error; }
 }
 
 function roleFilesFrom(dirs: readonly string[]): string[] {
@@ -224,7 +232,8 @@ function validateModel(value: string, known: ReadonlySet<string>, available: Rea
     const name = `${parsed.provider}/${parsed.model}`;
     if (!known.has(name) || !available.has(name)) diagnostics.push(diagnostic("warning", "MODEL_UNAVAILABLE", `Model is valid-shaped but unavailable: ${name}`, source));
   } catch (error) {
-    diagnostics.push(diagnostic("error", "MODEL_INVALID", (error as Error).message, source, (error as Error).message.includes("thinking") ? THINKING_HINT : "Use provider/model or provider/model:thinking."));
+    const message = errorText(error);
+    diagnostics.push(diagnostic("error", "MODEL_INVALID", message, source, message.includes("thinking") ? THINKING_HINT : "Use provider/model or provider/model:thinking."));
   }
 }
 
@@ -289,14 +298,14 @@ export async function doctor(options: DoctorOptions = {}): Promise<DoctorReport>
   const diagnostics: DoctorDiagnostic[] = [];
   let settings = DEFAULT_SETTINGS;
   try { settings = loadSettings(settingsPath); }
-  catch (error) { diagnostics.push(diagnostic("error", "SETTINGS_INVALID", (error as Error).message, settingsPath, "Fix or remove the invalid workflow settings file.")); }
+  catch (error) { diagnostics.push(diagnostic("error", "SETTINGS_INVALID", errorText(error), settingsPath, "Fix or remove the invalid workflow settings file.")); }
   let settingsSources: WorkflowSettingsSources = { concurrency: settingsPath, modelAliases: settingsPath, disabledAgentResources: settingsPath };
   const projectSettingsPath = workflowProjectSettingsPath(cwd);
 
   let pi: DoctorPiState;
   try { pi = await (options.discoverPi ?? discoverPi)(cwd, agentDir); }
   catch (error) {
-    diagnostics.push(diagnostic("error", "PI_DISCOVERY", `Pi headless discovery failed: ${(error as Error).message}`, undefined, "Open and trust the project in Pi, fix extension errors, then rerun doctor."));
+    diagnostics.push(diagnostic("error", "PI_DISCOVERY", `Pi headless discovery failed: ${errorText(error)}`, undefined, "Open and trust the project in Pi, fix extension errors, then rerun doctor."));
     pi = { trust: { required: false, trusted: false, source: "discovery failed" }, activeTools: [], knownModels: [], availableModels: [], extensionErrors: [], functions: {} };
   }
   if (options.activeTools) pi = { ...pi, activeTools: options.activeTools.filter((tool) => tool !== "workflow" && tool !== "workflow_respond" && tool !== "workflow_catalog") };

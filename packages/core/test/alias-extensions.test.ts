@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 import test from "node:test";
+import { testExtensionApi } from "./support.js";
 import workflowExtension, { createLaunchSnapshot, loadAgentDefinitions, registerWorkflowExtension, RunStore, runWorkflow, structuralPath, WorkflowError, WorkflowRegistry, type JsonValue, type WorkflowFunctionContext } from "../src/index.js";
 import { loadingRegistry } from "../src/registry.js";
 import type { SessionInput } from "../src/agent-execution.js";
@@ -14,7 +15,7 @@ import { reuseExtension } from "./support.js";
 import { contextualWorkflowAction } from "./support.js";
 void test("registered extension functions can run as script globals with args", async () => {
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never);
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} }));
   registerWorkflowExtension(reuseExtension);
   const execute = tools.find(({ name }) => name === "workflow")?.execute;
   assert.ok(execute);
@@ -23,7 +24,7 @@ void test("registered extension functions can run as script globals with args", 
 });
 void test("registered function schemas remain enforced inside scripts", async () => {
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never);
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} }));
   registerWorkflowExtension({ version: "1.0.0", headline: "Schema tests", functions: { needsValue: { description: "Needs a value", input: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }, output: { type: "string" }, run: (input) => typeof input.value === "string" ? input.value : "" }, badResult: { description: "Bad result", input: { type: "object", additionalProperties: false }, output: { type: "string" }, run: () => 42 } } });
   const execute = tools.find(({ name }) => name === "workflow")?.execute;
   assert.ok(execute);
@@ -46,7 +47,7 @@ void test("registered globals preserve role definitions for agent calls across r
     return { sessionId: `registered-role-${String(attempt)}`, sessionFile: `/sessions/registered-role-${String(attempt)}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => { if (attempt === 1) throw new Error("source failure"); }, steer: async () => {}, dispose() {} };
   };
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession), agentDir);
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home, async () => {}, testTransport(createSession), agentDir);
   registerWorkflowExtension({ version: "1.0.0", headline: "Registered role retry", functions: { registeredRoleRetry: { description: "Run a developer role", input: { type: "object", additionalProperties: false }, output: { type: "string" }, run: async (_input, context) => { await context.agent("work", { role: "developer", retries: 0 }); return "done"; } } } });
   const workflow = tools.find(({ name }) => name === "workflow");
   const retry = tools.find(({ name }) => name === "workflow_retry");
@@ -73,7 +74,7 @@ void test("attributes dynamic alias availability failures to the exact extension
   const agentDir = join(home, "agent");
   mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
     const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-    workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never, home, undefined, undefined, agentDir);
+    workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} }), home, undefined, undefined, agentDir);
     registerWorkflowExtension({ version: "1.0.0", headline: "Review extension", modelAliases: { review: { resolve: () => "openai/gpt" } } });
     registerWorkflowExtension({ version: "1.0.0", headline: "Reviewer extension", modelAliases: { reviewer: { resolve: () => "missing/model" } } });
     const execute = tools.find(({ name }) => name === "workflow")?.execute;
@@ -90,7 +91,7 @@ void test("production launch cancellation aborts a dynamic alias resolver", asyn
   let markStarted!: () => void;
   const started = new Promise<void>((resolve) => { markStarted = resolve; });
     const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-    workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never, home, undefined, undefined, agentDir);
+    workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} }), home, undefined, undefined, agentDir);
     registerWorkflowExtension({ version: "1.0.0", headline: "Cancellation policy", modelAliases: { "cancel-model": { resolve: ({ signal }) => new Promise<string>((_resolve, reject) => { markStarted(); signal.addEventListener("abort", () => { reject(new WorkflowError("CANCELLED", "cancelled")); }, { once: true }); }) } } });
     const execute = tools.find(({ name }) => name === "workflow")?.execute;
     assert.ok(execute);
@@ -107,7 +108,7 @@ void test("attributes colliding dynamic alias availability failures to the valid
   const agentDir = join(home, "agent");
   mkdirSync(join(agentDir, "pi-extensible-workflows"), { recursive: true });
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never, home, undefined, undefined, agentDir);
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} }), home, undefined, undefined, agentDir);
   registerWorkflowExtension({ version: "1.0.0", headline: "Target extension", modelAliases: { target: { resolve: () => "openai/gpt" } } });
   registerWorkflowExtension({ version: "1.0.0", headline: "Missing target extension", modelAliases: { x: { resolve: () => "missing/target" } } });
   const execute = tools.find(({ name }) => name === "workflow")?.execute;
@@ -133,7 +134,7 @@ void test("production launches dynamic aliases through role files with precedenc
       inputs.push(input);
       return { sessionId: `dynamic-${String(inputs.length)}`, sessionFile: `/sessions/dynamic-${String(inputs.length)}`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
     };
-    workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; } } as never, home, async () => {}, testTransport(createSession), agentDir);
+    workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on(name: string, handler: unknown) { if (name === "session_shutdown") shutdown = handler as typeof shutdown; } }), home, async () => {}, testTransport(createSession), agentDir);
     registerWorkflowExtension({ version: "1.0.0", headline: "Production policy", modelAliases: { "policy-model": { resolve: () => { shadowedCalls += 1; return "anthropic/opus:high"; } }, "policy-chain": { resolve: () => "policy-model" }, "direct-model": { resolve: () => "anthropic/opus:high" } } });
     const execute = tools.find(({ name }) => name === "workflow")?.execute;
     assert.ok(execute);
@@ -165,7 +166,7 @@ void test("production resume reruns dynamic aliases, replays completed work, and
       inputs.push(input);
       return { sessionId: `resume-${String(inputs.length)}`, sessionFile: `/sessions/resume-${String(inputs.length)}`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} };
     };
-    workflowExtension({ registerTool() {}, registerCommand(_name: string, value: { handler: (args: string, ctx: unknown) => Promise<void> }) { command = value.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], ui: {} } as never, home, async () => {}, testTransport(createSession), agentDir);
+    workflowExtension(testExtensionApi({ registerTool() {}, registerCommand(_name: string, value: { handler: (args: string, ctx: unknown) => Promise<void> }) { command = value.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home, async () => {}, testTransport(createSession), agentDir);
     registerWorkflowExtension({ version: "1.0.0", headline: "Resume policy", modelAliases: { "dynamic-model": { resolve: () => { resolverCalls += 1; return "new/model"; } } } });
     const context = { cwd, hasUI: false, model: { provider: "root", id: "model" }, modelRegistry: { getAll: () => [{ provider: "root", id: "model" }, { provider: "old", id: "model" }, { provider: "new", id: "model" }], getAvailable: () => [{ provider: "root", id: "model" }, { provider: "new", id: "model" }] }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
     assert.ok(start && command);
@@ -193,7 +194,7 @@ void test("production budget resume cancellation aborts a dynamic alias resolver
   let shutdown: (() => Promise<void>) | undefined;
   try {
     const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-    workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, undefined, undefined, agentDir);
+    workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home, undefined, undefined, agentDir);
     registerWorkflowExtension({ version: "1.0.0", headline: "Resume cancellation policy", modelAliases: { "cancel-model": { resolve: ({ signal }) => new Promise<string>((_resolve, reject) => { markStarted(); signal.addEventListener("abort", () => { reject(new WorkflowError("CANCELLED", "cancelled")); }, { once: true }); }) } } });
     const resume = tools.find(({ name }) => name === "workflow_resume")?.execute;
     assert.ok(resume);
@@ -212,7 +213,7 @@ void test("production budget resume cancellation aborts a dynamic alias resolver
 void test("inline workflow args cross the production tool boundary and omitted args become null", async () => {
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> }> = [];
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-inline-home-"));
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never, home);
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} }), home);
   const execute = tools.find(({ name }) => name === "workflow")?.execute;
   assert.ok(execute);
   const context = { cwd: mkdtempSync(join(tmpdir(), "pi-extensible-workflows-inline-")), model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
@@ -342,7 +343,7 @@ void test("extension roles flow through host guidance, preflight, launch snapsho
     inputs.push(input);
     return { sessionId: input.sessionLabel, sessionFile: `/sessions/${input.sessionLabel}.jsonl`, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async (text) => { prompts.push(text); }, steer: async () => {}, dispose() {} };
   };
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["read", "grep", "workflow"], on(name: string, candidate: unknown) { if (name === "before_agent_start") guidanceHandler = candidate as typeof guidanceHandler; if (name === "session_shutdown") shutdown = candidate as typeof shutdown; } } as never, home, async () => {}, testTransport(createSession), agentDir);
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["read", "grep", "workflow"], on(name: string, candidate: unknown) { if (name === "before_agent_start") guidanceHandler = candidate as typeof guidanceHandler; if (name === "session_shutdown") shutdown = candidate as typeof shutdown; } }), home, async () => {}, testTransport(createSession), agentDir);
   registerWorkflowExtension({ version: "1.0.0", headline: "Packaged roles", roleDirectories: [pathToFileURL(roleDirectory)] });
   assert.ok(guidanceHandler);
   const guidance = guidanceHandler({ systemPrompt: "BASE SYSTEM" }, { cwd, isProjectTrusted: () => true })?.systemPrompt ?? "";

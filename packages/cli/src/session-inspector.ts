@@ -28,22 +28,35 @@ function text(content: unknown): string {
   return parts.flatMap((part) => typeof part === "object" && part !== null && "type" in part && part.type === "text" && "text" in part && typeof part.text === "string" ? [part.text] : []).join("");
 }
 
-function transcriptPartLines(part: unknown): string[] {
-  if (typeof part !== "object" || part === null || !("type" in part)) return [];
-  const value = part as Record<string, unknown>;
-  if (value.type === "text" && typeof value.text === "string") return value.text.split("\n");
-  if (value.type === "thinking" && typeof value.thinking === "string") return ["Thinking:", ...value.thinking.split("\n")];
-  if (value.type === "toolCall" && typeof value.name === "string") return [`Tool call: ${value.name}`, JSON.stringify(value.arguments, null, 2)];
-  if (value.type === "image") return ["[image]"];
-  return [];
+type TranscriptPart =
+  | { type: "text"; text: string }
+  | { type: "thinking"; thinking: string }
+  | { type: "toolCall"; name: string; arguments?: unknown }
+  | { type: "image" };
+type TranscriptMessage = { role?: string; toolName?: string; customType?: string; content?: unknown };
+function isTranscriptPart(value: unknown): value is TranscriptPart {
+  if (typeof value !== "object" || value === null || !("type" in value)) return false;
+  if (value.type === "text") return "text" in value && typeof value.text === "string";
+  if (value.type === "thinking") return "thinking" in value && typeof value.thinking === "string";
+  if (value.type === "toolCall") return "name" in value && typeof value.name === "string";
+  return value.type === "image";
 }
-
+function isTranscriptMessage(value: unknown): value is TranscriptMessage {
+  if (typeof value !== "object" || value === null) return false;
+  return (!(("role" in value) && value.role !== undefined) || typeof value.role === "string") && (!(("toolName" in value) && value.toolName !== undefined) || typeof value.toolName === "string") && (!(("customType" in value) && value.customType !== undefined) || typeof value.customType === "string");
+}
+function transcriptPartLines(part: unknown): string[] {
+  if (!isTranscriptPart(part)) return [];
+  if (part.type === "text") return part.text.split("\n");
+  if (part.type === "thinking") return ["Thinking:", ...part.thinking.split("\n")];
+  if (part.type === "toolCall") return [`Tool call: ${part.name}`, JSON.stringify(part.arguments, null, 2)];
+  return ["[image]"];
+}
 function transcriptMessageLines(message: unknown): string[] {
-  if (typeof message !== "object" || message === null) return ["(invalid message)"];
-  const value = message as Record<string, unknown>;
-  const role = typeof value.role === "string" ? value.role : "message";
-  const label = role === "toolResult" && typeof value.toolName === "string" ? `${role}: ${value.toolName}` : role === "custom" && typeof value.customType === "string" ? `${role}: ${value.customType}` : role;
-  const content = Array.isArray(value.content) ? value.content.flatMap(transcriptPartLines) : typeof value.content === "string" ? value.content.split("\n") : [];
+  if (!isTranscriptMessage(message)) return ["(invalid message)"];
+  const role = message.role ?? "message";
+  const label = role === "toolResult" && message.toolName !== undefined ? `${role}: ${message.toolName}` : role === "custom" && message.customType !== undefined ? `${role}: ${message.customType}` : role;
+  const content = Array.isArray(message.content) ? message.content.flatMap(transcriptPartLines) : typeof message.content === "string" ? message.content.split("\n") : [];
   return [`[${label}]`, ...(content.length ? content : ["(empty)"])];
 }
 
@@ -66,9 +79,13 @@ function mergedModels(groups: readonly (readonly ModelUsage[])[]): ModelUsage[] 
   return [...totals].map(([model, cost]) => ({ model, cost })).sort((a, b) => b.cost - a.cost || a.model.localeCompare(b.model));
 }
 
-const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+type ThinkingLevel = NonNullable<ModelSpec["thinking"]>;
+const thinkingLevels: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+function isThinkingLevel(value: unknown): value is ThinkingLevel {
+  return typeof value === "string" && thinkingLevels.some((level) => level === value);
+}
 function parsedThinking(value: unknown): ModelSpec["thinking"] | undefined {
-  return typeof value === "string" && thinkingLevels.includes(value as (typeof thinkingLevels)[number]) ? value as ModelSpec["thinking"] : undefined;
+  return isThinkingLevel(value) ? value : undefined;
 }
 
 function modelName(provider: unknown, model: unknown): string | undefined {

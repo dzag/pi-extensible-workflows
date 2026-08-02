@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createAmbientCaseWorktree, createAmbientFixtureRepository, removeAmbientCaseWorktree, removeAmbientFixtureRepository } from "../src/ambient-workflow-evals.js";
 import { resolveWorkflowSkillPath } from "../src/workflow-evals.js";
+import { decodeTestJsonRecord } from "./support.js";
 
 const enabled = process.env.PI_WORKFLOW_REAL_SESSION === "1";
 const functionName = process.env.PI_WORKFLOW_TEST_FUNCTION ?? "tddDev";
@@ -70,7 +71,7 @@ void test(`a clean real Pi session composes ${functionName} in a workflow script
       if (!line || workflowCall) continue;
       lines.push(line);
       try {
-        const event = JSON.parse(line) as Record<string, unknown>;
+        const event = decodeTestJsonRecord(line);
         if (event.type === "tool_execution_start" && event.toolName === "workflow") {
           workflowCall = event;
           writeFileSync(tracePath, `${lines.join("\n")}\n`, { mode: 0o600 });
@@ -88,8 +89,8 @@ void test(`a clean real Pi session composes ${functionName} in a workflow script
     if (!workflowCall && buffer) lines.push(buffer);
     if (!existsSync(tracePath)) writeFileSync(tracePath, `${lines.join("\n")}\n`, { mode: 0o600 });
     assert.ok(workflowCall, `Pi exited ${String(exitCode)} before calling workflow. stderr: ${stderr}\nTrace: ${tracePath}`);
-    assert.doesNotThrow(() => { for (const line of lines) JSON.parse(line); });
-    const catalogCalls = lines.map((line) => JSON.parse(line) as Record<string, unknown>).filter((event) => event.type === "tool_execution_start" && event.toolName === "workflow_catalog");
+    assert.doesNotThrow(() => { for (const line of lines) decodeTestJsonRecord(line); });
+    const catalogCalls = lines.map((line) => decodeTestJsonRecord(line)).filter((event) => event.type === "tool_execution_start" && event.toolName === "workflow_catalog");
     assert.ok(catalogCalls.length > 0, `workflow_catalog was not called. Trace: ${tracePath}`);
     const callArgs = workflowCall.args as { name?: unknown; script?: unknown; workflow?: unknown };
     assert.equal(callArgs.workflow, undefined, `The removed workflow selector was used. Trace: ${tracePath}`);

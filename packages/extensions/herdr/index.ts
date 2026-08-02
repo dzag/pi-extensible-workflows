@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { createServer } from "node:net";
 import type { Socket } from "node:net";
 import { join } from "node:path";
+import { createExtensionRuntime, ExtensionRunner, ModelRegistry, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AgentEndEvent, AgentStartEvent, ExtensionAPI, ExtensionContext, InlineExtension, SessionShutdownEvent, SessionStartEvent, TurnEndEvent } from "@earendil-works/pi-coding-agent";
 import {
   WORKFLOW_RUN_COMPLETED_EVENT,
@@ -126,6 +127,31 @@ function sessionPath(reference: WorkflowAgentSessionReference): string | undefin
   const locator = reference.locator;
   return locator && typeof locator === "object" && !Array.isArray(locator) && typeof locator.sessionFile === "string" ? locator.sessionFile : undefined;
 }
+
+async function createBridgeContext(session: HerdrSession, prepared: Readonly<PreparedAgentSession>): Promise<(signal: AbortSignal, abort: () => void) => ExtensionContext> {
+  const reference = session.reference;
+  const path = sessionPath(reference);
+  const sessionManager = path && existsSync(path) ? SessionManager.open(path, undefined, prepared.cwd) : SessionManager.inMemory(prepared.cwd, { id: reference.sessionId });
+  const directory = prepared.agentDir ?? agentDir();
+  const modelRuntime = await ModelRuntime.create({ authPath: join(directory, "auth.json"), modelsPath: join(directory, "models.json") });
+  const modelRegistry = new ModelRegistry(modelRuntime);
+  const model = modelRegistry.find(prepared.model.provider, prepared.model.model);
+  const runner = new ExtensionRunner([], createExtensionRuntime(), prepared.cwd, sessionManager, modelRegistry);
+  runner.setUIContext(undefined, "tui");
+  const baseContext = runner.createContext();
+  return (signal, abort) => new Proxy(baseContext, {
+    get(target, property, receiver) {
+      if (property === "model") return model;
+      if (property === "thinkingLevel") return prepared.model.thinking;
+      if (property === "isIdle") return () => false;
+      if (property === "isProjectTrusted") return () => prepared.resourcePolicy?.projectTrusted ?? true;
+      if (property === "signal") return signal;
+      if (property === "abort") return abort;
+      const reflected: unknown = Reflect.get(target, property, receiver);
+      return reflected;
+    },
+  });
+}
 function inspectSessionCommand(reference: WorkflowAgentSessionReference): string {
   const source = sessionPath(reference) ?? reference.sessionId;
   return `pi --session ${quote(source)} --tools ${quote("read,grep,find,ls")}`;
@@ -154,9 +180,10 @@ function toolBridgeRequest(value: unknown): ToolBridgeRequest {
   throw new Error(`Unknown Herdr tool: ${String(name)}`);
 }
 
-async function createToolBridge(prepared: Readonly<PreparedAgentSession>): Promise<ExtensionBridge | undefined> {
+async function createToolBridge(session: HerdrSession, prepared: Readonly<PreparedAgentSession>): Promise<ExtensionBridge | undefined> {
   const definitions: HerdrToolDefinition[] = [...(prepared.customTools ?? []), ...(prepared.resultTool ? [prepared.resultTool] : [])];
   if (!definitions.length) return undefined;
+  const bridgeContext = await createBridgeContext(session, prepared);
   const specs = definitions.map((definition: HerdrToolDefinition) => {
     const { name, label, description, promptSnippet, promptGuidelines, parameters, renderShell, executionMode } = definition;
     return { name, label, description, ...(promptSnippet === undefined ? {} : { promptSnippet }), ...(promptGuidelines === undefined ? {} : { promptGuidelines }), parameters, ...(renderShell === undefined ? {} : { renderShell }), ...(executionMode === undefined ? {} : { executionMode }) };
@@ -179,7 +206,7 @@ async function createToolBridge(prepared: Readonly<PreparedAgentSession>): Promi
         const request = toolBridgeRequest(value);
         const definition = definitions.find(({ name }) => name === request.name);
         if (!definition) { send({ type: "error", error: `Unknown Herdr tool: ${request.name}` }); return; }
-        const result = await definition.execute(request.toolCallId, request.params, controller.signal, (update: unknown) => { send({ type: "update", value: update }); }, undefined as never);
+        const result = await definition.execute(request.toolCallId, request.params, controller.signal, (update: unknown) => { send({ type: "update", value: update }); }, bridgeContext(controller.signal, () => { controller.abort(); }));
         send({ type: "result", value: result });
       } catch (error) {
         send({ type: "error", error: error instanceof Error ? error.message : String(error) });
@@ -264,7 +291,7 @@ function createWorkflowWorkspaces(runner: HerdrCommandRunner): WorkspaceManager 
 
 async function launchPane({ session, prepared, identity, run, attempt, runner, fullyInspectable, env, signal, prompt, workspaces, tuiIndex, tuiLabel, directPrompt = false, onStatus }: LaunchPaneOptions): Promise<PaneHandle> {
   const label = fullyInspectable && typeof tuiIndex === "number" && Number.isInteger(tuiIndex) && tuiIndex > 0 && typeof tuiLabel === "string" && tuiLabel.trim() ? `#${String(tuiIndex)} ${tuiLabel}` : fullyInspectable ? breadcrumbLabel(identity, attempt) : prepared.sessionLabel;
-  const bridge = await createToolBridge(prepared);
+  const bridge = await createToolBridge(session, prepared);
   let inlineBridge: ExtensionBridge | undefined;
   let commandFiles: CommandFiles | undefined;
   let pane: string | undefined;

@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { testExtensionApi } from "./support.js";
 import workflowExtension, { createLaunchSnapshot, DEFAULT_SETTINGS, RunStore, runWorkflow, validateCheckpoint, WorkflowError } from "../src/index.js";
 import { listRunIds } from "../src/persistence.js";
 
@@ -23,13 +24,13 @@ void test("navigator reviews each pending checkpoint before answering", async ()
   const notices: string[] = [];
   const pi = {
     registerTool() {},
-    registerCommand(_name: string, options: { handler: typeof command }) { command = options.handler; },
+    registerCommand(_name: string, options: { handler: NonNullable<typeof command> }) { command = options.handler; },
     on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; },
-    getThinkingLevel: () => "medium",
+    getThinkingLevel: () => "medium" as const,
     getActiveTools: () => ["workflow"],
     sendMessage() {},
   };
-  workflowExtension(pi as never, home);
+  workflowExtension(testExtensionApi(pi), home);
 
   let selectCalls = 0;
   let customCalls = 0;
@@ -136,10 +137,10 @@ void test("production checkpoints resolve in foreground navigator and background
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   const pi = {
     registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {},
-    getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "workflow_respond"],
+    getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow", "workflow_respond"],
     sendMessage() {},
   };
-  workflowExtension(pi as never, home);
+  workflowExtension(testExtensionApi(pi), home);
   const workflow = tools.find(({ name }) => name === "workflow");
   const respond = tools.find(({ name }) => name === "workflow_respond");
   assert.ok(workflow && respond);
@@ -175,8 +176,8 @@ void test("production checkpoints resolve in foreground navigator and background
 void test("two concurrent checkpoints keep the run awaiting until both are answered", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-concurrent-checkpoints-"));
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  const pi = { registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "workflow_respond"], sendMessage() {} };
-  workflowExtension(pi as never, home);
+  const pi = { registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow", "workflow_respond"], sendMessage() {} };
+  workflowExtension(testExtensionApi(pi), home);
   const workflow = tools.find(({ name }) => name === "workflow");
   const respond = tools.find(({ name }) => name === "workflow_respond");
   assert.ok(workflow && respond);
@@ -200,16 +201,17 @@ void test("a checkpoint answer persisted before resolver registration cannot han
   const completion = new Promise<void>((resolve) => { completed = resolve; });
   const pi = {
     registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {},
-    getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "workflow_respond"],
+    getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow", "workflow_respond"],
     sendMessage(message: { content: string }) { if (message.content.startsWith("Workflow race-gate completed:")) completed(); },
   };
-  workflowExtension(pi as never, home);
+  workflowExtension(testExtensionApi(pi), home);
   const workflow = tools.find(({ name }) => name === "workflow");
   const respond = tools.find(({ name }) => name === "workflow_respond");
   assert.ok(workflow && respond);
   let releaseRunId!: (runId: string) => void;
   const runIdReady = new Promise<string>((resolve) => { releaseRunId = resolve; });
   const updateState = Object.getOwnPropertyDescriptor(RunStore.prototype, "updateState")?.value as RunStore["updateState"];
+  const restoreUpdateState = () => { RunStore.prototype.updateState = updateState; };
   let answered = false;
   RunStore.prototype.updateState = async function (update) {
     const run = await updateState.call(this, update);
@@ -229,7 +231,7 @@ void test("a checkpoint answer persisted before resolver registration cannot han
     assert.equal((await new RunStore(home, "session", result.details.runId, home).load()).run.state, "completed");
   } finally {
     clearTimeout(timeout);
-    RunStore.prototype.updateState = updateState;
+    restoreUpdateState();
   }
 });
 
@@ -242,10 +244,10 @@ void test("background delivery is minimal and capped while foreground stays inli
   let toolResultHandler: ((event: { toolName: string; toolCallId: string; isError: boolean }) => Promise<unknown>) | undefined;
   const pi = {
     registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as typeof toolResultHandler; },
-    getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"],
+    getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"],
     sendMessage(message: { content: string }, options: { deliverAs: string; triggerTurn: boolean }) { messages.push({ message, options }); markDelivered(); }
   };
-  workflowExtension(pi as never, home);
+  workflowExtension(testExtensionApi(pi), home);
   const execute = tools.find(({ name }) => name === "workflow")?.execute;
   assert.ok(execute);
   const ctx = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
@@ -275,10 +277,10 @@ void test("promotes detached foreground completion and failure to follow-up deli
   };
   const pi = {
     registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {},
-    getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"],
+    getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"],
     sendMessage(message: { content: string }, options: { deliverAs: string; triggerTurn: boolean }) { messages.push({ message, options }); },
   };
-  workflowExtension(pi as never, home);
+  workflowExtension(testExtensionApi(pi), home);
   const execute = tools.find(({ name }) => name === "workflow")?.execute;
   assert.ok(execute);
   const ctx = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
@@ -297,11 +299,12 @@ void test("suppresses a queued foreground failure after the run is resumed", asy
   const tools: Tool[] = [];
   const messages: string[] = [];
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-stale-failure-delivery-"));
-  workflowExtension({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  workflowExtension(testExtensionApi({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] }), home);
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
   const updateState = Object.getOwnPropertyDescriptor(RunStore.prototype, "updateState")?.value as RunStore["updateState"];
+  const restoreUpdateState = () => { RunStore.prototype.updateState = updateState; };
   let releasePending!: () => void;
   let pendingReached!: () => void;
   const pending = new Promise<void>((resolve) => { pendingReached = resolve; });
@@ -329,7 +332,7 @@ void test("suppresses a queued foreground failure after the run is resumed", asy
     assert.equal((await store.load()).run.delivery?.state, "pending");
   } finally {
     releasePending();
-    RunStore.prototype.updateState = updateState;
+    restoreUpdateState();
   }
 });
 void test("does not undo a competing terminal failure delivery during stale suppression", async () => {
@@ -337,11 +340,12 @@ void test("does not undo a competing terminal failure delivery during stale supp
   const tools: Tool[] = [];
   const messages: string[] = [];
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-competing-failure-delivery-"));
-  workflowExtension({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  workflowExtension(testExtensionApi({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] }), home);
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
   const load = Object.getOwnPropertyDescriptor(RunStore.prototype, "load")?.value as RunStore["load"];
+  const restoreLoad = () => { RunStore.prototype.load = load; };
   let injected = false;
   let markInjected!: () => void;
   const injection = new Promise<void>((resolve) => { markInjected = resolve; });
@@ -363,7 +367,7 @@ void test("does not undo a competing terminal failure delivery during stale supp
     assert.deepEqual(messages, []);
     assert.equal((await new RunStore(home, "session", result.details.runId, home).load()).run.delivery?.state, "delivered");
   } finally {
-    RunStore.prototype.load = load;
+    restoreLoad();
   }
 });
 
@@ -375,7 +379,7 @@ void test("delivers a later cold-resume failure after an earlier failure follow-
   const messages: string[] = [];
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let shutdown: (() => Promise<void>) | undefined;
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] }), home);
   const context = { cwd: home, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
   try {
     assert.ok(start);
@@ -396,7 +400,7 @@ void test("human interrupted-run resume delivers a later failure", async () => {
   const messages: string[] = [];
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let shutdown: (() => Promise<void>) | undefined;
-  workflowExtension({ registerTool() {}, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  workflowExtension(testExtensionApi({ registerTool() {}, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage(message: { content: string }) { messages.push(message.content); }, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] }), home);
   const context = { cwd: home, hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { select: async (_prompt: string, options: string[]) => options[0], notify() {} } };
   try {
     assert.ok(start);
@@ -413,11 +417,11 @@ void test("foreground workflow logs stay in the live workflow item", async () =>
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   const entries: Array<{ type: string; data: LogData }> = [];
   const updates: Array<{ details: { run: { events?: readonly { type: string; message: string; timestamp?: number }[] } } }> = [];
-  workflowExtension({
+  workflowExtension(testExtensionApi({
     registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {},
     appendEntry(type: string, data: LogData) { entries.push({ type, data }); },
-    getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"],
-  } as never, home);
+    getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"],
+  }), home);
   const execute = tools.find(({ name }) => name === "workflow")?.execute;
   assert.ok(execute);
   const result = await execute("id", { name: "logger", script: `await log("working"); await log("working"); return true;`, foreground: true }, new AbortController().signal, (update: (typeof updates)[number]) => { updates.push(update); }, { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }) as { details: { run: { events?: readonly { type: string; message: string; timestamp?: number }[] } } };
@@ -438,10 +442,10 @@ void test("foreground workflow failure keeps logs in the workflow item", async (
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-foreground-failure-log-"));
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   let toolResultHandler: ((event: { toolName: string; toolCallId: string; isError: boolean }) => Promise<unknown>) | undefined;
-  workflowExtension({
+  workflowExtension(testExtensionApi({
     registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as typeof toolResultHandler; },
-    getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"],
-  } as never, home);
+    getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"],
+  }), home);
   const execute = tools.find(({ name }) => name === "workflow")?.execute;
   assert.ok(execute);
   await assert.rejects(execute("failure", { name: "failure", script: `await log("before failure"); throw new Error("failure");`, foreground: true }, new AbortController().signal, () => {}, { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } }));
@@ -455,12 +459,12 @@ void test("background workflow logs append capped TUI-only transcript entries", 
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   const entries: Array<{ type: string; data: LogData }> = [];
   let renderer: ((entry: { data?: LogData }, options: unknown, theme: unknown) => { render(width: number): string[] }) | undefined;
-  workflowExtension({
+  workflowExtension(testExtensionApi({
     registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {},
     registerEntryRenderer(type: string, candidate: NonNullable<typeof renderer>) { assert.equal(type, "workflow-log"); renderer = candidate; },
     appendEntry(type: string, data: LogData) { entries.push({ type, data }); },
-    getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"],
-  } as never, home);
+    getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"],
+  }), home);
   const execute = tools.find(({ name }) => name === "workflow")?.execute;
   assert.ok(execute);
   await execute("id", { name: "logger", script: `await log("working"); await log("😀".repeat(2000)); return true;`, foreground: false }, new AbortController().signal, undefined, { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } });

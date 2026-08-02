@@ -4,11 +4,15 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { callUnchecked, executeToolCall, testExtensionContext, testExtensionApi } from "./support.js";
+import { Compile } from "typebox/compile";
 import { inspectWorkflowScript, validateWorkflowLaunch, WorkflowError } from "../src/index.js";
 import evalCaptureExtension from "../src/eval-capture-extension.js";
 import { assertEvalScriptSafe, captureEvalCase, captureValidationReports, evalExpectationErrors, extractCapturedWorkflows, extractParentOracle, extractParentToolCalls, findSessionFile, formatEvalSummary, INITIAL_WORKFLOW_EVAL_CASES, loadWorkflowEvalCases, matchesJsonResult, matchesJsonSchema, matchesOutputSchema, parseSemanticJudge, recoverySelectionErrors, replayExpectationErrors, replayWorkflowScript, resolveWorkflowSkillPath, selectStaticCandidate, staticExpectationResults, runIsolatedProcess, runWorkflowEvals, validateWorkflowEvalCases, type ParentOracle } from "../src/workflow-evals.js";
 
 const schema = { type: "object", properties: { answer: { type: "number" }, label: { type: "string" } }, required: ["answer", "label"], additionalProperties: false };
+function assertRecord(value: unknown): asserts value is Record<string, unknown> { assert.ok(typeof value === "object" && value !== null && !Array.isArray(value)); }
+function assertArray(value: unknown): asserts value is unknown[] { assert.ok(Array.isArray(value)); }
 void test("defines the cheap initial evaluation matrix", () => {
   assert.deepEqual(INITIAL_WORKFLOW_EVAL_CASES.map(({ id }) => id), ["custom-model-read", "direct-answer", "mixed-parallel-pipeline", "output-schema", "parallel", "pipeline", "ready-for-agent-parallel-merge", "recovery-completed-worktree", "recovery-failed-run", "required-role", "role-model-mixed", "two-agents"]);
   assert.equal(INITIAL_WORKFLOW_EVAL_CASES.every(({ timeoutMs, maxCost }) => timeoutMs === undefined && maxCost > 0), true);
@@ -76,7 +80,7 @@ void test("validates programmatic case overrides before starting Pi", async () =
   chmodSync(piPath, 0o755);
   try {
     const invalid = { id: "invalid", prompt: "ignored", maxCost: 1, expectations: { unknown: true } };
-    await assert.rejects(() => runWorkflowEvals({ model: "fake/model", piCommand: piPath, cases: [invalid] as never }), /options\.cases\[0\].*expectations\.unknown/);
+    await assert.rejects(() => callUnchecked(runWorkflowEvals, undefined, [{ model: "fake/model", piCommand: piPath, cases: [invalid] }]), /options\.cases\[0\].*expectations\.unknown/);
     assert.equal(existsSync(marker), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -111,10 +115,10 @@ void test("extracts the parent oracle in assistant-batch and content-part order"
 });
 void test("captures exact recovery selections without executing recovery", async () => {
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ details?: unknown }> }> = [];
-  evalCaptureExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, getActiveTools: () => ["workflow", "workflow_retry"] } as never);
+  evalCaptureExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, getActiveTools: () => ["workflow", "workflow_retry"] }));
   const retry = tools.find(({ name }) => name === "workflow_retry");
   assert.ok(retry);
-  const result = await retry.execute("retry-call", { runId: "failed-run-42" }, new AbortController().signal, undefined, {});
+  const result = await executeToolCall(retry, "retry-call", { runId: "failed-run-42" }, testExtensionContext) as { details?: unknown };
   assert.deepEqual(result.details, { captured: true, captureIdentity: "pi-extensible-workflows-eval-capture-v1", realWorkflowAgentsLaunched: 0, selection: { tool: "workflow_retry", arguments: { runId: "failed-run-42" } } });
   const oracle = extractParentOracle([
     { type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "workflow_retry", arguments: { runId: "failed-run-42" } }] } },
@@ -171,21 +175,32 @@ void test("captures production-validated calls without execution and judges the 
   const piPath = join(root, "fake-pi.mjs");
   writeFileSync(piPath, `#!/usr/bin/env node\nimport { mkdirSync, writeFileSync } from "node:fs"; import { join } from "node:path"; const args = process.argv.slice(2); const value = name => args[args.indexOf(name) + 1]; if (args.includes("--no-tools")) { console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify({ criteria: [{ id: "intent", pass: true, evidence: "reviewer agent returns the review" }] }) }], provider: "fake", model: "judge", usage: { input: 5, output: 6, cacheRead: 0, cacheWrite: 0, cost: { total: 0.02 } } } })); process.exit(0); } const sessionDir = value("--session-dir"); const id = value("--session-id"); if (!value("--skill")?.endsWith("skills/pi-extensible-workflows/SKILL.md")) process.exit(2); if (!value("--extension")?.endsWith("/eval-capture-extension.js")) process.exit(3); mkdirSync(sessionDir, { recursive: true }); const script = 'return await agent("fake", { role: "reviewer" });'; const rows = [{ type: "session", version: 3, id, timestamp: new Date().toISOString(), cwd: process.cwd() }, { type: "message", id: "bad", parentId: null, timestamp: new Date().toISOString(), message: { role: "assistant", content: [{ type: "toolCall", id: "bad-call", name: "workflow", arguments: { script } }], provider: "fake", model: "parent", usage: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } } } }, { type: "message", id: "bad-result", parentId: "bad", timestamp: new Date().toISOString(), message: { role: "toolResult", toolCallId: "bad-call", toolName: "workflow", content: [{ type: "text", text: "pi-extensible-workflows-eval-capture-v1:INVALID_METADATA: Inline workflows require name" }], isError: true } }, { type: "message", id: "good", parentId: "bad-result", timestamp: new Date().toISOString(), message: { role: "assistant", content: [{ type: "toolCall", id: "good-call", name: "workflow", arguments: { name: "review", script } }], provider: "fake", model: "parent", usage: { input: 2, output: 4, cacheRead: 0, cost: { total: 0.01 } } } }, { type: "message", id: "good-result", parentId: "good", timestamp: new Date().toISOString(), message: { role: "toolResult", toolCallId: "good-call", toolName: "workflow", content: [{ type: "text", text: "captured" }], details: { captureIdentity: "pi-extensible-workflows-eval-capture-v1", realWorkflowAgentsLaunched: 0, validation: { valid: true, script } }, isError: false } }]; writeFileSync(join(sessionDir, "parent.jsonl"), rows.map(JSON.stringify).join("\\n") + "\\n");`);
   chmodSync(piPath, 0o755);
-  const result = await runIsolatedProcess<{ status: string; workflows: unknown[]; productionValidation: Array<{ valid: boolean; errorCode?: string }>; semanticJudge?: { criteria: unknown[] }; metrics: { candidateCallIndices: number[]; invalidWorkflowCallCount: number; surplusWorkflowCallCount: number; parentOutputTokensThroughCandidate: number }; accounting: { totalTokens: number; cost: number }; cleanup: { captureIdentityVerified: boolean; realWorkflowAgentsLaunched: number; tempRootRemoved: boolean } }>({ case: { id: "capture", prompt: "review this", timeoutMs: 2_000, maxCost: 1, expectations: { workflowCallCount: { min: 1 }, requiredRoles: ["reviewer"] }, semanticCriteria: [{ id: "intent", description: "Return a reviewer assessment." }] }, model: "fake/model", piCommand: piPath, maxCost: 1 }, { childPath: join(process.cwd(), "dist/src/workflow-evals-child.js"), timeoutMs: 5_000 });
-  assert.ok(result.value);
+  const result = await runIsolatedProcess({ case: { id: "capture", prompt: "review this", timeoutMs: 2_000, maxCost: 1, expectations: { workflowCallCount: { min: 1 }, requiredRoles: ["reviewer"] }, semanticCriteria: [{ id: "intent", description: "Return a reviewer assessment." }] }, model: "fake/model", piCommand: piPath, maxCost: 1 }, { childPath: join(process.cwd(), "dist/src/workflow-evals-child.js"), timeoutMs: 5_000 });
+  assertRecord(result.value);
   assert.equal(result.value.status, "passed");
+  assertArray(result.value.workflows);
   assert.equal(result.value.workflows.length, 2);
+  assertArray(result.value.productionValidation);
   assert.deepEqual(result.value.productionValidation, [{ callIndex: 0, valid: false, errorCode: "INVALID_METADATA", message: "pi-extensible-workflows-eval-capture-v1:INVALID_METADATA: Inline workflows require name" }, { callIndex: 1, valid: true }]);
+  assertRecord(result.value.metrics);
+  assertArray(result.value.metrics.candidateCallIndices);
   assert.deepEqual(result.value.metrics.candidateCallIndices, [1]);
   assert.equal(result.value.metrics.invalidWorkflowCallCount, 1);
   assert.equal(result.value.metrics.surplusWorkflowCallCount, 0);
   assert.equal(result.value.metrics.parentOutputTokensThroughCandidate, 7);
-  assert.equal(result.value.semanticJudge?.criteria.length, 1);
-  assert.equal(result.value.accounting.totalTokens, 22);
-  assert.equal(result.value.accounting.cost, 0.04);
-  assert.equal(result.value.cleanup.captureIdentityVerified, true);
-  assert.equal(result.value.cleanup.realWorkflowAgentsLaunched, 0);
-  assert.equal(result.value.cleanup.tempRootRemoved, true);
+  const semanticJudge = result.value.semanticJudge;
+  assertRecord(semanticJudge);
+  assertArray(semanticJudge.criteria);
+  assert.equal(semanticJudge.criteria.length, 1);
+  const accounting = result.value.accounting;
+  assertRecord(accounting);
+  assert.equal(accounting.totalTokens, 22);
+  assert.equal(accounting.cost, 0.04);
+  const cleanup = result.value.cleanup;
+  assertRecord(cleanup);
+  assert.equal(cleanup.captureIdentityVerified, true);
+  assert.equal(cleanup.realWorkflowAgentsLaunched, 0);
+  assert.equal(cleanup.tempRootRemoved, true);
 });
 
 void test("stops after a persisted validated capture without another parent turn", async () => {
@@ -241,14 +256,21 @@ void test("selects the required valid workflow set and records surplus valid cal
     "writeFileSync(join(sessionDir, 'parent.jsonl'), rows.map(JSON.stringify).join('\\n') + '\\n');",
   ].join("\n"));
   chmodSync(piPath, 0o755);
-  const result = await runIsolatedProcess<{ status: string; workflows: unknown[]; productionValidation: Array<{ valid: boolean }>; semanticJudge?: { criteria: unknown[] }; metrics: { candidateCallIndices: number[]; surplusWorkflowCallCount: number }; }>({ case: { id: "multiple-valid", prompt: "delegate twice", timeoutMs: 2_000, maxCost: 1, expectations: { workflowCallCount: { min: 2 }, minimumAgentCalls: 2 }, expectedWorkflowCalls: 2, semanticCriteria: [{ id: "intent", description: "Use both results." }] }, model: "fake/model", piCommand: piPath, maxCost: 1 }, { childPath: join(process.cwd(), "dist/src/workflow-evals-child.js"), timeoutMs: 5_000 });
-  assert.ok(result.value);
+  const result = await runIsolatedProcess({ case: { id: "multiple-valid", prompt: "delegate twice", timeoutMs: 2_000, maxCost: 1, expectations: { workflowCallCount: { min: 2 }, minimumAgentCalls: 2 }, expectedWorkflowCalls: 2, semanticCriteria: [{ id: "intent", description: "Use both results." }] }, model: "fake/model", piCommand: piPath, maxCost: 1 }, { childPath: join(process.cwd(), "dist/src/workflow-evals-child.js"), timeoutMs: 5_000 });
+  assertRecord(result.value);
   assert.equal(result.value.status, "passed");
+  assertArray(result.value.workflows);
   assert.equal(result.value.workflows.length, 3);
-  assert.equal(result.value.productionValidation.filter(({ valid }) => valid).length, 3);
+  assertArray(result.value.productionValidation);
+  assert.equal(result.value.productionValidation.filter((item) => { assertRecord(item); return item.valid === true; }).length, 3);
+  assertRecord(result.value.metrics);
+  assertArray(result.value.metrics.candidateCallIndices);
   assert.deepEqual(result.value.metrics.candidateCallIndices, [0, 1]);
   assert.equal(result.value.metrics.surplusWorkflowCallCount, 1);
-  assert.equal(result.value.semanticJudge?.criteria.length, 1);
+  const semanticJudge = result.value.semanticJudge;
+  assertRecord(semanticJudge);
+  assertArray(semanticJudge.criteria);
+  assert.equal(semanticJudge.criteria.length, 1);
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -258,11 +280,13 @@ void test("skips the semantic judge when every captured call fails production va
   const marker = join(root, "judge-ran");
   writeFileSync(piPath, `#!/usr/bin/env node\nimport { mkdirSync, writeFileSync } from "node:fs"; import { join } from "node:path"; const args = process.argv.slice(2); const value = name => args[args.indexOf(name) + 1]; if (args.includes("--no-tools")) { writeFileSync(${JSON.stringify(marker)}, "unexpected"); process.exit(9); } const dir = value("--session-dir"); const id = value("--session-id"); mkdirSync(dir, { recursive: true }); const rows = [{ type: "session", version: 3, id, cwd: process.cwd() }, { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "bad", name: "workflow", arguments: { script: "return 1" } }], provider: "fake", model: "parent", usage: { input: 1, output: 1, cost: { total: 0.01 } } } }, { type: "message", message: { role: "toolResult", toolCallId: "bad", toolName: "workflow", content: [{ type: "text", text: "pi-extensible-workflows-eval-capture-v1:INVALID_METADATA: Inline workflows require name" }], isError: true } }]; writeFileSync(join(dir, "parent.jsonl"), rows.map(JSON.stringify).join("\\n") + "\\n");`);
   chmodSync(piPath, 0o755);
-  const result = await runIsolatedProcess<{ status: string; semanticJudge?: unknown; metrics: { anyValidCandidate: boolean }; errors: string[] }>({ case: { id: "invalid", prompt: "delegate", timeoutMs: 2_000, maxCost: 1, expectations: { workflowCallCount: { min: 1 } }, semanticCriteria: [{ id: "intent", description: "delegate" }] }, model: "fake/model", piCommand: piPath, maxCost: 1 }, { childPath: join(process.cwd(), "dist/src/workflow-evals-child.js"), timeoutMs: 5_000 });
-  assert.ok(result.value);
+  const result = await runIsolatedProcess({ case: { id: "invalid", prompt: "delegate", timeoutMs: 2_000, maxCost: 1, expectations: { workflowCallCount: { min: 1 } }, semanticCriteria: [{ id: "intent", description: "delegate" }] }, model: "fake/model", piCommand: piPath, maxCost: 1 }, { childPath: join(process.cwd(), "dist/src/workflow-evals-child.js"), timeoutMs: 5_000 });
+  assertRecord(result.value);
   assert.equal(result.value.status, "failed");
+  assertRecord(result.value.metrics);
   assert.equal(result.value.metrics.anyValidCandidate, false);
   assert.equal(result.value.semanticJudge, undefined);
+  assertArray(result.value.errors);
   assert.match(result.value.errors.join("\n"), /Catastrophic validity failure/);
   assert.equal(existsSync(marker), false);
   rmSync(root, { recursive: true, force: true });
@@ -311,7 +335,7 @@ void test("replay keeps pipeline stages sequential for each keyed item", async (
 
 void test("replays outputSchema values and checks their shape", async () => {
   const replayed = await replayWorkflowScript(`const result = await agent("count", { role: "reviewer", outputSchema: ${JSON.stringify(schema)} }); return result;`);
-  assert.ok(matchesJsonSchema(schema, replayed.result));
+  assert.ok(matchesJsonSchema(Compile(schema), replayed.result));
   assert.deepEqual(replayed.result, { answer: 1, label: "fake" });
   const firstAgent = replayed.trace.agentCalls[0];
   assert.ok(firstAgent);
@@ -368,10 +392,10 @@ void test("isolates eval cases in separate OS processes and cleans up timed-out 
   const child = mkdtempSync(join(tmpdir(), "pi-workflow-eval-test-child-"));
   const childPath = join(child, "child.mjs");
   writeFileSync(childPath, `import { readFileSync, writeFileSync } from "node:fs"; const input = JSON.parse(readFileSync(process.argv[2], "utf8")); writeFileSync(input.outputPath, JSON.stringify({ pid: process.pid, cwd: process.cwd(), home: process.env.HOME, caseRoot: process.env.PI_WORKFLOW_EVAL_CASE_ROOT, marker: input.payload.marker }));`);
-  const first = await runIsolatedProcess<{ pid: number; cwd: string; home: string; caseRoot: string; marker: string }>({ marker: "first" }, { childPath });
-  const second = await runIsolatedProcess<{ pid: number; cwd: string; home: string; caseRoot: string; marker: string }>({ marker: "second" }, { childPath, timeoutMs: 2_000 });
-  assert.ok(first.value);
-  assert.ok(second.value);
+  const first = await runIsolatedProcess({ marker: "first" }, { childPath });
+  const second = await runIsolatedProcess({ marker: "second" }, { childPath, timeoutMs: 2_000 });
+  assertRecord(first.value);
+  assertRecord(second.value);
   assert.equal(first.value.marker, "first");
   assert.equal(second.value.marker, "second");
   assert.notEqual(first.value.pid, second.value.pid);

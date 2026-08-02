@@ -7,13 +7,31 @@ import type { SessionEntry, SessionInfo } from "@earendil-works/pi-coding-agent"
 import { createLaunchSnapshot, inspectWorkflowScript } from "pi-extensible-workflows";
 import { runCli } from "../src/cli.js";
 import { RunStore } from "pi-extensible-workflows/persistence";
-import { loadSessionReport, matchSession, renderInspector, resolveSession, transcriptLines, type InspectorViewState } from "../src/session-inspector.js";
+import { loadSessionReport, matchSession, renderInspector, resolveSession, transcriptLines, type InspectorViewState, type SessionReport } from "../src/session-inspector.js";
 
 const usage = (cost: number) => ({ input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { input: cost, output: 0, cacheRead: 0, cacheWrite: 0, total: cost } });
 
 function writeJsonl(path: string, rows: readonly unknown[]): void {
   mkdirSync(join(path, ".."), { recursive: true });
   writeFileSync(path, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+}
+
+function sessionReport(workflows: SessionReport["workflows"] = []): SessionReport {
+  return { id: "session", cwd: "/repo", path: "/session.jsonl", cost: 0, models: [], workflows, totalCost: 0, totalModels: [] };
+}
+
+type SessionMessage = Extract<SessionEntry, { type: "message" }>;
+function messageEntry(id: string, message: SessionMessage["message"]): SessionEntry {
+  return { type: "message", id, parentId: null, timestamp: "2026-01-01T00:00:00.000Z", message };
+}
+function userMessageEntry(): SessionEntry {
+  return messageEntry("user", { role: "user", content: "Inspect the API", timestamp: 1 });
+}
+function assistantMessageEntry(): SessionEntry {
+  return messageEntry("assistant", { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/api.ts" } }, { type: "text", text: "I found it." }], api: "openai-responses", provider: "openai", model: "gpt", usage: usage(0), stopReason: "toolUse", timestamp: 2 });
+}
+function toolResultMessageEntry(): SessionEntry {
+  return messageEntry("tool-result", { role: "toolResult", toolCallId: "call-1", toolName: "read", content: [{ type: "text", text: "API source" }], isError: false, timestamp: 3 });
 }
 
 void test("loads workflow scripts, runtime prompts, models, and costs from static artifacts", async () => {
@@ -214,28 +232,23 @@ void test("renders interactive workflow, detail, and syntax-highlighted script v
   assert.match(renderInspector(report, { ...list, view: "script" }, 80, 24, (script) => [`highlight:${script}`]).join("\n"), /highlight:return 1;/);
 });
 void test("session inspector uses labels and omits missing roles consistently", () => {
-  const report = {
-    id: "session", cwd: "/repo", path: "/session.jsonl", cost: 0, models: [], totalCost: 0, totalModels: [],
-    workflows: [{ name: "labels", status: "completed", cost: 0, models: [], calls: [], agents: [{ name: "stale-name", label: "explicit label", state: "completed", model: "provider/worker", cost: 0, attempts: [{ attempt: 1, prompt: "Inspect", model: "provider/worker", cost: 0, models: [] }] }] }],
-  } as Parameters<typeof renderInspector>[0];
+  const report = sessionReport([{
+    name: "labels", status: "completed", cost: 0, models: [], calls: [], agents: [{ name: "stale-name", label: "explicit label", state: "completed", model: "provider/worker", cost: 0, attempts: [{ attempt: 1, prompt: "Inspect", model: "provider/worker", cost: 0, models: [] }] }]
+  }]);
   const rendered = renderInspector(report, { view: "detail", selected: 0, scroll: 0 }).join("\n");
   assert.match(rendered, /explicit label[\s\S]*provider\/worker/);
   assert.doesNotMatch(rendered, /role=/);
 });
 void test("renders concise empty inspector states", () => {
-  const empty = { id: "session", cwd: "/repo", path: "/session.jsonl", cost: 0, models: [], workflows: [], totalCost: 0, totalModels: [] } as Parameters<typeof renderInspector>[0];
+  const empty = sessionReport();
   assert.match(renderInspector(empty, { view: "list", selected: 0, scroll: 0 }).join("\n"), /No workflow calls found/);
   assert.match(renderInspector(empty, { view: "detail", selected: 0, scroll: 0 }).join("\n"), /No workflow selected/);
-  const noScript = { ...empty, workflows: [{ name: "workflow", status: "pending", cost: 0, models: [], calls: [], agents: [] }] } as Parameters<typeof renderInspector>[0];
+  const noScript = sessionReport([{ name: "workflow", status: "pending", cost: 0, models: [], calls: [], agents: [] }]);
   assert.match(renderInspector(noScript, { view: "script", selected: 0, scroll: 0 }, 80, 10, () => []).join("\n"), /Script unavailable/);
 });
 
 void test("renders active transcript entries with message roles and content", () => {
-  const entries = [
-    { type: "message", message: { role: "user", content: "Inspect the API", timestamp: 1 } },
-    { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/api.ts" } }, { type: "text", text: "I found it.", }], api: "openai-responses", provider: "openai", model: "gpt", usage: usage(0), stopReason: "toolUse", timestamp: 2 } },
-    { type: "message", message: { role: "toolResult", toolCallId: "call-1", toolName: "read", content: [{ type: "text", text: "API source" }], isError: false, timestamp: 3 } },
-  ] as unknown as SessionEntry[];
+  const entries = [userMessageEntry(), assistantMessageEntry(), toolResultMessageEntry()];
   const rendered = transcriptLines(entries).join("\n");
   assert.match(rendered, /\[user\][\s\S]*Inspect the API/);
   assert.match(rendered, /\[assistant\][\s\S]*Tool call: read[\s\S]*src\/api\.ts/);

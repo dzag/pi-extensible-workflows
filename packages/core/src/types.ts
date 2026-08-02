@@ -1,3 +1,4 @@
+import { object } from "./utils.js";
 import type { CreateAgentSessionOptions, InlineExtension, SessionManager, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { Static, TSchema } from "typebox";
 export const RUN_STATES = ["queued", "running", "pausing", "paused", "awaiting_input", "completed", "failed", "stopped", "interrupted", "budget_exhausted"] as const;
@@ -38,8 +39,9 @@ export type RoleOverride = {
 };
 export function roleNameOf(value: unknown): string | undefined {
   if (typeof value === "string") return value;
-  if (typeof value === "object" && value !== null && !Array.isArray(value) && typeof (value as { name?: unknown }).name === "string") return (value as { name: string }).name;
-  return undefined;
+  if (!object(value)) return undefined;
+  const hasStringProperty = <Key extends string>(candidate: Record<string, unknown>, key: Key): candidate is Record<Key, string> => typeof candidate[key] === "string";
+  return hasStringProperty(value, "name") ? value.name : undefined;
 }
 export interface AgentOptions<Schema extends TSchema = never> {
   label?: string;

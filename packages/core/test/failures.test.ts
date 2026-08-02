@@ -4,10 +4,17 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { callUnchecked, decodeTestJson, decodeTestJsonRecord, decodeTestRunStart, decodeTestToolResult, isTestRecord, isTestWorkflowFailureDiagnostics, testExtensionApi, testExtensionContext } from "./support.js";
+import type { ExtensionContext, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import workflowExtension, { createLaunchSnapshot, DEFAULT_SETTINGS, ERROR_CODES, formatWorkflowFailure, formatWorkflowFailureDelivery, formatWorkflowFailureDiagnostics, RunStore, WorkflowError, WorkflowRegistry, type PersistedRun, type WorkflowFailureDiagnostics } from "../src/index.js";
 import type { SessionInput } from "../src/agent-execution.js";
 import { testTransport, type TestPiSession } from "./test-transport.js";
 import { contextualWorkflowAction } from "./support.js";
+
+type ToolResultHandler = (event: ToolResultEvent, ctx: ExtensionContext) => unknown;
+function isToolResultHandler(value: unknown): value is ToolResultHandler {
+  return typeof value === "function";
+}
 void test("rejects global collisions, invalid metadata, schemas, input, and output", async () => {
   const registry = new WorkflowRegistry();
   const extension = { version: "1.0.0", headline: "Demo", functions: { run: { description: "Run", input: { type: "object", properties: { value: { type: "string" } }, required: ["value"] }, output: { type: "string" }, run: () => 1 } } };
@@ -22,8 +29,8 @@ void test("rejects global collisions, invalid metadata, schemas, input, and outp
     assert.throws(() => { new WorkflowRegistry().register({ ...extension, functions: { [name]: extension.functions.run } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "GLOBAL_COLLISION");
   }
   assert.throws(() => { new WorkflowRegistry().register({ ...extension, functions: { __pi_extensible_workflows_internal: extension.functions.run } }); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
-  assert.throws(() => { new WorkflowRegistry().register({ ...extension, version: undefined as never }); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
-  assert.throws(() => { new WorkflowRegistry().register({ ...extension, workflows: { "release.check": { description: "Release", script: "return 1;" } } } as never); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  assert.throws(() => { callUnchecked(registry.register.bind(registry), undefined, [{ ...extension, version: undefined }]); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  assert.throws(() => { callUnchecked(registry.register.bind(registry), undefined, [{ ...extension, workflows: { "release.check": { description: "Release", script: "return 1;" } } }]); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   assert.throws(() => { new WorkflowRegistry().register({ ...extension, version: "v1" }); }, (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   assert.throws(() => { new WorkflowRegistry().register({ ...extension, functions: { run: { ...extension.functions.run, description: "", input: { type: "string" } } } }); }, WorkflowError);
   const journal = { get: () => undefined, put: () => {} };
@@ -71,7 +78,7 @@ void test("foreground workflow failures preserve codes while returning main-agen
   type Tool = { name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> };
   const tools: Tool[] = [];
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-foreground-failure-"));
-  workflowExtension({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  workflowExtension(testExtensionApi({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home);
   const tool = tools.find(({ name }) => name === "workflow");
   assert.ok(tool);
   const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
@@ -111,21 +118,22 @@ void test("foreground failure diagnostics advertise valid named worktrees", asyn
     steer: async () => {},
     dispose() {},
   });
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as typeof toolResultHandler; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as typeof toolResultHandler; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow && toolResultHandler);
   const context = { cwd, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
   await assert.rejects(workflow.execute("named-worktree-diagnostics", { name: "named-worktree-diagnostics", script: `return withWorktree("diagnostic-tree", async () => parallel("branches", { good: () => agent("good", {label:"good"}), bad: () => agent("bad", {label:"bad"}) }));`, foreground: true }, new AbortController().signal, undefined, context), WorkflowError);
   const patched = await toolResultHandler({ type: "tool_result", toolName: "workflow", toolCallId: "named-worktree-diagnostics", input: {}, content: [{ type: "text", text: "old" }], details: {}, isError: true }, {});
   assert.ok(patched);
-  const diagnostic = JSON.parse((patched as { content: Array<{ text: string }> }).content[0]?.text ?? "null") as WorkflowFailureDiagnostics;
+  const result = decodeTestToolResult(patched);
+  const diagnostic = decodeTestJson(result.content[0]?.text ?? "null", isTestWorkflowFailureDiagnostics);
   assert.ok(diagnostic.retry);
   assert.equal(diagnostic.retry.action, `workflow_retry({ runId: ${JSON.stringify(diagnostic.retry.sourceRunId)} })`);
   assert.deepEqual(diagnostic.retry.namedWorktrees, ["diagnostic-tree"]);
   const retry = tools.find(({ name }) => name === "workflow_retry");
   assert.ok(retry);
-  const started = await retry.execute("retry-from-diagnostic", { runId: diagnostic.retry.sourceRunId, foreground: false }, undefined, undefined, context) as { content: Array<{ text: string }> };
-  const childId = (JSON.parse(started.content[0]?.text ?? "null") as { runId: string }).runId;
+  const started = decodeTestToolResult(await retry.execute("retry-from-diagnostic", { runId: diagnostic.retry.sourceRunId, foreground: false }, undefined, undefined, context));
+  const childId = decodeTestRunStart(started.content[0]?.text ?? "null").runId;
   let child: PersistedRun | undefined;
   for (let attempt = 0; attempt < 100; attempt += 1) {
     child = (await new RunStore(cwd, "session", childId, home).load()).run;
@@ -139,7 +147,6 @@ void test("foreground failure diagnostics advertise valid named worktrees", asyn
 });
 void test("foreground failures patch finalized tool results with bounded diagnostics", async () => {
   type Tool = { name: string; execute: (...args: unknown[]) => Promise<unknown> };
-  type ToolResultHandler = (event: object, ctx: object) => Promise<{ content?: readonly object[]; details?: unknown; isError?: boolean } | undefined> | { content?: readonly object[]; details?: unknown; isError?: boolean } | undefined;
   const tools: Tool[] = [];
   let toolResultHandler: ToolResultHandler | undefined;
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-failure-diagnostics-"));
@@ -151,19 +158,20 @@ void test("foreground failures patch finalized tool results with bounded diagnos
     steer: async () => {},
     dispose() {},
   });
-  workflowExtension({
+  workflowExtension(testExtensionApi({
     registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {},
-    on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as ToolResultHandler; },
+    on(name: string, handler: unknown) { if (name === "tool_result" && isToolResultHandler(handler)) toolResultHandler = handler; },
     getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"],
-  } as never, home, async () => {}, testTransport(createSession));
+  }), home, async () => {}, testTransport(createSession));
   const tool = tools.find(({ name }) => name === "workflow");
   assert.ok(tool && toolResultHandler);
   const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
   await assert.rejects(tool.execute("workflow-call", { name: "diagnostics", script: `return parallel("reviewers", { good: () => agent("good", {label:"good"}), bad: () => agent("bad", {label:"bad"}) });`, foreground: true }, new AbortController().signal, undefined, context), WorkflowError);
-  const patched = await toolResultHandler({ type: "tool_result", toolName: "workflow", toolCallId: "workflow-call", input: {}, content: [{ type: "text", text: "old" }], details: {}, isError: true }, {});
+  const patched = await toolResultHandler({ type: "tool_result", toolName: "workflow", toolCallId: "workflow-call", input: {}, content: [{ type: "text", text: "old" }], details: {}, isError: true }, testExtensionContext);
   assert.ok(patched);
-  const result = patched as { content: Array<{ text: string }>; details: Record<string, unknown>; isError: boolean };
-  const diagnostic = JSON.parse(result.content[0]?.text ?? "null") as WorkflowFailureDiagnostics;
+  const result = decodeTestToolResult(patched);
+  const diagnostic = decodeTestJson(result.content[0]?.text ?? "null", isTestWorkflowFailureDiagnostics);
+  if (!isTestRecord(result.details)) throw new Error("Failure result details were not an object");
   const { run, ...resultDiagnostic } = result.details;
   assert.deepEqual(resultDiagnostic, diagnostic);
   assert.ok(run);
@@ -196,10 +204,12 @@ void test("foreground failures patch finalized tool results with bounded diagnos
   assert.ok(Buffer.byteLength(result.content[0]?.text ?? "") <= 4096);
   assert.doesNotMatch(result.content[0]?.text ?? "", /�/);
   await assert.rejects(tool.execute("empty-workflow-call", { name: "empty-diagnostic", script: "throw new Error('');", foreground: true }, new AbortController().signal, undefined, context), WorkflowError);
-  const emptyPatched = await toolResultHandler({ type: "tool_result", toolName: "workflow", toolCallId: "empty-workflow-call", input: {}, content: [{ type: "text", text: "old" }], details: {}, isError: true }, {});
+  const emptyPatched = await toolResultHandler({ type: "tool_result", toolName: "workflow", toolCallId: "empty-workflow-call", input: {}, content: [{ type: "text", text: "old" }], details: {}, isError: true }, testExtensionContext);
   assert.ok(emptyPatched);
-  const emptyResult = emptyPatched as { content: Array<{ text: string }>; details: Record<string, unknown>; isError: boolean };
-  const emptyDiagnostic = JSON.parse(emptyResult.content[0]?.text ?? "null") as { error: { message: string } };
+  const emptyResult = decodeTestToolResult(emptyPatched);
+  const emptyDiagnostic = decodeTestJsonRecord(emptyResult.content[0]?.text ?? "null");
+  if (!isTestRecord(emptyDiagnostic.error) || typeof emptyDiagnostic.error.message !== "string") throw new Error("Empty failure diagnostic was malformed");
+  if (!isTestRecord(emptyResult.details)) throw new Error("Empty failure result details were not an object");
   const { run: emptyRun, ...emptyResultDiagnostic } = emptyResult.details;
   assert.deepEqual(emptyResultDiagnostic, emptyDiagnostic);
   assert.ok(emptyRun);
@@ -208,7 +218,6 @@ void test("foreground failures patch finalized tool results with bounded diagnos
 });
 void test("failure diagnostics retain identity and retry fields when long sibling lists are truncated", async () => {
   type Tool = { name: string; execute: (...args: unknown[]) => Promise<unknown> };
-  type ToolResultHandler = (event: object, ctx: object) => Promise<{ content?: readonly object[]; details?: unknown; isError?: boolean } | undefined> | { content?: readonly object[]; details?: unknown; isError?: boolean } | undefined;
   const tools: Tool[] = [];
   let toolResultHandler: ToolResultHandler | undefined;
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-long-diagnostics-"));
@@ -225,19 +234,20 @@ void test("failure diagnostics retain identity and retry fields when long siblin
     steer: async () => {},
     dispose() {},
   });
-  workflowExtension({
+  workflowExtension(testExtensionApi({
     registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {},
-    on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as ToolResultHandler; },
+    on(name: string, handler: unknown) { if (name === "tool_result" && isToolResultHandler(handler)) toolResultHandler = handler; },
     getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"],
-  } as never, home, async () => {}, testTransport(createSession));
+  }), home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow && toolResultHandler);
   const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
   await assert.rejects(workflow.execute("long-diagnostic-call", { name: "long-diagnostics", script, foreground: true }, new AbortController().signal, undefined, context), WorkflowError);
-  const patched = await toolResultHandler({ type: "tool_result", toolName: "workflow", toolCallId: "long-diagnostic-call", input: {}, content: [{ type: "text", text: "old" }], details: {}, isError: true }, {});
+  const patched = await toolResultHandler({ type: "tool_result", toolName: "workflow", toolCallId: "long-diagnostic-call", input: {}, content: [{ type: "text", text: "old" }], details: {}, isError: true }, testExtensionContext);
   assert.ok(patched);
-  const result = patched as { content: Array<{ text: string }>; details: WorkflowFailureDiagnostics; isError: boolean };
-  const diagnostic = JSON.parse(result.content[0]?.text ?? "null") as WorkflowFailureDiagnostics;
+  const result = decodeTestToolResult(patched);
+  const diagnostic = decodeTestJson(result.content[0]?.text ?? "null", isTestWorkflowFailureDiagnostics);
+  if (!isTestRecord(result.details)) throw new Error("Long failure result details were not an object");
   assert.equal(result.isError, true);
   assert.ok(Buffer.byteLength(result.content[0]?.text ?? "") <= 4096);
   assert.equal(diagnostic.runId, result.details.runId);
@@ -246,22 +256,21 @@ void test("failure diagnostics retain identity and retry fields when long siblin
 });
 void test("failure diagnostics include replayable shell operations", async () => {
   type Tool = { name: string; execute: (...args: unknown[]) => Promise<unknown> };
-  type ToolResultHandler = (event: object, ctx: object) => Promise<{ content?: readonly object[]; details?: unknown; isError?: boolean } | undefined> | { content?: readonly object[]; details?: unknown; isError?: boolean } | undefined;
   const tools: Tool[] = [];
   let toolResultHandler: ToolResultHandler | undefined;
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-shell-diagnostics-"));
-  workflowExtension({
+  workflowExtension(testExtensionApi({
     registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {},
-    on(name: string, handler: unknown) { if (name === "tool_result") toolResultHandler = handler as ToolResultHandler; },
+    on(name: string, handler: unknown) { if (name === "tool_result" && isToolResultHandler(handler)) toolResultHandler = handler; },
     getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "shell"],
-  } as never, home);
+  }), home);
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow && toolResultHandler);
   const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
   await assert.rejects(workflow.execute("shell-diagnostics", { name: "shell-diagnostics", script: `await shell("printf ok"); throw new Error("boom");`, foreground: true }, new AbortController().signal, undefined, context), WorkflowError);
-  const patched = await toolResultHandler({ type: "tool_result", toolName: "workflow", toolCallId: "shell-diagnostics", input: {}, content: [{ type: "text", text: "old" }], details: {}, isError: true }, {});
+  const patched = await toolResultHandler({ type: "tool_result", toolName: "workflow", toolCallId: "shell-diagnostics", input: {}, content: [{ type: "text", text: "old" }], details: {}, isError: true }, testExtensionContext);
   assert.ok(patched);
-  const diagnostic = JSON.parse((patched as { content: Array<{ text: string }> }).content[0]?.text ?? "null") as WorkflowFailureDiagnostics;
+  const diagnostic = decodeTestJson(decodeTestToolResult(patched).content[0]?.text ?? "null", isTestWorkflowFailureDiagnostics);
   assert.ok(diagnostic.retry?.completedPaths.some((path) => path.startsWith("shell/")));
 });
 void test("background and cold-resumed terminal failures deliver artifacts without retry advice", async () => {
@@ -286,13 +295,13 @@ void test("background and cold-resumed terminal failures deliver artifacts witho
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let shutdown: (() => Promise<void>) | undefined;
   let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
-  workflowExtension({
+  workflowExtension(testExtensionApi({
     registerTool(tool: Tool) { tools.push(tool); },
-    registerCommand(_name: string, value: { handler: typeof command }) { command = value.handler; },
+    registerCommand(_name: string, value: { handler: NonNullable<typeof command> }) { command = value.handler; },
     on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; },
     sendMessage(message: { content: string }) { messages.push(message.content); },
     getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"],
-  } as never, home, async () => {}, testTransport(createSession));
+  }), home, async () => {}, testTransport(createSession));
   const stop = tools.find(({ name }) => name === "workflow_stop");
   assert.ok(start && command && stop);
   const snapshot = (name: string, script: string) => createLaunchSnapshot({ script, args: null, metadata: { name }, launchMode: "background", settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], roles: {}, schemas: [] });
@@ -362,7 +371,7 @@ void test("background failure diagnostics drive workflow_retry with the advertis
     steer: async () => {},
     dispose() {},
   });
-  workflowExtension({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) { delivered.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
+  workflowExtension(testExtensionApi({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) { delivered.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   const retry = tools.find(({ name }) => name === "workflow_retry");
   assert.ok(workflow && retry);
@@ -379,8 +388,8 @@ void test("background failure diagnostics drive workflow_retry with the advertis
   assert.match(diagnosticMessage, /next action: workflow_retry\(\{ runId: /);
   assert.match(diagnosticMessage, /statePath=.*state\.json/);
   assert.match(diagnosticMessage, /journalPath=.*journal\.json/);
-  const started = await retry.execute("background-retry-child", { runId: sourceRunId }, undefined, undefined, context) as { content: Array<{ text: string }> };
-  const childId = (JSON.parse(started.content[0]?.text ?? "null") as { runId: string }).runId;
+  const started = decodeTestToolResult(await retry.execute("background-retry-child", { runId: sourceRunId }, undefined, undefined, context));
+  const childId = decodeTestRunStart(started.content[0]?.text ?? "null").runId;
   let child: PersistedRun | undefined;
   for (let attempt = 0; attempt < 100; attempt += 1) {
     child = (await new RunStore(cwd, "session", childId, home).load()).run;
@@ -412,11 +421,11 @@ void test("failed retry diagnostics preserve retry provenance", async () => {
     steer: async () => {},
     dispose() {},
   });
-  workflowExtension({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) {
+  workflowExtension(testExtensionApi({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) {
     delivered.push(message.content);
     const runId = /runId=([^;) ]+)/.exec(message.content)?.[1];
     if (runId && message.content.includes(" failed (runId=")) diagnostics.push({ runId });
-  }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
+  }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   const retry = tools.find(({ name }) => name === "workflow_retry");
   assert.ok(workflow && retry);
@@ -426,16 +435,16 @@ void test("failed retry diagnostics preserve retry provenance", async () => {
   assert.equal(diagnostics.length, 1);
   const sourceDiagnostic = diagnostics[0];
   if (!sourceDiagnostic) throw new Error("Source failure was not delivered");
-  const started = await retry.execute("retry-diagnostic-child", { runId: sourceDiagnostic.runId }, undefined, undefined, context) as { content: Array<{ text: string }> };
-  const childId = (JSON.parse(started.content[0]?.text ?? "null") as { runId: string }).runId;
+  const started = decodeTestToolResult(await retry.execute("retry-diagnostic-child", { runId: sourceDiagnostic.runId }, undefined, undefined, context));
+  const childId = decodeTestRunStart(started.content[0]?.text ?? "null").runId;
   for (let attempt = 0; attempt < 100 && !diagnostics.some((diagnostic) => diagnostic.runId === childId); attempt += 1) await new Promise<void>((resolve) => setTimeout(resolve, 10));
   const childDiagnostic = diagnostics.find((diagnostic) => diagnostic.runId === childId);
   if (!childDiagnostic) throw new Error("Child failure was not delivered");
   const childRun = (await new RunStore(cwd, "session", childId, home).load()).run;
   assert.equal(childRun.state, "failed");
   if (!childRun.retry) throw new Error("Child retry provenance was not persisted");
-  const nextStarted = await retry.execute("retry-diagnostic-next-child", { runId: childId }, undefined, undefined, context) as { content: Array<{ text: string }> };
-  const nextChildId = (JSON.parse(nextStarted.content[0]?.text ?? "null") as { runId: string }).runId;
+  const nextStarted = decodeTestToolResult(await retry.execute("retry-diagnostic-next-child", { runId: childId }, undefined, undefined, context));
+  const nextChildId = decodeTestRunStart(nextStarted.content[0]?.text ?? "null").runId;
   let nextChild: PersistedRun | undefined;
   for (let attempt = 0; attempt < 100; attempt += 1) {
     nextChild = (await new RunStore(cwd, "session", nextChildId, home).load()).run;
@@ -452,7 +461,7 @@ void test("background failures and workflow responses deliver prose to the main 
   const tools: Tool[] = [];
   const delivered: string[] = [];
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-background-failure-"));
-  workflowExtension({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) { delivered.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "workflow_respond"] } as never, home);
+  workflowExtension(testExtensionApi({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) { delivered.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "workflow_respond"] }), home);
   const tool = tools.find(({ name }) => name === "workflow");
   assert.ok(tool);
   const context = { cwd: home, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
@@ -470,7 +479,7 @@ void test("workflow_respond keeps asynchronous failures on the prose delivery pa
   const tools: Tool[] = [];
   const delivered: string[] = [];
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-respond-failure-"));
-  workflowExtension({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) { delivered.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "workflow_respond"] } as never, home);
+  workflowExtension(testExtensionApi({ registerTool(tool: Tool) { tools.push(tool); }, registerCommand() {}, on() {}, sendMessage(message: { content: string }) { delivered.push(message.content); }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "workflow_respond"] }), home);
   const workflow = tools.find(({ name }) => name === "workflow");
   const respond = tools.find(({ name }) => name === "workflow_respond");
   assert.ok(workflow && respond);

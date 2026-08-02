@@ -50,12 +50,12 @@ void test("phase model ignores malformed history, clamps boundaries, and exposes
   const first = agent("first");
   const second = agent("second");
   const third = agent("third");
-  const malformed = buildWorkflowPhaseModel(run("running", [first, second, third], [
+  const malformed = buildWorkflowPhaseModel({ ...run("running", [first, second, third]), phaseHistory: [
     null,
     { phase: "build", afterAgent: -4 },
     { phase: "review", afterAgent: 99 },
     { phase: "ignored", afterAgent: 1.5 },
-  ] as unknown as PersistedRun["phaseHistory"]), ["build", "review"]);
+  ] }, ["build", "review"]);
   assert.deepEqual(malformed.phases.filter(({ observed }) => observed).map(({ name, afterAgent, agents }) => [name, afterAgent, agents.map(({ id }) => id)]), [
     ["build", 0, ["first", "second", "third"]],
     ["review", 3, []],

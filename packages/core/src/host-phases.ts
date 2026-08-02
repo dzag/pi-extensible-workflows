@@ -8,7 +8,7 @@ export interface WorkflowPhaseView { id: string; name: string; occurrence: numbe
 export interface WorkflowPhaseModel { runState: RunState; declaredPhases: readonly string[]; phases: readonly WorkflowPhaseView[]; currentPhaseIndex?: number; currentPhaseId?: string; counts: Readonly<Partial<Record<WorkflowPhaseState, number>>>; unassignedAgents?: readonly AgentRecord[] }
 type WorkflowPhaseSource = readonly string[] | Pick<LaunchSnapshot, "phases"> | undefined;
 function phaseNames(source: WorkflowPhaseSource): string[] {
-  const phases: readonly unknown[] = source === undefined ? [] : Array.isArray(source) ? source : (source as Pick<LaunchSnapshot, "phases">).phases ?? [];
+  const phases: readonly unknown[] = source === undefined ? [] : Array.isArray(source) ? source : object(source) ? source.phases ?? [] : [];
   return phases.filter((phase): phase is string => typeof phase === "string" && phase.trim() !== "").map((phase) => phase.trim());
 }
 export function phaseAgentCounts(agents: readonly AgentRecord[]): WorkflowPhaseAgentCounts {
@@ -37,7 +37,8 @@ function phaseState(runState: RunState, counts: WorkflowPhaseAgentCounts, isLate
   if (counts.running > 0 || counts.pending > 0) return "running";
   return runState === "completed" ? "completed" : "running";
 }
-export function buildWorkflowPhaseModel(run: Pick<PersistedRun, "state" | "phase" | "phaseHistory" | "agents" | "activeShellsByPhase">, source?: WorkflowPhaseSource): WorkflowPhaseModel {
+type WorkflowPhaseRun = Omit<Pick<PersistedRun, "state" | "phase" | "phaseHistory" | "agents" | "activeShellsByPhase">, "phaseHistory"> & { phaseHistory?: unknown };
+export function buildWorkflowPhaseModel(run: WorkflowPhaseRun, source?: WorkflowPhaseSource): WorkflowPhaseModel {
   const declaredPhases = phaseNames(source);
   const rawHistory: readonly unknown[] = Array.isArray(run.phaseHistory) ? run.phaseHistory : [];
   const observed: Array<{ name: string; afterAgent: number }> = [];
@@ -111,7 +112,7 @@ function workflowPhaseTreeAggregateState(states: readonly AgentRecord["state"][]
 }
 export function buildWorkflowPhaseTree(model: WorkflowPhaseModel): WorkflowPhaseTree {
   type Draft = Omit<WorkflowPhaseTreeNode, "children"> & { children: string[] };
-  type AgentEntry = { agent: AgentRecord; node: Draft; path: readonly string[]; defaultParentId: string };
+  type AgentEntry = { agent: AgentRecord; node?: Draft; path: readonly string[]; defaultParentId: string };
   const drafts = new Map<string, Draft>();
   const roots: string[] = [];
   const add = (node: Omit<Draft, "children">, parentId?: string): Draft => {
@@ -127,7 +128,7 @@ export function buildWorkflowPhaseTree(model: WorkflowPhaseModel): WorkflowPhase
     const phaseNode = add({ id: workflowPhaseTreePath("phase", phaseId, []), kind: "phase", label, depth: 0, phaseId, operationPath: [], state: phase?.state ?? workflowPhaseTreeAggregateState(agents.map((agent) => agent.state)), ...(phase ? { phase } : {}) }, workflowNode.id);
     if (phase?.shellActivity) add({ id: workflowPhaseTreePath("shell", phaseId, []), kind: "shell", label: `shell [running] (${String(phase.shellActivity.active)} active)`, depth: 0, phaseId, operationPath: [], state: "running", phase, shellActivity: phase.shellActivity }, phaseNode.id);
     const operationNodes = new Map<string, Draft>();
-    const entries: AgentEntry[] = agents.map((agent) => ({ agent, path: [...(agent.structuralPath ?? [])], node: undefined as unknown as Draft, defaultParentId: phaseNode.id }));
+    const entries: AgentEntry[] = agents.map((agent) => ({ agent, path: [...(agent.structuralPath ?? [])], defaultParentId: phaseNode.id }));
     const agentEntries = new Map(entries.map((entry) => [entry.agent.id, entry]));
     const acceptedParents = new Map<string, string>();
     const wouldCycle = (childId: string, parentId: string): boolean => {
@@ -165,25 +166,28 @@ export function buildWorkflowPhaseTree(model: WorkflowPhaseModel): WorkflowPhase
     for (const entry of entries) {
       entry.node = add({ id: workflowPhaseTreePath("agent", phaseId, entry.path, entry.agent.id), kind: "agent", label: entry.agent.label ?? entry.agent.name, depth: 0, phaseId, operationPath: entry.path, state: entry.agent.state, agentId: entry.agent.id, agent: entry.agent }, phaseNode.id);
     }
-    const attach = (entry: AgentEntry, parentId: string): void => {
-      const previous = entry.node.parentId ? drafts.get(entry.node.parentId) : undefined;
-      if (previous) previous.children = previous.children.filter((childId) => childId !== entry.node.id);
-      entry.node.parentId = parentId;
+    const attach = (node: Draft, parentId: string): void => {
+      const previous = node.parentId ? drafts.get(node.parentId) : undefined;
+      if (previous) previous.children = previous.children.filter((childId) => childId !== node.id);
+      node.parentId = parentId;
       const parent = drafts.get(parentId);
-      if (parent && !parent.children.includes(entry.node.id)) parent.children.push(entry.node.id);
+      if (parent && !parent.children.includes(node.id)) parent.children.push(node.id);
     };
     for (const entry of entries) {
+      const node = entry.node;
+      if (!node) continue;
       const parentId = acceptedParents.get(entry.agent.id);
       const parent = parentId ? agentEntries.get(parentId) : undefined;
-      if (parent) {
-        if (samePath(entry.path, parent.path)) entry.defaultParentId = parent.node.id;
+      const parentNode = parent?.node;
+      if (parent && parentNode) {
+        if (samePath(entry.path, parent.path)) entry.defaultParentId = parentNode.id;
         else {
           const commonLength = entry.path.findIndex((part, index) => parent.path[index] !== part);
           const startIndex = commonLength < 0 ? Math.min(entry.path.length, parent.path.length) : commonLength;
-          entry.defaultParentId = operationChain(entry.path, parent.node, startIndex).id;
+          entry.defaultParentId = operationChain(entry.path, parentNode, startIndex).id;
         }
       }
-      attach(entry, entry.defaultParentId);
+      attach(node, entry.defaultParentId);
     }
     const setDepth = (node: Draft, depth: number, seen = new Set<string>()): void => {
       if (seen.has(node.id)) return;

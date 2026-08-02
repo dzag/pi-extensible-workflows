@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { acquireSessionLease, createLaunchSnapshot, DEFAULT_SETTINGS, FairAgentScheduler, WorkflowError } from "../src/index.js";
 import { hasLiveSessionLease, listRunIds, projectStorageKey, RunStore, runsDirectory, structuralPath } from "../src/persistence.js";
+import { decodeTestJsonRecord, isTestRecord } from "./support.js";
 
 const snapshot = createLaunchSnapshot({ script: "export const meta={name:'x',description:'x'}", args: { answer: 42 }, metadata: { name: "x", description: "x" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: ["read"], agentTypes: [], schemas: [] });
 
@@ -297,7 +298,7 @@ void test("rejects malformed retry provenance before replay or resume", async (t
       const child = new RunStore(cwd, "session-a", "child", home);
       await child.create({ ...run(cwd), id: "child", state: "failed", parentRunId: "source", retry: { sourceRunId: "source", lineageRootRunId: "source", completedPaths: [], incompletePaths: [], namedWorktrees: [] } }, snapshot);
       const statePath = join(child.directory, "state.json");
-      const childState = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>;
+      const childState = decodeTestJsonRecord(readFileSync(statePath, "utf8"));
       scenario.mutate(childState);
       writeFileSync(statePath, `${JSON.stringify(childState)}\n`);
       if (scenario.cycle) await source.updateState((current) => ({ ...current, parentRunId: "child", retry: { sourceRunId: "child", lineageRootRunId: "source", completedPaths: [], incompletePaths: [], namedWorktrees: [] } }));
@@ -656,7 +657,7 @@ void test("maintains an atomic compact summary and derives legacy summaries", as
   assert.equal(initial.artifacts.statePath, join(store.directory, "state.json"));
   assert.equal(initial.artifacts.journalPath, join(store.directory, "journal.json"));
   assert.equal(initial.artifacts.summaryPath, join(store.directory, "summary.json"));
-  assert.equal(Object.keys(JSON.parse(readFileSync(join(store.directory, "summary.json"), "utf8")) as Record<string, unknown>).includes("script"), false);
+  assert.equal(Object.keys(decodeTestJsonRecord(readFileSync(join(store.directory, "summary.json"), "utf8"))).includes("script"), false);
   await store.complete("agent/one", "done");
   await store.updateState((current) => ({ ...current, state: "failed", error: { code: "AGENT_FAILED", message: "boom" }, failedAt: "agent/two" }));
   const failed = await store.loadSummary();
@@ -695,12 +696,16 @@ void test("authoritative state writes survive summary projection failures", asyn
   await store.create(run(cwd), snapshot);
   writeFileSync(join(store.directory, "journal.json"), "{\n");
   await assert.doesNotReject(store.updateState((current) => ({ ...current, phase: "completed" })));
-  assert.equal((JSON.parse(readFileSync(join(store.directory, "state.json"), "utf8")) as { phase?: string }).phase, "completed");
+  const state = decodeTestJsonRecord(readFileSync(join(store.directory, "state.json"), "utf8"));
+  if (typeof state.phase !== "string") throw new Error("Persisted state phase was malformed");
+  assert.equal(state.phase, "completed");
   const journalHome = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-summary-journal-best-effort-"));
   const journalCwd = join(journalHome, "project");
   const journalStore = new RunStore(journalCwd, "session-a", "run-a", journalHome);
   await journalStore.create(run(journalCwd), snapshot);
   writeFileSync(join(journalStore.directory, "state.json"), "{\n");
   await assert.doesNotReject(journalStore.complete("agent/one", "done"));
-  assert.deepEqual((JSON.parse(readFileSync(join(journalStore.directory, "journal.json"), "utf8")) as { completed: Record<string, unknown> }).completed["agent/one"], { path: "agent/one", value: "done" });
+  const journal = decodeTestJsonRecord(readFileSync(join(journalStore.directory, "journal.json"), "utf8"));
+  if (!isTestRecord(journal.completed)) throw new Error("Persisted journal completed entries were malformed");
+  assert.deepEqual(journal.completed["agent/one"], { path: "agent/one", value: "done" });
 });

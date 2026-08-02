@@ -3,11 +3,11 @@ import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { FairAgentScheduler, WorkflowAgentExecutor, type AgentProviderFailure, type AgentProviderRecovery } from "./agent-execution.js";
 import { listRunIds, RunStore, structuralPath as operationPath, type PersistedRun } from "./persistence.js";
 import { budgetUsage, budgetRelaxed, mergeBudget, resumeBudgetAllowed, validateBudget, validateBudgetPatch, WorkflowBudgetRuntime } from "./budget.js";
-import { aliasDrift, createLaunchSnapshot, errorCode, errorText, object } from "./utils.js";
+import { aliasDrift, createLaunchSnapshot, errorCode, errorText, jsonValue, object } from "./utils.js";
 import { LAUNCH_SNAPSHOT_IDENTITY_VERSION, WorkflowError, type BudgetApprovalRequest, type JsonValue, type LaunchSnapshot, type ModelSpec, type RunState, type WorkflowMetadata, type WorkflowRetryProvenance, type WorkflowWorktreeReference } from "./types.js";
 import { RunLifecycle, WorkflowEventPublisher, withWorkflowFunctions, workflowRunContext, type WorkflowRunRecord, type WorkflowToolUpdate } from "./host-runtime.js";
 import { runWorkflow } from "./execution.js";
-import { createWorkflowFailureDiagnostics, formatWorkflowFailureDelivery, formatWorkflowFailureDeliveryFallback, failureDiagnosticsFrom, completionDelivery, incompleteRetryPaths, workflowFailedAt, WORKFLOW_FAILURE_DIAGNOSTICS } from "./host-delivery.js";
+import { createWorkflowFailureDiagnostics, formatWorkflowFailureDelivery, formatWorkflowFailureDeliveryFallback, failureDiagnosticsFrom, completionDelivery, incompleteRetryPaths, markWorkflowFailureDiagnostics, workflowFailedAt } from "./host-delivery.js";
 
 export type WorkflowRecoveryContext = { model: { provider: string; id: string } | undefined; modelRegistry: { getAll?: () => readonly import("@earendil-works/pi-ai").Model<import("@earendil-works/pi-ai").Api>[]; getAvailable?: () => readonly import("@earendil-works/pi-ai").Model<import("@earendil-works/pi-ai").Api>[]; find?: (provider: string, model: string) => import("@earendil-works/pi-ai").Model<import("@earendil-works/pi-ai").Api> | undefined; refresh?: () => Promise<void>; getError?: () => string | undefined } | undefined; signal?: AbortSignal; resolvedAliases?: Readonly<Record<string, string>>; blockedAliases?: ReadonlySet<string>; blockedAliasTargets?: Readonly<Record<string, string>> };
 export type WorkflowRecoveryDependencies = {
@@ -149,7 +149,7 @@ export function createWorkflowRecovery(deps: WorkflowRecoveryDependencies) {
       if (state === "failed") retryReservations.delete(persisted.retry?.lineageRootRunId ?? run.store.runId);
       await eventPublisher.runFailed(run.store, run.metadata, typed, state);
       run.update?.(workflowToolUpdate(persisted));
-      if (!["stopped", "interrupted", "budget_exhausted"].includes(run.lifecycle.state)) { const diagnostic = await createWorkflowFailureDiagnostics(run.store, run.metadata, typed, persisted); Object.defineProperty(typed, WORKFLOW_FAILURE_DIAGNOSTICS, { value: diagnostic }); }
+      if (!["stopped", "interrupted", "budget_exhausted"].includes(run.lifecycle.state)) { const diagnostic = await createWorkflowFailureDiagnostics(run.store, run.metadata, typed, persisted); markWorkflowFailureDiagnostics(typed, diagnostic); }
       throw typed;
     }).finally(() => cleanupTerminalRun(run.store.runId));
     run.completion = completion;
@@ -228,7 +228,11 @@ export function createWorkflowRecovery(deps: WorkflowRecoveryDependencies) {
     }
     const { hasUI, ui } = recoveryUi(context);
     const completed = await coldResumeRun(run, hasUI, ui, projectTrusted(context), { ...resumeHostContext(context), ...(signal ? { signal } : {}) }, modeOverride, waitForCompletion);
-    if (completed) return { state: "completed", runId, value: completed.value, run: (await run.store.load()).run as unknown as JsonValue };
+    if (completed) {
+      const persistedRun = structuredClone((await run.store.load()).run);
+      if (!jsonValue(persistedRun)) throw new WorkflowError("RESUME_INCOMPATIBLE", "Persisted run is not JSON-compatible");
+      return { state: "completed", runId, value: completed.value, run: persistedRun };
+    }
     return { state: "running" };
   };
   const retryReservations = new Set<string>();

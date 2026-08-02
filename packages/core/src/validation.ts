@@ -9,7 +9,7 @@ import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { AgentDefinition, AgentResourceExclusions, AgentResourcePolicy, CheckpointInput, ContextFileScope, JsonSchema, JsonValue, PreflightCapabilities, PreflightResult, RoleOverride, ShellOptions, StaticWorkflowCall, StaticWorkflowExecution, StaticWorkflowScope, ValidatedWorkflowLaunch, WorkflowCallKind, WorkflowErrorCode, WorkflowExtensionMetadata, WorkflowExtensionSettings, WorkflowMetadata, WorkflowRoleDirectoryRegistration, WorkflowSettings, WorkflowSettingsOverrides, WorkflowSettingsResolution, WorkflowSettingsSources, WorkflowValidationContext, WorkflowValidationParameters } from "./types.js";
 import type { WorkflowRegistryApi } from "./registry.js";
 import { registeredWorkflowRoleDirectoryRegistrations } from "./registry.js";
-import { annotateModelAliasError, deepFreeze, errorText, fail, jsonValue, modelAliasName, modelCapability, object, parseThinking, positiveInteger, resolveModelReference, unknownModel, validateModelAliases, validateResourcePattern } from "./utils.js";
+import { annotateModelAliasError, deepFreeze, errorText, fail, isNodeError, jsonObject, jsonValue, modelAliasName, modelCapability, object, parseThinking, positiveInteger, resolveModelReference, unknownModel, validateModelAliases, validateResourcePattern } from "./utils.js";
 import { WORKFLOW_CALL_KINDS } from "./types.js";
 
 export const DEFAULT_SETTINGS: Readonly<WorkflowSettings> = Object.freeze({ concurrency: 8 });
@@ -65,10 +65,15 @@ function validateAgentResourceExclusions(value: unknown, settingsPath: string, e
   }
   return Object.freeze({ skills: Object.freeze(normalized.skills), extensions: Object.freeze(normalized.extensions) });
 }
+const CONTEXT_FILE_SCOPES = ["global", "project", "cwd"] as const;
+function isContextFileScope(value: unknown): value is ContextFileScope { return CONTEXT_FILE_SCOPES.some((scope) => scope === value); }
 function validateContextFileScopes(value: unknown, rolePath: string): readonly ContextFileScope[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.some((scope) => typeof scope !== "string" || !["global", "project", "cwd"].includes(scope))) fail("INVALID_METADATA", `${rolePath}.contextFiles must be an array containing only global, project, or cwd`);
-  return value.map((scope) => scope as ContextFileScope);
+  if (!Array.isArray(value) || value.some((scope) => !isContextFileScope(scope))) fail("INVALID_METADATA", `${rolePath}.contextFiles must be an array containing only global, project, or cwd`);
+  return value.map((scope) => {
+    if (!isContextFileScope(scope)) fail("INVALID_METADATA", `${rolePath}.contextFiles must be an array containing only global, project, or cwd`);
+    return scope;
+  });
 }
 function validateWorkflowExtensions(value: unknown, settingsPath: string, errorCode: "INVALID_SETTINGS" | "INVALID_METADATA" = "INVALID_SETTINGS"): WorkflowExtensionSettings | undefined {
   if (value === undefined) return undefined;
@@ -87,7 +92,7 @@ function parseSettings(path: string, partial: boolean): Readonly<WorkflowSetting
   let parsed: unknown;
   try { parsed = JSON.parse(readFileSync(path, "utf8")); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return partial ? Object.freeze({}) : DEFAULT_SETTINGS;
+    if (isNodeError(error, "ENOENT")) return partial ? Object.freeze({}) : DEFAULT_SETTINGS;
     fail("CONFIG_ERROR", `Invalid workflow settings JSON at ${path}: ${errorText(error)}`);
   }
   if (!object(parsed)) fail("INVALID_SETTINGS", `Workflow settings at ${path} must be an object`);
@@ -139,13 +144,14 @@ export function resolveAgentResourcePolicy(cwd: string, projectTrusted: boolean,
 }
 export function saveModelAliases(path = workflowSettingsPath(), aliases: Readonly<Record<string, string>> = {}): void {
   const normalized = validateModelAliases(aliases, path);
-  let parsed: Record<string, unknown> = {};
+  let parsed: unknown = {};
   try {
     loadSettings(path);
-    parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (!isNodeError(error, "ENOENT")) throw error;
   }
+  if (!object(parsed)) fail("INVALID_SETTINGS", `Workflow settings at ${path} must be an object`);
   mkdirSync(dirname(path), { recursive: true });
   atomicWriteFile(path, `${JSON.stringify({ ...parsed, modelAliases: normalized }, null, 2)}\n`, true);
 }
@@ -161,12 +167,13 @@ export function parseRoleMarkdown(content: string, strict = false, rolePath?: st
       if (match?.[1] && match[2]) meta[match[1]] = match[2].trim();
     }
     const tools = meta.tools ? meta.tools.replace(/^\[|\]$/g, "").split(",").map((tool) => tool.trim().replace(/^[']|[']$/g, "").replace(/^["]|["]$/g, "")).filter(Boolean) : undefined;
-    const thinking = meta.thinking?.replace(/^[']|[']$/g, "").replace(/^["]|["]$/g, "");
-    if (thinking && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinking)) fail("INVALID_METADATA", `Invalid role thinking level: ${thinking}`);
+    const rawThinking = meta.thinking?.replace(/^[']|[']$/g, "").replace(/^["]|["]$/g, "");
+    const thinking = rawThinking ? parseThinking(rawThinking) : undefined;
+    if (rawThinking && !thinking) fail("INVALID_METADATA", `Invalid role thinking level: ${rawThinking}`);
     const definition: AgentDefinition = { prompt: content.slice(end + 4).replace(/^\n/, "") };
     if (meta.model) definition.model = meta.model.replace(/^[']|[']$/g, "").replace(/^["]|["]$/g, "");
     if (meta.description) definition.description = meta.description.replace(/^[']|[']$/g, "").replace(/^["]|["]$/g, "");
-    if (thinking) definition.thinking = thinking as NonNullable<AgentDefinition["thinking"]>;
+    if (thinking !== undefined) definition.thinking = thinking;
     if (tools) definition.tools = tools;
     const overrideSystemPrompt = meta.overrideSystemPrompt ?? meta.override_system_prompt ?? meta.is_system_prompt;
     const contextFiles = meta.contextFiles ? meta.contextFiles.replace(/^\[|\]$/g, "").split(",").map((scope) => scope.trim().replace(/^[']|[']$/g, "").replace(/^["]|["]$/g, "")).filter(Boolean) : undefined;
@@ -184,13 +191,25 @@ export function parseRoleMarkdown(content: string, strict = false, rolePath?: st
   const { model, thinking, tools, description, disabledAgentResources, contextFiles } = parsed.frontmatter;
   const overrideSystemPrompt = parsed.frontmatter.overrideSystemPrompt ?? parsed.frontmatter.override_system_prompt ?? parsed.frontmatter.is_system_prompt;
   if (model !== undefined && (typeof model !== "string" || model.trim() === "")) fail("INVALID_METADATA", "Role model must be a non-empty string");
-  if (thinking !== undefined && (typeof thinking !== "string" || !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinking))) fail("INVALID_METADATA", `Invalid role thinking level: ${typeof thinking === "string" ? thinking : typeof thinking}`);
+  const normalizedThinking = thinking === undefined ? undefined : parseThinking(thinking);
+  if (thinking !== undefined && normalizedThinking === undefined) fail("INVALID_METADATA", `Invalid role thinking level: ${typeof thinking === "string" ? thinking : typeof thinking}`);
   if (description !== undefined && (typeof description !== "string" || description.trim() === "" || description.length > 1024 || /[\r\n]/.test(description))) fail("INVALID_METADATA", "Role description must be a non-empty single-line string of at most 1024 characters");
   if (overrideSystemPrompt !== undefined && typeof overrideSystemPrompt !== "boolean") fail("INVALID_METADATA", "Role overrideSystemPrompt must be a boolean");
   const normalizedContextFiles = validateContextFileScopes(contextFiles, rolePath ?? "<role>");
   if (tools !== undefined && (!Array.isArray(tools) || tools.some((tool) => typeof tool !== "string" || tool.trim() === ""))) fail("INVALID_METADATA", "Role tools must be an array of non-empty strings");
   const normalizedResources = validateAgentResourceExclusions(disabledAgentResources, rolePath ?? "<role>", "INVALID_METADATA");
-  return { prompt: parsed.body, ...(typeof description === "string" ? { description: description.trim() } : {}), ...(typeof model === "string" ? { model: model.trim() } : {}), ...(typeof thinking === "string" ? { thinking: thinking as NonNullable<AgentDefinition["thinking"]> } : {}), ...(Array.isArray(tools) ? { tools: tools.map((tool) => (tool as string).trim()) } : {}), ...(typeof overrideSystemPrompt === "boolean" ? { overrideSystemPrompt } : {}), ...(normalizedContextFiles ? { contextFiles: normalizedContextFiles } : {}), ...(normalizedResources ? { disabledAgentResources: normalizedResources } : {}) };
+  const normalizedDescription = typeof description === "string" ? description.trim() : undefined;
+  const normalizedModel = typeof model === "string" ? model.trim() : undefined;
+  const normalizedTools = Array.isArray(tools) ? tools.map((tool) => typeof tool === "string" ? tool.trim() : fail("INVALID_METADATA", "Role tools must be an array of non-empty strings")) : undefined;
+  const definition: AgentDefinition = { prompt: parsed.body };
+  if (normalizedDescription !== undefined) definition.description = normalizedDescription;
+  if (normalizedModel !== undefined) definition.model = normalizedModel;
+  if (normalizedThinking !== undefined) definition.thinking = normalizedThinking;
+  if (normalizedTools !== undefined) definition.tools = normalizedTools;
+  if (typeof overrideSystemPrompt === "boolean") definition.overrideSystemPrompt = overrideSystemPrompt;
+  if (normalizedContextFiles !== undefined) definition.contextFiles = normalizedContextFiles;
+  if (normalizedResources !== undefined) definition.disabledAgentResources = normalizedResources;
+  return definition;
 }
 
 const ROLE_DIRECTORY = "pi-extensible-workflows";
@@ -224,7 +243,7 @@ function scanRoleFiles(dirs: readonly WorkflowRoleDirectoryInput[], extension: b
     let entries: import("node:fs").Dirent[];
     try { entries = readdirSync(source.path, { withFileTypes: true }); }
     catch (error) {
-      if (!extension && (error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      if (!extension && isNodeError(error, "ENOENT")) continue;
       fail("INVALID_METADATA", `${roleDirectoryLabel(source, extension)} role directory "${source.path}" could not be scanned: ${errorText(error)}`);
     }
     for (const entry of entries) if (entry.isFile() && extname(entry.name) === ".md") files.push({ name: basename(entry.name, ".md"), path: join(source.path, entry.name), source });
@@ -293,29 +312,33 @@ function parseWorkflow(script: string): acorn.Program {
   } catch (error) { fail("INVALID_SYNTAX", `Invalid workflow syntax: ${errorText(error)}`); }
 }
 
-type WorkflowCall = acorn.CallExpression & { callee: acorn.Identifier };
+type WorkflowCall = acorn.CallExpression & { callee: acorn.Identifier & { name: WorkflowCallKind } };
 
-function astNode(value: unknown): value is acorn.AnyNode {
+function isAcornNode(value: unknown): value is acorn.AnyNode {
   return typeof value === "object" && value !== null && "type" in value && typeof value.type === "string";
 }
 function astChildren(node: acorn.AnyNode): acorn.AnyNode[] {
   const children: acorn.AnyNode[] = [];
-  for (const value of Object.values(node) as unknown[]) {
+  for (const value of Object.values(node)) {
     if (Array.isArray(value)) {
-      for (const child of value) if (astNode(child)) children.push(child);
-    } else if (astNode(value)) children.push(value);
+      for (const child of value) if (isAcornNode(child)) children.push(child);
+    } else if (isAcornNode(value)) children.push(value);
   }
   return children;
 }
+function isWorkflowCallKind(value: unknown): value is WorkflowCallKind {
+  return typeof value === "string" && WORKFLOW_CALL_KINDS.some((kind) => kind === value);
+}
+function isWorkflowCall(node: acorn.AnyNode): node is WorkflowCall {
+  return node.type === "CallExpression" && node.callee.type === "Identifier" && isWorkflowCallKind(node.callee.name);
+}
 function workflowCallKind(node: acorn.AnyNode): WorkflowCallKind | undefined {
-  if (node.type !== "CallExpression" || node.callee.type !== "Identifier") return undefined;
-  const kind = node.callee.name as WorkflowCallKind;
-  return WORKFLOW_CALL_KINDS.includes(kind) ? kind : undefined;
+  return isWorkflowCall(node) ? node.callee.name : undefined;
 }
 function workflowCalls(program: acorn.Program): WorkflowCall[] {
   const calls: WorkflowCall[] = [];
   const visit = (node: acorn.AnyNode): void => {
-    if (workflowCallKind(node)) calls.push(node as WorkflowCall);
+    if (isWorkflowCall(node)) calls.push(node);
     for (const child of astChildren(node)) visit(child);
   };
   visit(program);
@@ -331,9 +354,9 @@ function workflowCallsWithStructure(program: acorn.Program): Array<{ call: Workf
       const key = node.key.type === "Identifier" ? node.key.name : node.key.type === "Literal" ? String(node.key.value) : undefined;
       if (scope?.key === null && key) current = { ...current, structure: [...current.structure.slice(0, -1), { ...scope, key }] };
     }
-    const operation = workflowCallKind(node);
-    if (operation) {
-      const call = node as WorkflowCall;
+    if (isWorkflowCall(node)) {
+      const call = node;
+      const operation = call.callee.name;
       const execution = operation === "parallel" ? "parallel" : operation === "pipeline" ? "sequential" : current.execution;
       calls.push({ call, execution, structure: current.structure });
       for (const [index, argument] of call.arguments.entries()) {
@@ -478,7 +501,13 @@ export function workflowPrompt(template: string, values: Readonly<Record<string,
   if (missing) fail("INVALID_METADATA", `Missing prompt value "${missing}"`);
   const unused = keys.find((key) => !used.has(key));
   if (unused !== undefined) fail("INVALID_METADATA", `Unused prompt value "${unused}"`);
-  return template.replace(/{{|}}|{([A-Za-z_$][\w$]*)}/g, (match, key: string | undefined) => match === "{{" ? "{" : match === "}}" ? "}" : typeof values[key as string] === "string" ? values[key as string] as string : JSON.stringify(values[key as string], null, 2));
+  return template.replace(/{{|}}|{([A-Za-z_$][\w$]*)}/g, (match, key: string | undefined) => {
+    if (match === "{{") return "{";
+    if (match === "}}") return "}";
+    if (typeof key !== "string") return match;
+    const value = values[key];
+    return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  });
 }
 
 export function validateSchema(schema: unknown, at = "schema"): asserts schema is JsonSchema {
@@ -494,16 +523,30 @@ export function validateRoleOverride(value: unknown, aliases?: Readonly<Record<s
   if (!object(value) || Array.isArray(value)) fail("INVALID_METADATA", "agent role must be a string or an object with a non-empty name and optional frontmatter overrides");
   for (const key of Object.keys(value)) if (!ROLE_OVERRIDE_KEYS.has(key)) fail("INVALID_METADATA", `agent role override ${key} is not supported`);
   if (typeof value.name !== "string" || !value.name.trim()) fail("INVALID_METADATA", "agent role object requires a non-empty name");
-  const { model, thinking, tools, description, overrideSystemPrompt, contextFiles, disabledAgentResources } = value;
+  const { name, model, thinking, tools, description, overrideSystemPrompt, contextFiles, disabledAgentResources } = value;
   if (model !== undefined && model !== null && (typeof model !== "string" || !model.trim())) fail("INVALID_METADATA", "agent role override model must be a non-empty string or null");
   if (model !== undefined && model !== null && aliases !== undefined) resolveModelReference(model, aliases, knownModels, settingsPath);
   if (thinking !== undefined && thinking !== null && (typeof thinking !== "string" || !parseThinking(thinking))) fail("INVALID_METADATA", "agent role override thinking must be off, minimal, low, medium, high, xhigh, or max, or null");
   if (tools !== undefined && tools !== null && (!Array.isArray(tools) || tools.some((tool) => typeof tool !== "string" || !tool.trim()))) fail("INVALID_METADATA", "agent role override tools must be an array of non-empty strings or null");
   if (description !== undefined && description !== null && (typeof description !== "string" || description.trim() === "" || description.length > 1024 || /[\r\n]/.test(description))) fail("INVALID_METADATA", "agent role override description must be a non-empty single-line string of at most 1024 characters or null");
   if (overrideSystemPrompt !== undefined && overrideSystemPrompt !== null && typeof overrideSystemPrompt !== "boolean") fail("INVALID_METADATA", "agent role override overrideSystemPrompt must be a boolean or null");
-  if (contextFiles !== undefined && contextFiles !== null) validateContextFileScopes(contextFiles, "role override");
-  if (disabledAgentResources !== undefined && disabledAgentResources !== null) validateAgentResourceExclusions(disabledAgentResources, "role override", "INVALID_METADATA");
-  return value as unknown as RoleOverride;
+  const normalizedContextFiles = contextFiles === undefined || contextFiles === null ? contextFiles : validateContextFileScopes(contextFiles, "role override");
+  const normalizedResources = disabledAgentResources === undefined || disabledAgentResources === null ? disabledAgentResources : validateAgentResourceExclusions(disabledAgentResources, "role override", "INVALID_METADATA");
+  const normalizedModel = model === undefined || model === null ? model : typeof model === "string" ? model : fail("INVALID_METADATA", "agent role override model must be a non-empty string or null");
+  const normalizedThinking = thinking === undefined || thinking === null ? thinking : parseThinking(thinking) ?? fail("INVALID_METADATA", "agent role override thinking must be off, minimal, low, medium, high, xhigh, or max, or null");
+  const normalizedTools = tools === undefined || tools === null ? tools : Array.isArray(tools) ? tools.map((tool: unknown) => typeof tool === "string" && tool.trim() ? tool.trim() : fail("INVALID_METADATA", "agent role override tools must be an array of non-empty strings or null")) : fail("INVALID_METADATA", "agent role override tools must be an array of non-empty strings or null");
+  const normalizedDescription = description === undefined || description === null ? description : typeof description === "string" ? description : fail("INVALID_METADATA", "agent role override description must be a non-empty single-line string of at most 1024 characters or null");
+  const normalizedOverrideSystemPrompt = overrideSystemPrompt === undefined || overrideSystemPrompt === null ? overrideSystemPrompt : typeof overrideSystemPrompt === "boolean" ? overrideSystemPrompt : fail("INVALID_METADATA", "agent role override overrideSystemPrompt must be a boolean or null");
+  return {
+    name,
+    ...(normalizedModel === undefined ? {} : { model: normalizedModel }),
+    ...(normalizedThinking === undefined ? {} : { thinking: normalizedThinking }),
+    ...(normalizedTools === undefined ? {} : { tools: normalizedTools }),
+    ...(normalizedDescription === undefined ? {} : { description: normalizedDescription }),
+    ...(normalizedOverrideSystemPrompt === undefined ? {} : { overrideSystemPrompt: normalizedOverrideSystemPrompt }),
+    ...(normalizedContextFiles === undefined ? {} : { contextFiles: normalizedContextFiles === null ? null : [...normalizedContextFiles] }),
+    ...(normalizedResources === undefined ? {} : { disabledAgentResources: normalizedResources === null ? null : { skills: [...normalizedResources.skills], extensions: [...normalizedResources.extensions] } }),
+  };
 }
 function validateAgentOption(key: string, value: unknown, aliases?: Readonly<Record<string, string>>, knownModels?: ReadonlySet<string>, settingsPath?: string): void {
   switch (key) {
@@ -531,7 +574,7 @@ function validateAgentOption(key: string, value: unknown, aliases?: Readonly<Rec
       validateSchema(value, "agent outputSchema");
       break;
     case "retries":
-      if (!Number.isInteger(value) || (value as number) < 0) fail("INVALID_METADATA", "agent retries must be a non-negative integer");
+      if (typeof value !== "number" || !Number.isInteger(value) || value < 0) fail("INVALID_METADATA", "agent retries must be a non-negative integer");
       break;
     case "timeoutMs":
       if (value !== null && !positiveInteger(value)) fail("INVALID_METADATA", "agent timeoutMs must be null or a positive integer");
@@ -545,12 +588,14 @@ export function validateAgentOptions(value: unknown): Readonly<Record<string, Js
   return value;
 }
 const SHELL_OPTION_KEYS = new Set(["timeoutMs", "env"]);
+function isStringRecord(value: unknown): value is Record<string, string> { return object(value) && Object.values(value).every((entry) => typeof entry === "string"); }
 export function validateShellOptions(value: unknown): ShellOptions {
   if (value === undefined) return {};
   if (!object(value) || !jsonValue(value) || Object.keys(value).some((key) => !SHELL_OPTION_KEYS.has(key))) fail("INVALID_METADATA", "shell options must contain only timeoutMs and env");
   if (value.timeoutMs !== undefined && !positiveInteger(value.timeoutMs)) fail("INVALID_METADATA", "shell timeoutMs must be a positive integer");
-  if (value.env !== undefined && (!object(value.env) || Object.values(value.env).some((entry) => typeof entry !== "string"))) fail("INVALID_METADATA", "shell env must be an object of strings");
-  return { ...(value.timeoutMs === undefined ? {} : { timeoutMs: value.timeoutMs }), ...(value.env === undefined ? {} : { env: value.env as Record<string, string> }) };
+  const env = value.env;
+  if (env !== undefined && !isStringRecord(env)) fail("INVALID_METADATA", "shell env must be an object of strings");
+  return { ...(value.timeoutMs === undefined ? {} : { timeoutMs: value.timeoutMs }), ...(env === undefined ? {} : { env }) };
 }
 export function validateShellCommand(value: unknown): string {
   if (typeof value !== "string") fail("INVALID_METADATA", "shell command must be a string");
@@ -610,21 +655,27 @@ function staticRoleName(node: acorn.AnyNode | undefined): string | null {
 }
 export function inspectWorkflowScript(script: string): StaticWorkflowCall[] {
   return workflowCallsWithStructure(parseWorkflow(script)).map(({ call, execution, structure }) => {
-    const kind = call.callee.name as StaticWorkflowCall["kind"];
+    const kind = call.callee.name;
     const first = callArgument(call, 0);
     const options = callArgument(call, 1);
     const placement = { execution, structure };
     if (kind === "agent") {
       const retries = staticValue(propertyNode(options, "retries"));
       const outputSchema = staticValue(propertyNode(options, "outputSchema"));
+      const staticOutputSchema = outputSchema.known && jsonObject(outputSchema.value) ? outputSchema.value : undefined;
       const optionKeys = options?.type === "ObjectExpression" ? options.properties.flatMap((property) => {
         if (property.type === "SpreadElement" || property.computed) return [];
         const key = property.key.type === "Identifier" ? property.key.name : property.key.type === "Literal" ? String(property.key.value) : undefined;
         return key ? [key] : [];
       }) : [];
-      const knownOptions = Object.fromEntries(optionKeys.flatMap((key) => { const value = staticValue(propertyNode(options, key)); return value.known && jsonValue(value.value) ? [[key, value.value]] : []; })) as Record<string, JsonValue>;
+      const knownOptionEntries: Array<[string, JsonValue]> = [];
+      for (const key of optionKeys) {
+        const value = staticValue(propertyNode(options, key));
+        if (value.known && jsonValue(value.value)) knownOptionEntries.push([key, value.value]);
+      }
+      const knownOptions: Record<string, JsonValue> = Object.fromEntries(knownOptionEntries);
       const base = { ...placement, kind, start: call.start, end: call.end, name: null, prompt: staticString(first), model: staticString(propertyNode(options, "model")), label: staticString(propertyNode(options, "label")), role: staticRoleName(propertyNode(options, "role")) };
-      return { ...base, ...(retries.known && typeof retries.value === "number" ? { retries: retries.value } : {}), ...(outputSchema.known && object(outputSchema.value) ? { outputSchema: outputSchema.value as JsonSchema } : {}), ...(optionKeys.length ? { options: knownOptions, optionKeys } : {}) };
+      return { ...base, ...(retries.known && typeof retries.value === "number" ? { retries: retries.value } : {}), ...(staticOutputSchema === undefined ? {} : { outputSchema: staticOutputSchema }), ...(optionKeys.length ? { options: knownOptions, optionKeys } : {}) };
     }
     if (kind === "checkpoint") return { ...placement, kind, start: call.start, end: call.end, name: staticString(propertyNode(first, "name")), prompt: staticString(propertyNode(first, "prompt")), model: null, role: null };
     if (kind === "shell") return { ...placement, kind, start: call.start, end: call.end, name: staticString(first), prompt: null, model: null, role: null };
@@ -635,7 +686,10 @@ export function inspectWorkflowScript(script: string): StaticWorkflowCall[] {
 function validateStaticAgentOptions(node: acorn.AnyNode | undefined, aliases: Readonly<Record<string, string>> = {}, knownModels?: ReadonlySet<string>, settingsPath?: string): void {
   if (node?.type !== "ObjectExpression") return;
   const options = staticValue(node);
-  if (options.known && object(options.value) && options.value.role !== undefined && ["model", "thinking", "tools"].some((key) => Object.prototype.hasOwnProperty.call(options.value as Record<string, unknown>, key))) fail("INVALID_METADATA", "Role agents must not specify model, thinking, or tools");
+  if (options.known && object(options.value)) {
+    const optionValues = options.value;
+    if (optionValues.role !== undefined && ["model", "thinking", "tools"].some((key) => Object.prototype.hasOwnProperty.call(optionValues, key))) fail("INVALID_METADATA", "Role agents must not specify model, thinking, or tools");
+  }
   for (const key of AGENT_OPTION_KEYS) {
     const value = staticValue(propertyNode(node, key));
     if (value.known) validateAgentOption(key, value.value, aliases, knownModels, settingsPath);
@@ -683,7 +737,11 @@ export function preflight(script: string, capabilities: PreflightCapabilities, s
   validateDirectPrimitiveReferences(program, "withWorktree");
   validateRemovedWorkflowPrimitives(program, compatibility ? "RESUME_INCOMPATIBLE" : "INVALID_METADATA");
   validateDirectPrimitiveReferences(program, "shell");
-  for (const [index, schema] of schemas.entries()) validateSchema(schema, `schema[${String(index)}]`);
+  const checkedSchemas: JsonSchema[] = [];
+  for (const [index, schema] of schemas.entries()) {
+    validateSchema(schema, `schema[${String(index)}]`);
+    checkedSchemas.push(schema);
+  }
   const calls = workflowCalls(program);
   validateObviousConcurrentAgentCalls(program);
   const phases = calls.filter((call) => call.callee.name === "phase").map((call) => literalString(call.arguments[0])).filter((phase): phase is string => phase !== undefined);
@@ -699,9 +757,15 @@ export function preflight(script: string, capabilities: PreflightCapabilities, s
   }
   const agentCalls = calls.filter((call) => call.callee.name === "agent");
   const dynamicAgentRoles = agentCalls.some((call) => hasDynamicAgentRole(call.arguments[1]));
-  const staticSchemas = agentCalls.flatMap((call) => { const value = staticValue(propertyNode(call.arguments[1], "outputSchema")); return value.known ? [value.value] : []; });
-  for (const [index, schema] of staticSchemas.entries()) validateSchema(schema, `agent outputSchema[${String(index)}]`);
-  const checkedSchemas = [...schemas, ...staticSchemas];
+  const staticSchemas: JsonSchema[] = [];
+  for (const call of agentCalls) {
+    const value = staticValue(propertyNode(call.arguments[1], "outputSchema"));
+    if (!value.known) continue;
+    const schema = value.value;
+    validateSchema(schema, `agent outputSchema[${String(staticSchemas.length)}]`);
+    staticSchemas.push(schema);
+  }
+  checkedSchemas.push(...staticSchemas);
   const modelRefs = agentCalls.flatMap((call) => { const role = propertyNode(call.arguments[1], "role"); const requested = literalString(propertyNode(call.arguments[1], "model")) ?? (role?.type === "ObjectExpression" ? literalString(propertyNode(role, "model")) : undefined); return requested === undefined ? [] : [{ requested, resolved: modelCapability(requested, capabilities.modelAliases, capabilities.knownModels ?? capabilities.models, capabilities.settingsPath) }]; });
   const models = modelRefs.map(({ resolved }) => resolved);
   const tools = agentCalls.flatMap((call) => {
@@ -719,7 +783,7 @@ export function preflight(script: string, capabilities: PreflightCapabilities, s
   if (missingTool) fail("UNKNOWN_TOOL", `Unknown tool: ${missingTool}`);
   const missingType = agentTypes.find((type) => !capabilities.agentTypes.has(type));
   if (missingType) fail("UNKNOWN_AGENT_TYPE", `Unknown agent type: ${missingType}`);
-  return Object.freeze({ metadata: deepFreeze(checkedMetadata), referenced: deepFreeze({ phases, models, tools, agentTypes }), schemas: deepFreeze(checkedSchemas) as readonly JsonSchema[], dynamicAgentRoles });
+  return Object.freeze({ metadata: deepFreeze(checkedMetadata), referenced: deepFreeze({ phases, models, tools, agentTypes }), schemas: deepFreeze(checkedSchemas), dynamicAgentRoles });
 }
 
 export function validateWorkflowLaunch(params: WorkflowValidationParameters, context: WorkflowValidationContext, registry?: WorkflowRegistryApi): ValidatedWorkflowLaunch {

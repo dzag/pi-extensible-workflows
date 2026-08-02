@@ -306,6 +306,10 @@ function isCatalogFunction(value: unknown): value is WorkflowCatalogFunction {
   return object(value) && typeof value.name === "string" && typeof value.description === "string" && object(value.input) && object(value.output);
 }
 
+function isWorkflowCatalogModelAlias(value: unknown): value is import("./types.js").WorkflowCatalogModelAlias {
+  return object(value) && typeof value.name === "string" && (value.kind === "static" || value.kind === "dynamic") && typeof value.provenance === "string" && (value.version === undefined || typeof value.version === "string") && (value.headline === undefined || typeof value.headline === "string");
+}
+
 function isCatalogError(value: unknown): value is { error: { message: string } } {
   return object(value) && object(value.error) && typeof value.error.message === "string";
 }
@@ -348,7 +352,7 @@ function formatCatalogDetail(value: WorkflowCatalogFunction | import("./types.js
 export function formatWorkflowCatalog(value: unknown, expanded: boolean, theme: Theme): string {
   if (isCatalogIndex(value)) return formatCatalogIndex(value, theme);
   if (isCatalogFunction(value)) return formatCatalogDetail(value, expanded, theme);
-  if (object(value) && typeof value.name === "string" && (value.kind === "static" || value.kind === "dynamic")) return formatCatalogDetail(value as unknown as import("./types.js").WorkflowCatalogModelAlias, expanded, theme);
+  if (isWorkflowCatalogModelAlias(value)) return formatCatalogDetail(value, expanded, theme);
   if (isCatalogError(value)) return theme.fg("error", value.error.message);
   return theme.fg("error", "The workflow catalog returned an invalid result.");
 }

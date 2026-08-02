@@ -3,35 +3,43 @@ import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
-import workflowExtension, { createLaunchSnapshot, DEFAULT_SETTINGS, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowPhaseDashboard, formatWorkflowProgress, mergeBudget, RunStore, truncateWorkflowProgress, WORKFLOW_AGENT_STALL_THRESHOLD_MS, type PersistedRun } from "../src/index.js";
-import { testTransport, type TestPiSession } from "./test-transport.js";
+import { testExtensionApi } from "./support.js";
+import workflowExtension, { createLaunchSnapshot, DEFAULT_SETTINGS, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowPhaseDashboard, formatWorkflowProgress, mergeBudget, RunStore, truncateWorkflowProgress, WORKFLOW_AGENT_STALL_THRESHOLD_MS, type AgentRecord, type PersistedRun } from "../src/index.js";
+import { testTransport, type TestPiSession, type TestPiSessionEvent } from "./test-transport.js";
 import { waitForIssue105 } from "./support.js";
+
+function makeAgent(overrides: Partial<AgentRecord> = {}): AgentRecord {
+  return { id: "run:1", name: "worker", path: "run:1", state: "running", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1, ...overrides };
+}
+
+function makeRun(overrides: Partial<PersistedRun> = {}): PersistedRun {
+  return { id: "run", workflowName: "test", cwd: "/repo", sessionId: "session", state: "running", agents: [], agentSessions: [], ...overrides };
+}
 
 void test("workflow progress warns after ten minutes of agent silence and resets on events", () => {
   const now = 12 * 60 * 60 * 1000;
-  const agent = { id: "run:1", name: "worker", path: "run:1", state: "running" as const, model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1, activity: { kind: "text" as const, text: "responding" }, lastEventAt: now - WORKFLOW_AGENT_STALL_THRESHOLD_MS + 1 };
-  const run = { id: "run", workflowName: "stalling", cwd: "/repo", sessionId: "session", state: "running" as const, agents: [agent], agentSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
+  const agent = makeAgent({ activity: { kind: "text", text: "responding" }, lastEventAt: now - WORKFLOW_AGENT_STALL_THRESHOLD_MS + 1 });
+  const run = makeRun({ workflowName: "stalling", agents: [agent] });
   assert.doesNotMatch(formatWorkflowProgress(run, "◇", undefined, now), /stalled\?/);
-  const atThreshold = { ...run, agents: [{ ...agent, lastEventAt: now - WORKFLOW_AGENT_STALL_THRESHOLD_MS }] } as Parameters<typeof formatWorkflowProgress>[0];
+  const atThreshold = makeRun({ ...run, agents: [{ ...agent, lastEventAt: now - WORKFLOW_AGENT_STALL_THRESHOLD_MS }] });
   assert.match(formatWorkflowProgress(atThreshold, "◇", undefined, now), /responding - stalled\? 10m/);
-  const stalled = { ...run, agents: [{ ...agent, lastEventAt: now - WORKFLOW_AGENT_STALL_THRESHOLD_MS - 2 * 60 * 1000 }] } as Parameters<typeof formatWorkflowProgress>[0];
+  const stalled = makeRun({ ...run, agents: [{ ...agent, lastEventAt: now - WORKFLOW_AGENT_STALL_THRESHOLD_MS - 2 * 60 * 1000 }] });
   assert.match(formatWorkflowProgress(stalled, "◇", undefined, now), /responding - stalled\? 12m/);
-  const longStalled = { ...run, agents: [{ ...agent, lastEventAt: now - WORKFLOW_AGENT_STALL_THRESHOLD_MS - 62 * 60 * 1000 }] } as Parameters<typeof formatWorkflowProgress>[0];
+  const longStalled = makeRun({ ...run, agents: [{ ...agent, lastEventAt: now - WORKFLOW_AGENT_STALL_THRESHOLD_MS - 62 * 60 * 1000 }] });
   assert.match(formatWorkflowProgress(longStalled, "◇", undefined, now), /responding - stalled\? 1h 12m/);
   const stalledAgent = stalled.agents[0];
   assert.ok(stalledAgent);
-  const noActivity = { ...stalled, agents: [{ ...stalledAgent, activity: undefined }] } as Parameters<typeof formatWorkflowProgress>[0];
+  const noActivity = makeRun({ ...stalled, agents: [{ ...stalledAgent, activity: undefined }] });
   assert.match(formatWorkflowProgress(noActivity, "◇", undefined, now), /stalled\? 12m/);
   assert.doesNotMatch(formatWorkflowProgress(noActivity, "◇", undefined, now), / - stalled\?/);
-  const reset = { ...stalled, agents: [{ ...stalledAgent, lastEventAt: now }] } as Parameters<typeof formatWorkflowProgress>[0];
+  const reset = makeRun({ ...stalled, agents: [{ ...stalledAgent, lastEventAt: now }] });
   assert.doesNotMatch(formatWorkflowProgress(reset, "◇", undefined, now), /stalled\?/);
   assert.match(formatNavigatorDashboard(stalled, [], [], now), /responding - stalled\? 12m/);
   const snapshot = createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "stalling" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
   assert.match(formatWorkflowPhaseDashboard(stalled, snapshot, 120, { agentId: "run:1" }, undefined, now).join("\n"), /stalled\? 12m/);
 });
 void test("workflow progress shows runtime after the workflow state", () => {
-  const run = { id: "run", workflowName: "runtime", cwd: "/repo", sessionId: "session", state: "running" as const, agents: [], agentSessions: [], usage: { tokens: 0, costUsd: 0, durationMs: 12_345, agentLaunches: 0 } } as Parameters<typeof formatWorkflowProgress>[0];
+  const run = makeRun({ workflowName: "runtime", usage: { tokens: 0, costUsd: 0, durationMs: 12_345, agentLaunches: 0 } });
   assert.match(formatWorkflowProgress(run), /\[running\] runtime=12s/);
   assert.match(formatWorkflowProgress({ ...run, state: "completed", usage: { tokens: 0, costUsd: 0, durationMs: 65_432, agentLaunches: 0 } }), /\[completed\] runtime=1m 5s/);
 });
@@ -56,10 +64,10 @@ void test("workflow log rendering keeps recent visual lines collapsed and all li
   type WorkflowTool = { name: string; renderResult?: (result: unknown, options: { expanded: boolean; isPartial: boolean }, theme: unknown, context: unknown) => Rendered };
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-log-rendering-"));
   const tools: WorkflowTool[] = [];
-  workflowExtension({ registerTool(tool: WorkflowTool) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  workflowExtension(testExtensionApi({ registerTool(tool: WorkflowTool) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home);
   const tool = tools.find(({ name }) => name === "workflow");
   assert.ok(tool?.renderResult);
-  const run = { id: "run", workflowName: "logs", cwd: home, sessionId: "session", state: "completed" as const, agents: [], agentSessions: [], events: Array.from({ length: 6 }, (_, index) => ({ type: "log", message: index === 5 ? "last line\ncontinued line" : `log-${String(index)}`, timestamp: Date.UTC(2024, 0, 2, 3, 4, index) })) } as PersistedRun;
+  const run = makeRun({ workflowName: "logs", cwd: home, state: "completed", events: Array.from({ length: 6 }, (_, index) => ({ type: "log", message: index === 5 ? "last line\ncontinued line" : `log-${String(index)}`, timestamp: Date.UTC(2024, 0, 2, 3, 4, index) })) });
   const result = { content: [], details: { run } };
   const theme = { fg: (color: string, text: string) => `<${color}>${text}</${color}>`, bold: (text: string) => `<bold>${text}</bold>` };
   const context = { state: {}, cwd: home, invalidate: () => {} };
@@ -80,11 +88,11 @@ void test("inline workflow progress rebases runtime after pause and resume", () 
   try {
     const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-inline-runtime-"));
     const tools: Array<{ name: string; renderResult?: (result: unknown, options: unknown, theme: unknown, context: unknown) => { render: (width: number) => string[] } }> = [];
-    workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+    workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home);
     const tool = tools.find(({ name }) => name === "workflow");
     assert.ok(tool?.renderResult);
-    const agent = { id: "run:1", name: "worker", path: "run:1", state: "running" as const, model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 };
-    const running = { id: "run", workflowName: "runtime", cwd: home, sessionId: "session", state: "running" as const, agents: [agent], agentSessions: [], usage: { tokens: 0, costUsd: 0, durationMs: 100, agentLaunches: 0 } } as PersistedRun;
+    const agent = makeAgent();
+    const running = makeRun({ workflowName: "runtime", cwd: home, agents: [agent], usage: { tokens: 0, costUsd: 0, durationMs: 100, agentLaunches: 0 } });
     const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
     const context = { state: {}, cwd: home, invalidate: () => {} };
     tool.renderResult({ content: [], details: { run: running } }, { expanded: false, isPartial: true }, theme, context);
@@ -102,7 +110,7 @@ void test("inline workflow progress rebases runtime after pause and resume", () 
 });
 void test("workflow progress shows active shell operations with start and elapsed time", () => {
   const now = 65_432;
-  const run = { id: "run", workflowName: "shell-progress", cwd: "/repo", sessionId: "session", state: "running" as const, agents: [], agentSessions: [], activeShells: 2, activeShellStartedAt: 0 } as Parameters<typeof formatWorkflowProgress>[0];
+  const run = makeRun({ workflowName: "shell-progress", activeShells: 2, activeShellStartedAt: 0 });
   const progress = formatWorkflowProgress(run, "◇", undefined, now);
   assert.match(progress, /shell \[running\] \(2 active\)/);
   assert.match(progress, /started=1970-01-01T00:00:00\.000Z/);
@@ -119,13 +127,13 @@ void test("workflow progress shows active shell operations with start and elapse
   assert.doesNotMatch(formatWorkflowProgress(legacy), /shell \[running\]/);
 });
 void test("workflow progress nests active shell under its phase occurrence", () => {
-  const run = { id: "run", workflowName: "shell-phase", cwd: "/repo", sessionId: "session", state: "running" as const, agents: [], agentSessions: [], phase: "verify", phaseHistory: [{ phase: "build", afterAgent: 0 }, { phase: "verify", afterAgent: 0 }], activeShells: 1, activeShellStartedAt: 0, activeShellsByPhase: [{ phaseIndex: 1, active: 1, startedAt: 0 }] } as Parameters<typeof formatWorkflowProgress>[0];
+  const run = makeRun({ workflowName: "shell-phase", phase: "verify", phaseHistory: [{ phase: "build", afterAgent: 0 }, { phase: "verify", afterAgent: 0 }], activeShells: 1, activeShellStartedAt: 0, activeShellsByPhase: [{ phaseIndex: 1, active: 1, startedAt: 0 }] });
   const progress = formatWorkflowProgress(run, "◇", undefined, 65_432);
   assert.match(progress, /\[Phase: verify\]\n\s{4}◇ shell \[running\] \(1 active\)/);
   assert.doesNotMatch(progress, /\n\s{2}◇ shell \[running\]/);
 });
 void test("navigator keeps agent rows compact while preserving identity and state", () => {
-  const run = { id: "run", workflowName: "policy", cwd: "/repo", sessionId: "session", state: "running", agents: [{ id: "run:1", name: "review", path: "run:1", state: "running", role: "reviewer", model: { provider: "anthropic", model: "opus", thinking: "high" }, tools: ["read", "grep"], attempts: 1 }], agentSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
+  const run = makeRun({ workflowName: "policy", agents: [makeAgent({ id: "run:1", name: "review", path: "run:1", role: "reviewer", model: { provider: "anthropic", model: "opus", thinking: "high" }, tools: ["read", "grep"] })] });
   const dashboard = formatNavigatorDashboard(run, [], []);
   assert.match(dashboard, /⠦ review · running/);
   assert.doesNotMatch(dashboard, /model=|requested=|tools=|role=/);
@@ -133,8 +141,8 @@ void test("navigator keeps agent rows compact while preserving identity and stat
 });
 void test("compact TUI hides budgets without effective limits", () => {
   const snapshot = createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "render" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
-  const render = (budget: unknown): string => {
-    const run = { id: "run", workflowName: "render", cwd: "/repo", sessionId: "session", state: "running", agents: [], agentSessions: [], ...(budget === undefined ? {} : { budget }) } as Parameters<typeof formatWorkflowProgress>[0];
+  const render = (budget: PersistedRun["budget"]): string => {
+    const run = makeRun({ workflowName: "render", ...(budget === undefined ? {} : { budget }) });
     return [formatWorkflowProgress(run), formatNavigatorDashboard(run, [], []), formatNavigatorRun({ run, snapshot }, [], [])].join("\n");
   };
   for (const budget of [undefined, {}, { tokens: {} }]) assert.doesNotMatch(render(budget), /Budget|unlimited|tokens|costUsd|durationMs|agentLaunches/);
@@ -150,10 +158,10 @@ void test("compact TUI hides budgets without effective limits", () => {
   assert.doesNotMatch(render(removed), /Budget|unlimited|tokens|costUsd|durationMs|agentLaunches/);
 });
 void test("navigator uses persisted labels and model fallbacks across views", () => {
-  const run = { id: "run", workflowName: "labels", cwd: "/repo", sessionId: "session", state: "running", agents: [
-    { id: "run:1", name: "stale-name", label: "explicit label", path: "run:1", state: "running", model: { provider: "provider", model: "worker" }, tools: [], attempts: 1 },
-    { id: "run:2", name: "worker", path: "run:2", state: "completed", parentId: "run:1", model: { provider: "provider", model: "worker" }, tools: [], attempts: 1 },
-  ], agentSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
+  const run = makeRun({ workflowName: "labels", agents: [
+    makeAgent({ id: "run:1", name: "stale-name", label: "explicit label", path: "run:1", model: { provider: "provider", model: "worker" } }),
+    makeAgent({ id: "run:2", name: "worker", path: "run:2", state: "completed", parentId: "run:1", model: { provider: "provider", model: "worker" } }),
+  ] });
   const dashboard = formatNavigatorDashboard(run, [], []);
   const progress = formatWorkflowProgress(run);
   const detail = formatNavigatorRun({ run, snapshot: createLaunchSnapshot({ script: "return 1;", args: null, metadata: { name: "labels" }, settings: DEFAULT_SETTINGS, models: ["provider/worker"], tools: [], agentTypes: [], schemas: [] }) }, [], []);
@@ -168,10 +176,10 @@ void test("streams foreground workflow progress into its tool card", async () =>
   type Update = { content: Array<{ type: string; text: string }>; details: { run: { state: string; phase?: string } } };
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-progress-"));
-  workflowExtension({
+  workflowExtension(testExtensionApi({
     registerTool(tool: (typeof tools)[number]) { tools.push(tool); },
     registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {},
-  } as never, home);
+  }), home);
   const tool = tools.find(({ name }) => name === "workflow");
   assert.ok(tool);
   const updates: Update[] = [];
@@ -186,12 +194,12 @@ void test("inline workflow progress refreshes persisted state for stalled agents
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-inline-stall-"));
   const store = new RunStore(home, "session", "run", home);
   const staleAt = Date.now() - WORKFLOW_AGENT_STALL_THRESHOLD_MS - 1;
-  const agent = { id: "run:1", name: "worker", path: "run:1", state: "running" as const, model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1, activity: { kind: "text" as const, text: "responding" }, lastEventAt: staleAt };
-  const persistedRun = { id: "run", workflowName: "inline-stall", cwd: home, sessionId: "session", state: "running" as const, agents: [agent], agentSessions: [] } as PersistedRun;
+  const agent = makeAgent({ activity: { kind: "text", text: "responding" }, lastEventAt: staleAt });
+  const persistedRun = makeRun({ workflowName: "inline-stall", cwd: home, agents: [agent] });
   await store.create(persistedRun, createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "inline-stall" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] }));
   const visibleRun = { ...persistedRun, agents: [{ ...agent, lastEventAt: Date.now() }] };
   const tools: WorkflowTool[] = [];
-  workflowExtension({ registerTool(tool: WorkflowTool) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  workflowExtension(testExtensionApi({ registerTool(tool: WorkflowTool) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home);
   const tool = tools.find(({ name }) => name === "workflow");
   assert.ok(tool?.renderResult);
   const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
@@ -215,7 +223,7 @@ void test("foreground workflow progress reports a shell waiting after agents set
   const command = `${process.execPath} -e ${JSON.stringify(`const fs=require("node:fs");fs.writeFileSync(${JSON.stringify(startedPath)},"started");const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(releasePath)})){clearInterval(timer);process.exit(0);}},1);`)}`;
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   const createSession = async (): Promise<TestPiSession> => ({ transport: "local", session: { transport: "local", sessionId: "shell-progress-agent", locator: { sessionFile: "/sessions/shell-progress-agent.jsonl" } }, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} });
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, async () => {}, testTransport(createSession));
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home, async () => {}, testTransport(createSession));
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   const updates: PersistedRun[] = [];
@@ -255,7 +263,7 @@ void test("foreground workflow reports parallel agent activities together", { ti
   const createSession = async (): Promise<TestPiSession> => {
     const id = ++session;
     const toolName = id === 1 ? "read" : "grep";
-    let listener: ((event: AgentSessionEvent) => void) | undefined;
+    let listener: ((event: TestPiSessionEvent) => void) | undefined;
     return {
       sessionId: `parallel-${String(id)}`, sessionFile: `/sessions/parallel-${String(id)}.jsonl`,
       messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
@@ -270,7 +278,7 @@ void test("foreground workflow reports parallel agent activities together", { ti
       dispose() {},
     };
   };
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "read", "grep"], on() {} } as never, home, async () => {}, testTransport(createSession));
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "read", "grep"], on() {} }), home, async () => {}, testTransport(createSession));
   const tool = tools.find(({ name }) => name === "workflow");
   assert.ok(tool);
   const seen = new Set<string>();
@@ -290,7 +298,7 @@ void test("foreground workflow reports parallel agent activities together", { ti
 });
 
 void test("workflow progress keeps each agent to one line with latest tool", () => {
-  const run = { id: "run", workflowName: "live", cwd: "/repo", sessionId: "session", state: "running", phase: "work", agents: [{ id: "run:1", name: "review", path: "run:1", state: "running", model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" }, tools: ["read"], attempts: 1, accounting: { input: 120, output: 30, cacheRead: 40, cacheWrite: 0, cost: 0.01 }, toolCalls: [{ id: "call-1", name: "ls", state: "completed" }, { id: "call-2", name: "read", state: "running" }] }], agentSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
+  const run = makeRun({ workflowName: "live", phase: "work", agents: [makeAgent({ id: "run:1", name: "review", path: "run:1", model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" }, tools: ["read"], accounting: { input: 120, output: 30, cacheRead: 40, cacheWrite: 0, cost: 0.01 }, toolCalls: [{ id: "call-1", name: "ls", state: "completed" }, { id: "call-2", name: "read", state: "running" }] })] });
   const rendered = formatWorkflowProgress(run);
   assert.match(rendered, /#1 ◇ review \[running\] ◇ read/);
   assert.doesNotMatch(rendered, /Model:/);
@@ -299,13 +307,13 @@ void test("workflow progress keeps each agent to one line with latest tool", () 
   assert.match(formatWorkflowProgress(run, "⠙"), /⠙ Workflow:[\s\S]*#1 ⠙ review \[running\] ⠙ read/);
   const agent = run.agents[0];
   assert.ok(agent);
-  const reasoning = { ...run, agents: [{ ...agent, activity: { kind: "reasoning" as const, text: "checking cache" } }] } as Parameters<typeof formatWorkflowProgress>[0];
+  const reasoning = makeRun({ ...run, agents: [{ ...agent, activity: { kind: "reasoning", text: "checking cache" } }] });
   assert.match(formatWorkflowProgress(reasoning), /reasoning/);
   assert.doesNotMatch(formatWorkflowProgress(reasoning), /checking cache/);
-  const text = { ...run, agents: [{ ...agent, activity: { kind: "text" as const, text: "streaming answer" } }] } as Parameters<typeof formatWorkflowProgress>[0];
+  const text = makeRun({ ...run, agents: [{ ...agent, activity: { kind: "text", text: "streaming answer" } }] });
   assert.match(formatWorkflowProgress(text), /responding/);
   assert.doesNotMatch(formatWorkflowProgress(text), /streaming answer/);
-  const settled = { ...run, agents: [{ ...agent, state: "completed" as const, activity: { kind: "text" as const, text: "stale output" } }] } as Parameters<typeof formatWorkflowProgress>[0];
+  const settled = makeRun({ ...run, agents: [{ ...agent, state: "completed", activity: { kind: "text", text: "stale output" } }] });
   assert.doesNotMatch(formatWorkflowProgress(settled), /stale output|◇ read/);
 });
 void test("workflow progress applies semantic styles without coloring agent names", () => {
@@ -318,13 +326,13 @@ void test("workflow progress applies semantic styles without coloring agent name
     dim: (text: string) => `<dim>${text}</dim>`,
     bold: (text: string) => `<bold>${text}</bold>`,
   };
-  const run = { id: "run", workflowName: "styled", cwd: "/repo", sessionId: "session", state: "budget_exhausted", phase: "work", agents: [
-    { id: "run:1", name: "done", path: "run:1", state: "completed", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
-    { id: "run:2", name: "live", path: "run:2", state: "running", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1, activity: { kind: "text" as const, text: "answer" } },
-    { id: "run:3", name: "waiting", path: "run:3", state: "queued", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
-    { id: "run:4", name: "failed", path: "run:4", state: "failed", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
-    { id: "run:5", name: "cancelled", path: "run:5", state: "cancelled", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
-  ], agentSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
+  const run = makeRun({ workflowName: "styled", state: "budget_exhausted", phase: "work", agents: [
+    makeAgent({ id: "run:1", name: "done", path: "run:1", state: "completed" }),
+    makeAgent({ id: "run:2", name: "live", path: "run:2", activity: { kind: "text", text: "answer" } }),
+    makeAgent({ id: "run:3", name: "waiting", path: "run:3", state: "queued" }),
+    makeAgent({ id: "run:4", name: "failed", path: "run:4", state: "failed" }),
+    makeAgent({ id: "run:5", name: "cancelled", path: "run:5", state: "cancelled" }),
+  ] });
   const progress = formatWorkflowProgress(run, "@", styles);
   assert.match(progress, /<bold><accent>Workflow: styled/);
   assert.match(progress, /<warning>!<\/warning>/);
@@ -346,12 +354,12 @@ void test("workflow progress truncation closes ANSI styles within terminal width
   assert.equal(stripAnsi(truncateWorkflowProgress(line, 1)[0] ?? ""), "…");
 });
 void test("workflow cards group structural scopes with stable creation order", () => {
-  const run = { id: "run", workflowName: "grouped", cwd: "/repo", sessionId: "session", state: "running", agents: [
-    { id: "run:1", name: "developer", path: "run:1", state: "completed", structuralPath: ["issues", "issue-65"], parentBreadcrumb: "developUntilApproved", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
-    { id: "run:2", name: "developer", path: "run:2", state: "running", structuralPath: ["issues", "issue-66"], parentBreadcrumb: "developUntilApproved", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
-    { id: "run:3", name: "reviewer", path: "run:3", state: "running", structuralPath: ["issues", "issue-65"], parentBreadcrumb: "developUntilApproved", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
-    { id: "run:4", name: "child", path: "run:4", state: "running", parentId: "run:3", structuralPath: ["issues", "issue-65"], parentBreadcrumb: "developUntilApproved", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
-  ], agentSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
+  const run = makeRun({ workflowName: "grouped", agents: [
+    makeAgent({ id: "run:1", name: "developer", path: "run:1", state: "completed", structuralPath: ["issues", "issue-65"], parentBreadcrumb: "developUntilApproved" }),
+    makeAgent({ id: "run:2", name: "developer", path: "run:2", structuralPath: ["issues", "issue-66"], parentBreadcrumb: "developUntilApproved" }),
+    makeAgent({ id: "run:3", name: "reviewer", path: "run:3", structuralPath: ["issues", "issue-65"], parentBreadcrumb: "developUntilApproved" }),
+    makeAgent({ id: "run:4", name: "child", path: "run:4", parentId: "run:3", structuralPath: ["issues", "issue-65"], parentBreadcrumb: "developUntilApproved" }),
+  ] });
   const progress = formatWorkflowProgress(run);
   const dashboard = formatNavigatorDashboard(run, [], [{ owner: "worktree/named/issue-65", branch: "hidden", path: "/hidden", cwd: "/hidden", base: "base" }]);
   assert.match(progress, /issues > issue-65 > developUntilApproved/);
@@ -363,10 +371,10 @@ void test("workflow cards group structural scopes with stable creation order", (
   assert.match(progress, /#4 ◇ child/);
 });
 void test("workflow progress keeps top-level agents separate from review-loop groups", () => {
-  const run = { id: "run", workflowName: "mixed", cwd: "/repo", sessionId: "session", state: "running", agents: [
-    { id: "run:1", name: "scout", path: "run:1", state: "completed", structuralPath: [], model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
-    { id: "run:2", name: "developer", path: "run:2", state: "running", structuralPath: [], parentBreadcrumb: "reviewLoop.developUntilApproved", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1 },
-  ], agentSessions: [] } as Parameters<typeof formatWorkflowProgress>[0];
+  const run = makeRun({ workflowName: "mixed", agents: [
+    makeAgent({ id: "run:1", name: "scout", path: "run:1", state: "completed", structuralPath: [] }),
+    makeAgent({ id: "run:2", name: "developer", path: "run:2", structuralPath: [], parentBreadcrumb: "reviewLoop.developUntilApproved" }),
+  ] });
   const progress = formatWorkflowProgress(run);
   assert.match(progress, / {2}Agents\n {4}#1 ✓ scout \[completed\]/);
   assert.match(progress, / {2}reviewLoop\.developUntilApproved\n {4}#2 ◇ developer \[running\]/);

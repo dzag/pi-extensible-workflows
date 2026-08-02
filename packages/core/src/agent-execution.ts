@@ -3,8 +3,8 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
-import { Value } from "typebox/value";
-import { createAgentSession, DefaultPackageManager, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager, type SessionStartEvent, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Compile } from "typebox/compile";
+import { createAgentSession, DefaultPackageManager, DefaultResourceLoader, defineTool, getAgentDir, ModelRuntime, SessionManager, SettingsManager, type SessionStartEvent, type ToolDefinition } from "@earendil-works/pi-coding-agent"
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 type AgentMessage = { role: string; content?: unknown; stopReason?: string; errorMessage?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: { total: number } } };
 type LocalSessionShutdownReason = "quit" | "resume";
@@ -14,7 +14,7 @@ export interface PiSession {
   readonly messages: readonly AgentMessage[];
   getSessionStats(): { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number }; cost: number };
   readonly systemPrompt?: string;
-  readonly model?: { provider: string; model?: string; id?: string };
+  readonly model?: { provider: string; model?: string; id?: string } | undefined;
   readonly thinkingLevel?: string;
   readonly agent?: { state: { tools: readonly { name: string }[] }; subscribe?(listener: (event: unknown) => void | Promise<void>): () => void };
   readonly herdrResourcePaths?: { extensions: readonly string[]; skills: readonly string[] };
@@ -43,11 +43,13 @@ export interface PiResourceInspection {
   readonly systemPromptSource?: string;
 }
 import type { AgentIdentity, AgentResourceExclusions, AgentResourcePolicy, AgentSetup, AgentSetupSummary, AgentTransport, AgentTransportContext, ContextFileScope, JsonSchema, JsonValue, LiveSessionHandoff, ModelSpec, PiRuntimeLaunchInfo, PreparedAgentSession, RegisteredAgentSetupHook, RoleOverride, SessionInput, WorkflowAgentMessage, WorkflowAgentSession, WorkflowAgentSessionEvent, WorkflowAgentSessionReference, WorkflowAgentSessionState, WorkflowAgentSessionStats, WorkflowAgentTurnResult, WorkflowRunContext } from "./types.js";
-import { deepFreeze, jsonObject, disabledResources, mergeAgentResourceExclusions, modelAliasName, modelCapability, resolveModelReference, unmatchedResourcePatterns } from "./utils.js";
+import { deepFreeze, jsonObject, jsonValue, object, disabledResources, mergeAgentResourceExclusions, modelAliasName, modelCapability, resolveModelReference, unmatchedResourcePatterns } from "./utils.js";
 import { roleNameOf } from "./types.js";
 import { WorkflowError } from "./types.js";
 import { createLiveSessionHandoff } from "./session-handoff.js";
+import { validateSchema } from "./validation.js";
 import type { RunStore } from "./persistence.js";
+type AgentExecutionRunStore = Pick<RunStore, "recordSystemPrompt" | "validateWorktree" | "worktree" | "snapshotWorktree">;
 export type { AgentInspectionMode, AgentSetup, AgentSetupContext, AgentSetupHook, AgentTransport, AgentTransportContext, PiRuntimeLaunchInfo, PreparedAgentSession, RegisteredAgentSetupHook, SessionInput, WorkflowAgentMessage, WorkflowAgentSession, WorkflowAgentSessionEvent, WorkflowAgentSessionReference, WorkflowAgentSessionState, WorkflowAgentSessionStats, WorkflowAgentTurnResult } from "./types.js";
 export interface AgentBudgetHooks {
   beforeAttempt(): void;
@@ -97,7 +99,7 @@ export interface AgentExecutionRoot {
   blockedAliases?: ReadonlySet<string>;
   blockedAliasTargets?: Readonly<Record<string, string>>;
   settingsPath?: string;
-  runStore?: RunStore;
+  runStore?: AgentExecutionRunStore;
   providerPause?: () => Promise<void>;
   agentSetupHooks?: readonly RegisteredAgentSetupHook[];
   agentResourcePolicy?: () => AgentResourcePolicy | Promise<AgentResourcePolicy>;
@@ -130,21 +132,20 @@ function latestAssistantHasToolCall(message: WorkflowAgentMessage | undefined): 
 function isTerminalAssistant(message: WorkflowAgentMessage | undefined): boolean { return Boolean(message) && message?.stopReason !== "aborted" && !hasToolCall(message); }
 
 type TerminalProviderError = { provider: string; model: string; error: string };
+const terminalProviderErrors = new WeakMap<WorkflowError, TerminalProviderError>();
 function throwIfTerminalAssistantError(session: WorkflowAgentSession, message: WorkflowAgentMessage | undefined): void {
   if (message?.stopReason !== "error") return;
   const state = session.getState();
   const error = message.errorMessage ?? "Workflow agent session ended with a terminal provider error";
   const failure = new WorkflowError("AGENT_FAILED", error);
-  Object.defineProperty(failure, "terminalProviderError", { value: { provider: state.model.provider, model: state.model.model, error }, configurable: true });
+  terminalProviderErrors.set(failure, { provider: state.model.provider, model: state.model.model, error });
   throw failure;
 }
 function terminalProviderError(error: WorkflowError): TerminalProviderError | undefined {
-  const value = (error as WorkflowError & { terminalProviderError?: unknown }).terminalProviderError;
-  if (!value || typeof value !== "object") return undefined;
-  const candidate = value as Partial<TerminalProviderError>;
-  return typeof candidate.provider === "string" && typeof candidate.model === "string" && typeof candidate.error === "string" ? { provider: candidate.provider, model: candidate.model, error: candidate.error } : undefined;
+  return terminalProviderErrors.get(error);
 }
 type ProviderRecoveryMarker = { providerRecoveryHandled?: boolean; providerRecovery?: AgentProviderRecovery; providerRecoveryFailed?: boolean };
+const providerRecoveryMarkers = new WeakMap<WorkflowError, ProviderRecoveryMarker>();
 const providerContinuationPrompt = "The provider error was transient. Continue the task from your current state.";
 const handoffContinuationPrompt = "Continue the task from the current session state.";
 async function recoverTerminalProviderError(session: WorkflowAgentSession, label: string, recovery: AgentExecutionOptions["providerErrorRecovery"], continuePrompt: () => Promise<void>, getAssistant: () => WorkflowAgentMessage | undefined): Promise<boolean> {
@@ -156,9 +157,9 @@ async function recoverTerminalProviderError(session: WorkflowAgentSession, label
       const terminal = terminalProviderError(typed);
       if (!terminal || !recovery) throw error;
       let action: AgentProviderRecovery;
-      try { action = await recovery({ label, ...terminal }); } catch { Object.assign(typed, { providerRecoveryHandled: true, providerRecoveryFailed: true }); throw typed; }
+      try { action = await recovery({ label, ...terminal }); } catch { providerRecoveryMarkers.set(typed, { providerRecoveryHandled: true, providerRecoveryFailed: true }); throw typed; }
       if (action === "retry") { continued = true; await continuePrompt(); continue; }
-      Object.assign(typed, { providerRecoveryHandled: true, providerRecovery: action });
+      providerRecoveryMarkers.set(typed, { providerRecoveryHandled: true, providerRecovery: action });
       throw typed;
     }
   }
@@ -198,7 +199,7 @@ function filterContextFiles(base: readonly { path: string; content: string }[], 
 type NativePromptTemplateModule = { expandPromptTemplate(text: string, templates: readonly { name: string; content: string }[]): string };
 let nativePromptTemplateModule: Promise<NativePromptTemplateModule> | undefined;
 function loadNativePromptTemplateModule(): Promise<NativePromptTemplateModule> {
-  return nativePromptTemplateModule ??= import(resolve(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "core/prompt-templates.js")).then((module) => module as unknown as NativePromptTemplateModule);
+  return nativePromptTemplateModule ??= import(resolve(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "core/prompt-templates.js")).then((module) => module as NativePromptTemplateModule);
 }
 async function expandPromptTemplateForInspection(text: string, templates: readonly { name: string; content: string }[]): Promise<string> {
   return (await loadNativePromptTemplateModule()).expandPromptTemplate(text, templates);
@@ -524,7 +525,7 @@ interface ChildAgentToolParams {
   model?: string;
   thinking?: ThinkingLevel;
   role?: string | RoleOverride;
-  outputSchema?: JsonSchema;
+  outputSchema?: unknown;
   retries?: number;
   timeoutMs?: number | null;
   [key: string]: unknown;
@@ -577,8 +578,8 @@ function packageRoot(start: string): string | undefined {
     const candidates = [current, join(current, "..", "@earendil-works", "pi-coding-agent"), join(current, "..", "pi-coding-agent")];
     for (const candidate of candidates) {
       try {
-        const packageJson = JSON.parse(readFileSync(join(candidate, "package.json"), "utf8")) as { name?: unknown };
-        if (packageJson.name === "@earendil-works/pi-coding-agent") return candidate;
+        const packageJson: unknown = JSON.parse(readFileSync(join(candidate, "package.json"), "utf8"));
+        if (object(packageJson) && typeof packageJson.name === "string" && packageJson.name === "@earendil-works/pi-coding-agent") return candidate;
       } catch { /* Continue to the next package candidate. */ }
     }
     const parent = dirname(current);
@@ -595,8 +596,10 @@ function resolvePiRuntime(): PiRuntimeResolution {
     const packageEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
     const root = packageRoot(packageEntry);
     if (!root) throw new Error("could not locate the @earendil-works/pi-coding-agent package root");
-    const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { bin?: string | Readonly<Record<string, string>> };
-    const cli = typeof packageJson.bin === "string" ? packageJson.bin : packageJson.bin?.pi;
+    const packageJson: unknown = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+    if (!object(packageJson)) throw new Error("the @earendil-works/pi-coding-agent package does not declare a pi CLI");
+    const bin = packageJson.bin;
+    const cli = typeof bin === "string" ? bin : object(bin) && typeof bin.pi === "string" ? bin.pi : undefined;
     if (!cli) throw new Error("the @earendil-works/pi-coding-agent package does not declare a pi CLI");
     const entrypoint = resolve(root, cli);
     if (!existsSync(entrypoint)) throw new Error(`the originating Pi CLI entrypoint is unavailable: ${entrypoint}`);
@@ -675,20 +678,31 @@ export async function prepareAgentSetupForInspection(root: AgentExecutionRoot, t
 function attemptRecord(transport: string, attempt: number, session: WorkflowAgentSession, setup: AgentSetupSummary, stats: AgentAccounting, result?: JsonValue, error?: { code: string; message: string }): AgentAttempt {
   return { attempt, transport, session: session.reference, ...(result === undefined ? {} : { result }), ...(error ? { error } : {}), accounting: stats, setup };
 }
+const agentAttemptsByError = new WeakMap<Error, readonly AgentAttempt[]>();
 function errorWithAttempts(error: unknown, attempts: readonly AgentAttempt[]): Error {
   const typed = error instanceof Error ? error : new Error(typeof error === "string" ? error : String(error));
-  return Object.assign(typed, { attempts });
+  const annotated = Object.assign(typed, { attempts });
+  agentAttemptsByError.set(typed, attempts);
+  return annotated;
 }
-const ROLE_OVERRIDE_KEYS = ["model", "thinking", "tools", "description", "overrideSystemPrompt", "contextFiles", "disabledAgentResources"] as const;
+export function getAgentAttempts(error: unknown): readonly AgentAttempt[] | undefined {
+  return error instanceof Error ? agentAttemptsByError.get(error) : undefined;
+}
+type RoleOverrideKey = Exclude<keyof RoleOverride, "name">;
+type RoleOverrideValues = { [Key in RoleOverrideKey]: RoleOverride[Key] };
+const ROLE_OVERRIDE_KEYS = ["model", "thinking", "tools", "description", "overrideSystemPrompt", "contextFiles", "disabledAgentResources"] as const satisfies readonly RoleOverrideKey[];
+function roleOverrideValues(override: RoleOverride): RoleOverrideValues {
+  return { model: override.model, thinking: override.thinking, tools: override.tools, description: override.description, overrideSystemPrompt: override.overrideSystemPrompt, contextFiles: override.contextFiles, disabledAgentResources: override.disabledAgentResources };
+}
 function applyRoleOverride(definition: AgentDefinition | undefined, override: RoleOverride): AgentDefinition | undefined {
   if (!definition) return definition;
   const merged: AgentDefinition = { ...definition };
-  const record = merged as Record<string, unknown>;
+  const values = roleOverrideValues(override);
   for (const key of ROLE_OVERRIDE_KEYS) {
-    const value = (override as unknown as Record<string, unknown>)[key];
+    const value = values[key];
     if (value === undefined) continue;
     if (value === null) Reflect.deleteProperty(merged, key);
-    else record[key] = value;
+    else Object.assign(merged, { [key]: value });
   }
   return merged;
 }
@@ -758,17 +772,18 @@ export class WorkflowAgentExecutor {
       let setupFailed = false;
       let budgetError: WorkflowError | undefined;
       const hasSchemaResult = () => schemaResult !== undefined;
-      const resultTool = options.schema ? {
-        name: "workflow_result", label: "Workflow Result", description: "Submit the terminal structured workflow result", parameters: Type.Unsafe(options.schema),
+      const resultSchema = options.schema ? Compile(options.schema) : undefined;
+      const resultTool = resultSchema ? defineTool({
+        name: "workflow_result", label: "Workflow Result", description: "Submit the terminal structured workflow result", parameters: resultSchema.Type(),
         async execute(_id: string, value: unknown) {
-          if (!Value.Check(options.schema as object, value)) return { content: [{ type: "text" as const, text: "Result does not match the required schema." }], details: {}, isError: true };
+          if (!resultSchema.Check(value) || !jsonValue(value)) return { content: [{ type: "text" as const, text: "Result does not match the required schema." }], details: {}, isError: true };
           if (schemaResult !== undefined) return { content: [{ type: "text" as const, text: "Result has already been accepted." }], details: {}, isError: true };
-          schemaResult = structuredClone(value) as JsonValue;
+          schemaResult = structuredClone(value);
           const currentSession = session;
           if (currentSession) void currentSession.abort();
           return { content: [{ type: "text" as const, text: "Result accepted." }], details: {} };
         },
-      } as ToolDefinition : undefined;
+      }) : undefined;
       const toolCalls = new Map<string, AgentToolCallProgress>();
       let activity: AgentActivity | undefined;
       let lastEventAt: number | undefined;
@@ -957,27 +972,27 @@ export class WorkflowAgentExecutor {
         }
         if (options.worktreeOwner && typed.code !== "WORKTREE_FAILED") await this.root.runStore?.snapshotWorktree(options.worktreeOwner).catch(() => undefined);
         const terminal = terminalProviderError(typed);
-        const recoveryState = typed as WorkflowError & ProviderRecoveryMarker;
-        let recovery = recoveryState.providerRecovery;
-        if (terminal && options.providerErrorRecovery && !recoveryState.providerRecoveryHandled) {
-          try { recovery = await options.providerErrorRecovery({ label: options.label, ...terminal }); } catch { throw Object.assign(typed, { attempts }); }
+        const recoveryState = providerRecoveryMarkers.get(typed);
+        let recovery = recoveryState?.providerRecovery;
+        if (terminal && options.providerErrorRecovery && !recoveryState?.providerRecoveryHandled) {
+          try { recovery = await options.providerErrorRecovery({ label: options.label, ...terminal }); } catch { throw errorWithAttempts(typed, attempts); }
           if (recovery === "retry") {
             maxAttempts += 1;
             beforeRetry?.();
             continue;
           }
         }
-        if (recoveryState.providerRecoveryFailed || recovery === "abort") throw Object.assign(typed, { attempts });
+        if (recoveryState?.providerRecoveryFailed || recovery === "abort") throw errorWithAttempts(typed, attempts);
         if (typeof recovery === "object" && typeof recovery.model === "string") {
           try {
             const selected = resolveModelReference(recovery.model, this.root.modelAliases, this.root.knownModels ?? this.root.availableModels, this.root.settingsPath);
             recoveryModel = selected.thinking === undefined && resolved.model.thinking ? { ...selected, thinking: resolved.model.thinking } : selected;
-          } catch { throw Object.assign(typed, { attempts }); }
+          } catch { throw errorWithAttempts(typed, attempts); }
           maxAttempts += 1;
           beforeRetry?.();
           continue;
         }
-        if (attempt === maxAttempts || setupFailed || typed.code === "CANCELLED" || typed.code === "WORKTREE_FAILED" || typed.code === "RESUME_INCOMPATIBLE") throw Object.assign(typed, { attempts });
+        if (attempt === maxAttempts || setupFailed || typed.code === "CANCELLED" || typed.code === "WORKTREE_FAILED" || typed.code === "RESUME_INCOMPATIBLE") throw errorWithAttempts(typed, attempts);
         beforeRetry?.();
       }
     }
@@ -1186,31 +1201,32 @@ export class FairAgentScheduler {
   toolsFor(parentId: string, resolveTools?: (role: string | RoleOverride | undefined, tools: readonly string[] | undefined, model: string | undefined, inheritedTools: readonly string[], thinking: ThinkingLevel | undefined) => readonly string[]): ToolDefinition[] {
     const parent = this.#node(parentId);
     if (!parent.options.tools.includes("agent")) return [];
-    const agentTool = {
+    const agentTool = defineTool({
       name: "agent", label: "Child Agent", description: "Start a direct child agent",
-      parameters: Type.Object({ prompt: Type.String(), label: Type.String(), tools: Type.Optional(Type.Array(Type.String())), model: Type.Optional(Type.String()), thinking: Type.Optional(Type.String()), role: Type.Optional(Type.Union([Type.String(), Type.Object({ name: Type.String(), model: Type.Optional(Type.Union([Type.String(), Type.Null()])), thinking: Type.Optional(Type.Union([Type.String(), Type.Null()])), tools: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Null()])), description: Type.Optional(Type.Union([Type.String(), Type.Null()])), overrideSystemPrompt: Type.Optional(Type.Union([Type.Boolean(), Type.Null()])), contextFiles: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Null()])), disabledAgentResources: Type.Optional(Type.Union([Type.Object({ skills: Type.Optional(Type.Array(Type.String())), extensions: Type.Optional(Type.Array(Type.String())) }), Type.Null()])) }, { additionalProperties: true })])), outputSchema: Type.Optional(Type.Unsafe<JsonSchema>({})), retries: Type.Optional(Type.Integer({ minimum: 0 })), timeoutMs: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Null()])) }, { additionalProperties: true }),
-      execute: async (_id: string, rawParams: unknown) => {
-        if (!isChildAgentToolParams(rawParams)) throw new WorkflowError("INVALID_METADATA", "Invalid child agent parameters");
-        const params = rawParams;
+      parameters: Type.Object({ prompt: Type.String(), label: Type.String(), tools: Type.Optional(Type.Array(Type.String())), model: Type.Optional(Type.String()), thinking: Type.Optional(Type.String()), role: Type.Optional(Type.Union([Type.String(), Type.Object({ name: Type.String(), model: Type.Optional(Type.Union([Type.String(), Type.Null()])), thinking: Type.Optional(Type.Union([Type.String(), Type.Null()])), tools: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Null()])), description: Type.Optional(Type.Union([Type.String(), Type.Null()])), overrideSystemPrompt: Type.Optional(Type.Union([Type.Boolean(), Type.Null()])), contextFiles: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Null()])), disabledAgentResources: Type.Optional(Type.Union([Type.Object({ skills: Type.Optional(Type.Array(Type.String())), extensions: Type.Optional(Type.Array(Type.String())) }), Type.Null()])) }, { additionalProperties: true })])), outputSchema: Type.Optional(Type.Record(Type.String(), Type.Unknown())), retries: Type.Optional(Type.Integer({ minimum: 0 })), timeoutMs: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Null()])) }, { additionalProperties: true }),
+      execute: async (_id, params) => {
+        if (!isChildAgentToolParams(params)) throw new WorkflowError("INVALID_METADATA", "Invalid child agent parameters");
         if (params.role !== undefined && (params.model !== undefined || params.thinking !== undefined || params.tools !== undefined)) throw new WorkflowError("INVALID_METADATA", "Role agents must not specify model, thinking, or tools");
+        const outputSchema = params.outputSchema;
+        if (outputSchema !== undefined) validateSchema(outputSchema, "agent outputSchema");
         const tools = (params.tools !== undefined || params.role !== undefined ? resolveTools?.(params.role, params.tools, params.model, parent.options.tools, params.thinking) : undefined) ?? params.tools ?? parent.options.tools;
         const agentOptions = { ...params };
         Reflect.deleteProperty(agentOptions, "prompt");
-        const options: ScheduledAgentOptions = { label: params.label, requestedLabel: params.label, cwd: parent.options.cwd, tools, agentOptions, ...(params.model ? { model: params.model } : {}), ...(params.thinking ? { thinking: params.thinking } : {}), ...(params.role ? { role: params.role } : {}), ...(params.outputSchema ? { schema: params.outputSchema } : {}), ...(params.retries === undefined ? {} : { retries: params.retries }), ...(params.timeoutMs === undefined ? {} : { timeoutMs: params.timeoutMs }) };
+        const options: ScheduledAgentOptions = { label: params.label, requestedLabel: params.label, cwd: parent.options.cwd, tools, agentOptions, ...(params.model ? { model: params.model } : {}), ...(params.thinking ? { thinking: params.thinking } : {}), ...(params.role ? { role: params.role } : {}), ...(outputSchema === undefined ? {} : { schema: outputSchema }), ...(params.retries === undefined ? {} : { retries: params.retries }), ...(params.timeoutMs === undefined ? {} : { timeoutMs: params.timeoutMs }) };
         const child = this.spawn(parent.runId, params.prompt, options, parentId);
         return { content: [{ type: "text" as const, text: JSON.stringify({ id: child.id }) }], details: { id: child.id } };
       },
-    } as ToolDefinition;
-    const resultTool = {
+    });
+    const resultTool = defineTool({
       name: "get_subagent_result", label: "Child Result", description: "Wait for a direct child and return its result once; repeated retrieval fails with AGENT_RESULT_COLLECTED",
       parameters: Type.Object({ id: Type.String() }),
-      execute: async (_id: string, params: { id: string }) => { const value = await this.result(parentId, params.id); if (!value.ok && value.error.code === "BUDGET_EXHAUSTED") throw new WorkflowError("BUDGET_EXHAUSTED", value.error.message); return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value }; }
-    } as ToolDefinition;
-    const steerTool = {
+      execute: async (_id, params) => { const value = await this.result(parentId, params.id); if (!value.ok && value.error.code === "BUDGET_EXHAUSTED") throw new WorkflowError("BUDGET_EXHAUSTED", value.error.message); return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value }; }
+    });
+    const steerTool = defineTool({
       name: "steer_subagent", label: "Steer Child", description: "Steer a running direct child",
       parameters: Type.Object({ id: Type.String(), message: Type.String() }),
-      execute: async (_id: string, params: { id: string; message: string }) => { await this.steer(parentId, params.id, params.message); return { content: [{ type: "text" as const, text: "Steering delivered." }], details: {} }; },
-    } as ToolDefinition;
+      execute: async (_id, params) => { await this.steer(parentId, params.id, params.message); return { content: [{ type: "text" as const, text: "Steering delivered." }], details: {} }; },
+    });
     return [agentTool, resultTool, steerTool];
   }
 

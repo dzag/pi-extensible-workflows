@@ -9,6 +9,7 @@ import { structuralPath as operationPath } from "./persistence.js";
 
 const HARD_TERMINAL_RUN_STATES: ReadonlySet<string> = new Set(["completed", "failed", "stopped"]);
 type WorkflowEventSink = { emit: (name: string, payload: unknown) => unknown };
+function isWorkflowErrorCode(value: unknown): value is WorkflowErrorCode { return ERROR_CODES.some((candidate) => candidate === value); }
 const inheritedHostAgentPath = new AsyncLocalStorage<readonly string[]>();
 const inheritedHostWorktreeOwner = new AsyncLocalStorage<string>();
 
@@ -121,7 +122,7 @@ export class WorkflowEventPublisher {
   async runResumed(store: RunStore, metadata: WorkflowMetadata): Promise<void> { await this.#publish(store, metadata, WORKFLOW_RUN_RESUMED_EVENT, {}); }
 
   async runState(store: RunStore, metadata: WorkflowMetadata, previousState: RunState, state: RunState, reason?: string): Promise<void> {
-    await this.#publish(store, metadata, WORKFLOW_RUN_STATE_CHANGED_EVENT, { previousState, state, ...(reason ? { reason } : {}), ...(ERROR_CODES.includes(reason as WorkflowErrorCode) ? { errorCode: reason } : {}) });
+    await this.#publish(store, metadata, WORKFLOW_RUN_STATE_CHANGED_EVENT, { previousState, state, ...(reason ? { reason } : {}), ...(isWorkflowErrorCode(reason) ? { errorCode: reason } : {}) });
     if ((previousState === "paused" || previousState === "interrupted" || previousState === "budget_exhausted") && state === "running") await this.runResumed(store, metadata);
   }
 
@@ -199,6 +200,9 @@ async function hostWithWorktree<Result extends JsonValue>(name: string, callback
 export function workflowRunContext(cwd: string, sessionId: string, runId: string, workflow: WorkflowMetadata, args: JsonValue, signal: AbortSignal): Readonly<WorkflowRunContext> {
   return Object.freeze({ cwd, sessionId, runId, workflow: deepFreeze(structuredClone(workflow)), args: deepFreeze(structuredClone(args)), signal });
 }
+function keyedJsonResult<Tasks extends ParallelTasks = ParallelTasks>(entries: readonly (readonly [string, JsonValue])[]): ParallelResult<Tasks> {
+  return Object.fromEntries(entries) as ParallelResult<Tasks>;
+}
 
 async function hostParallel<Tasks extends ParallelTasks>(rawOperation: unknown, rawTasks: unknown): Promise<ParallelResult<Tasks>> {
   if (typeof rawOperation !== "string" || !rawOperation.trim()) fail("INVALID_METADATA", "parallel requires a stable explicit name");
@@ -210,7 +214,9 @@ async function hostParallel<Tasks extends ParallelTasks>(rawOperation: unknown, 
   const results = await Promise.all(tasks.map(async ([name, run]) => {
     try {
       const parent = inheritedHostAgentPath.getStore() ?? [];
-      return { name, value: await inheritedHostAgentPath.run([...parent, rawOperation, name], run as () => unknown) as JsonValue };
+      const value = await inheritedHostAgentPath.run([...parent, rawOperation, name], run as () => unknown);
+      if (!jsonValue(value)) fail("RESULT_INVALID", "parallel task result must be JSON-compatible");
+      return { name, value };
     } catch (error) {
       const typed = error instanceof WorkflowError ? error : new WorkflowError("INTERNAL_ERROR", error instanceof Error ? error.message : String(error));
       if (typed.code === "CANCELLED") throw typed;
@@ -219,7 +225,7 @@ async function hostParallel<Tasks extends ParallelTasks>(rawOperation: unknown, 
   }));
   const failure = results.find((result) => result.error);
   if (failure?.error) throw failure.error;
-  return Object.fromEntries(results.map((result) => [result.name, result.value as JsonValue])) as ParallelResult<Tasks>;
+  return keyedJsonResult<Tasks>(results.flatMap((result) => "value" in result ? [[result.name, result.value] as const] : []));
 }
 
 async function hostPipeline(rawOperation: unknown, rawItems: unknown, rawStages: unknown): Promise<JsonValue> {
@@ -237,9 +243,12 @@ async function hostPipeline(rawOperation: unknown, rawItems: unknown, rawStages:
     try {
       for (const [stageName, run] of stages) {
         const parent = inheritedHostAgentPath.getStore() ?? [];
-        current = await inheritedHostAgentPath.run([...parent, rawOperation, name, stageName], () => (run as (value: unknown) => unknown)(current));
+        const value = await inheritedHostAgentPath.run([...parent, rawOperation, name, stageName], () => (run as (value: unknown) => unknown)(current));
+        if (!jsonValue(value)) fail("RESULT_INVALID", "pipeline stage result must be JSON-compatible");
+        current = value;
       }
-      return { name, value: current as JsonValue };
+      if (!jsonValue(current)) fail("RESULT_INVALID", "pipeline result must be JSON-compatible");
+      return { name, value: current };
     } catch (error) {
       const typed = error instanceof WorkflowError ? error : new WorkflowError("INTERNAL_ERROR", error instanceof Error ? error.message : String(error));
       if (typed.code === "CANCELLED") throw typed;
@@ -248,7 +257,7 @@ async function hostPipeline(rawOperation: unknown, rawItems: unknown, rawStages:
   }));
   const failure = results.find((result) => result.error);
   if (failure?.error) throw failure.error;
-  return Object.fromEntries(results.map((result) => [result.name, result.value as JsonValue]));
+  return keyedJsonResult(results.flatMap((result) => "value" in result ? [[result.name, result.value] as const] : []));
 }
 
 export function nextNamedOccurrence(counters: Map<string, number>, label: string): string {

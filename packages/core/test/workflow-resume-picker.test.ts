@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { testExtensionApi } from "./support.js";
 import workflowExtension, { createLaunchSnapshot, DEFAULT_SETTINGS, RunStore } from "../src/index.js";
 import type { PersistedRun } from "../src/persistence.js";
 import type { RunState } from "../src/types.js";
@@ -23,13 +24,13 @@ function setup(home: string, cwd: string, input?: string): TestSetup {
   const tools: TestTool[] = [];
   const notices: string[] = [];
   const context = { cwd, hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify(message: string) { notices.push(message); }, select: async (_prompt: string, options: string[]) => options.find((option) => option === "Skip") ?? "Close", ...(input === undefined ? {} : { input: async () => input }) } };
-  workflowExtension({
+  workflowExtension(testExtensionApi({
     registerCommand(_name: string, options: { handler: (args: string, context: unknown) => Promise<void> }) { command = options.handler; },
     registerTool(tool: TestTool) { tools.push(tool); },
     on(name: string, handler: unknown) { if (name === "session_start") start = handler as TestSetup["start"]; if (name === "session_shutdown") shutdown = handler as TestSetup["shutdown"]; },
     getThinkingLevel: () => "medium",
     getActiveTools: () => ["workflow"],
-  } as never, home);
+  }), home);
   assert.ok(command);
   return { start, command, context, tools, notices, shutdown };
 }

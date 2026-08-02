@@ -2,7 +2,7 @@ import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Value } from "typebox/value";
 import type { AgentAttemptAction, JsonSchema, JsonValue, RegisteredAgentSetupHook, WorkflowCatalog, WorkflowCatalogContext, WorkflowCatalogError, WorkflowCatalogFunction, WorkflowCatalogIndex, WorkflowCatalogModelAlias, WorkflowExtension, WorkflowFunction, WorkflowFunctionContext, WorkflowJournal, WorkflowModelAlias, WorkflowModelAliasResolverContext, WorkflowRoleDirectoryRegistration } from "./types.js";
-import { deepFreeze, fail, jsonValue, object } from "./utils.js";
+import { deepFreeze, errorCode, fail, jsonValue, object } from "./utils.js";
 import { loadSettings, resolveWorkflowSettings, validateSchema } from "./validation.js";
 
 const RESERVED_GLOBALS = new Set(["agent", "shell", "prompt", "checkpoint", "parallel", "pipeline", "phase", "withWorktree", "log", "args", "Promise", "JSON", "Math", "Date", "eval", "Function", "WebAssembly", "process", "require", "module", "exports", "console", "fetch", "XMLHttpRequest", "WebSocket", "performance", "crypto", "setTimeout", "setInterval", "setImmediate", "queueMicrotask", "Intl", "SharedArrayBuffer", "Atomics", "globalThis", "global", "undefined", "NaN", "Infinity", "extensions", "workflow_catalog"]);
@@ -23,6 +23,10 @@ function normalizeRoleDirectory(value: unknown): string {
     fail("INVALID_METADATA", `Invalid workflow role directory: ${error instanceof Error ? error.message : String(error)}`);
   }
   fail("INVALID_METADATA", "Workflow role directories require file URLs or absolute filesystem paths");
+}
+function catalogSchema(schema: unknown, at: string): JsonSchema {
+  validateSchema(schema, at);
+  return structuredClone(schema);
 }
 export class WorkflowRegistry {
   readonly #extensions = new Set<Readonly<WorkflowExtension>>();
@@ -97,7 +101,7 @@ export class WorkflowRegistry {
   catalog(context?: WorkflowCatalogContext): WorkflowCatalog {
     const functions: WorkflowCatalogFunction[] = [];
     for (const extension of this.#extensions) {
-      for (const [name, fn] of Object.entries(extension.functions ?? {})) functions.push({ name, version: extension.version, headline: extension.headline, description: fn.description, input: structuredClone(fn.input) as JsonSchema, output: structuredClone(fn.output) as JsonSchema });
+      for (const [name, fn] of Object.entries(extension.functions ?? {})) functions.push({ name, version: extension.version, headline: extension.headline, description: fn.description, input: catalogSchema(fn.input, `${name} input`), output: catalogSchema(fn.output, `${name} output`) });
     }
     let aliases: Readonly<Record<string, string>> | undefined;
     let settings: WorkflowCatalog["settings"];
@@ -174,7 +178,7 @@ export class WorkflowRegistry {
       let target: unknown;
       try { target = await alias.resolve(Object.freeze({ cwd: context.cwd, projectTrusted: context.projectTrusted, rootModel: Object.freeze({ ...context.rootModel }), knownModels: new Set(context.knownModels), availableModels: new Set(context.availableModels), signal: context.signal })); }
       catch (error) {
-        if (isAborted() || error instanceof Error && error.name === "AbortError" || typeof error === "object" && error !== null && !Array.isArray(error) && (error as { code?: unknown }).code === "CANCELLED") fail("CANCELLED", `Model alias resolver cancelled: ${alias.name} (${alias.headline})`);
+        if (isAborted() || error instanceof Error && error.name === "AbortError" || errorCode(error) === "CANCELLED") fail("CANCELLED", `Model alias resolver cancelled: ${alias.name} (${alias.headline})`);
         fail("CONFIG_ERROR", `Model alias resolver failed for ${alias.name} (${alias.headline}): ${error instanceof Error ? error.message : String(error)}`);
       }
       if (isAborted()) fail("CANCELLED", `Model alias resolver cancelled: ${alias.name} (${alias.headline})`);

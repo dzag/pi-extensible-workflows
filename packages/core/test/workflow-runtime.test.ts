@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { testExtensionApi } from "./support.js";
 import workflowExtension, { createLaunchSnapshot, FairAgentScheduler, inspectWorkflowScript, preflight, RPC_LIMIT_BYTES, RunStore, runWorkflow, WorkflowError, type JsonValue } from "../src/index.js";
 import { listRunIds } from "../src/persistence.js";
 
@@ -528,7 +529,7 @@ void test("shell calls use deterministic identity, preserve nonzero results, and
 void test("production shell executes in the workflow cwd with merged environment", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-shell-"));
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never, home);
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} }), home);
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   const cwd = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-shell-cwd-"));
@@ -538,7 +539,7 @@ void test("production shell executes in the workflow cwd with merged environment
 void test("production shell does not journal results that exceed the complete RPC boundary", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-shell-boundary-"));
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> }> = [];
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} } as never, home);
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], on() {} }), home);
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   const cwd = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-shell-boundary-cwd-"));

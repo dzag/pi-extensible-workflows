@@ -6,11 +6,26 @@ import { createServer } from "node:http";
 import test from "node:test";
 import { Type } from "@earendil-works/pi-ai";
 import { createLocalPiSession, FairAgentScheduler, localAgentTransport, prepareAgentSetupForInspection, WorkflowAgentExecutor, type AgentExecutionRoot, type AgentProgress, type SessionInput } from "../src/agent-execution.js";
-import { AgentSession, type AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { AgentSession } from "@earendil-works/pi-coding-agent";
 import { WorkflowError, roleNameOf, type AgentExecutionResult, type AgentToolCallProgress } from "../src/index.js";
 import type { AgentResourcePolicy } from "../src/types.js";
 import type { RunStore } from "../src/persistence.js";
-import { testTransport } from "./test-transport.js";
+import { testTransport, type TestPiSessionEvent } from "./test-transport.js";
+import { executeTool, executeToolUnchecked, testTransportContext } from "./support.js";
+type TestEventMessage = NonNullable<TestPiSessionEvent["message"]>;
+type TestAssistantMessageEvent = NonNullable<TestPiSessionEvent["assistantMessageEvent"]>;
+function messageStart(message: TestEventMessage | undefined): TestPiSessionEvent { return { type: "message_start", ...(message === undefined ? {} : { message }) }; }
+function messageEnd(message: TestEventMessage | undefined): TestPiSessionEvent { return { type: "message_end", ...(message === undefined ? {} : { message }) }; }
+function messageUpdate(message: TestEventMessage | undefined, assistantMessageEvent: TestAssistantMessageEvent): TestPiSessionEvent { return { type: "message_update", ...(message === undefined ? {} : { message }), assistantMessageEvent }; }
+function thinkingStart(partial: TestEventMessage | undefined, contentIndex = 0): TestAssistantMessageEvent { return { type: "thinking_start", contentIndex, ...(partial === undefined ? {} : { partial }) }; }
+function thinkingDelta(partial: TestEventMessage | undefined, delta: string, contentIndex = 0): TestAssistantMessageEvent { return { type: "thinking_delta", contentIndex, delta, ...(partial === undefined ? {} : { partial }) }; }
+function textStart(partial: TestEventMessage | undefined, contentIndex = 0): TestAssistantMessageEvent { return { type: "text_start", contentIndex, ...(partial === undefined ? {} : { partial }) }; }
+function textDelta(partial: TestEventMessage | undefined, delta: string, contentIndex = 0): TestAssistantMessageEvent { return { type: "text_delta", contentIndex, delta, ...(partial === undefined ? {} : { partial }) }; }
+function toolExecutionStart(toolCallId: string, toolName: string, args: unknown): TestPiSessionEvent { return { type: "tool_execution_start", toolCallId, toolName, args }; }
+function toolExecutionEnd(toolCallId: string, toolName: string, result: unknown, isError: boolean): TestPiSessionEvent { return { type: "tool_execution_end", toolCallId, toolName, result, isError }; }
+function agentEnd(): TestPiSessionEvent { return { type: "agent_end" }; }
+function turnEnd(message: TestEventMessage | undefined): TestPiSessionEvent { return { type: "turn_end", ...(message === undefined ? {} : { message }) }; }
+function malformedEvent(): TestPiSessionEvent { return { type: "turn_started" }; }
 void test("public agent execution result types remain exported", () => {
   const result: AgentExecutionResult = { value: null, attempts: [], cwd: "/repo" };
   const progress: AgentToolCallProgress = { id: "tool", name: "read", state: "completed" };
@@ -22,6 +37,13 @@ const root: AgentExecutionRoot = { cwd: "/repo", model: { provider: "openai", mo
 const usage = { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, cost: { total: 0.25 } };
 function assistant(text: string) { return { role: "assistant", content: [{ type: "text", text }], usage }; }
 function terminalAssistant(errorMessage: string) { return { ...assistant(""), stopReason: "error", errorMessage }; }
+type AgentExecutionRunStore = Pick<RunStore, "recordSystemPrompt" | "validateWorktree" | "worktree" | "snapshotWorktree">;
+const runStoreDefaults = {
+  recordSystemPrompt: async () => {},
+  validateWorktree: async () => { throw new Error("unexpected validateWorktree"); },
+  worktree: async () => { throw new Error("unexpected worktree"); },
+  snapshotWorktree: async () => { throw new Error("unexpected snapshotWorktree"); },
+} satisfies AgentExecutionRunStore;
 function sessionStats(cost = usage.cost.total) { return { tokens: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, total: usage.input + usage.output + usage.cacheRead + usage.cacheWrite }, cost }; }
 async function createHangingLocalSession(extensionFactories: NonNullable<SessionInput["extensionFactories"]> = []) {
   const rootDir = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-hanging-session-"));
@@ -408,8 +430,8 @@ void test("prepares the resolved workflow system prompt path for external transp
 
 void test("persists the effective role system prompt emitted for the native turn", async () => {
   const saved: Array<{ sessionId: string; attempt: number; turn: number; prompt: string }> = [];
-  let listener: ((event: AgentSessionEvent) => void) | undefined;
-  const runStore = { recordSystemPrompt: async (entry: (typeof saved)[number]) => { saved.push(entry); } } as unknown as RunStore;
+  let listener: ((event: TestPiSessionEvent) => void) | undefined;
+  const runStore = { ...runStoreDefaults, recordSystemPrompt: async (entry: (typeof saved)[number]) => { saved.push(entry); } } satisfies AgentExecutionRunStore;
   const executor = new WorkflowAgentExecutor({ ...root, runStore }, testTransport(async (input) => ({
     transport: "local", session: { transport: "local", sessionId: "role", locator: { sessionFile: "/sessions/role.jsonl" } }, messages: [assistant("done")], getSessionStats: sessionStats,
     systemPrompt: `BASE\n\n${input.systemPromptAppend ?? ""}`,
@@ -422,8 +444,8 @@ void test("persists the effective role system prompt emitted for the native turn
 });
 
 void test("does not mask agent failures when system prompt persistence also fails", async () => {
-  let listener: ((event: AgentSessionEvent) => void) | undefined;
-  const runStore = { recordSystemPrompt: async () => { throw new Error("disk full"); } } as unknown as RunStore;
+  let listener: ((event: TestPiSessionEvent) => void) | undefined;
+  const runStore = { ...runStoreDefaults, recordSystemPrompt: async () => { throw new Error("disk full"); } } satisfies AgentExecutionRunStore;
   const executor = new WorkflowAgentExecutor({ ...root, runStore }, testTransport(async () => ({
     transport: "local", session: { transport: "local", sessionId: "failed", locator: { sessionFile: "/sessions/failed.jsonl" } }, messages: [], getSessionStats: sessionStats, systemPrompt: "effective",
     subscribe(candidate) { listener = candidate; return () => {}; },
@@ -490,26 +512,26 @@ void test("exposes native attempt metadata before the prompt completes", async (
 });
 
 void test("streams non-content and tool-call progress", async () => {
-  let listener: ((event: AgentSessionEvent) => void) | undefined;
+  let listener: ((event: TestPiSessionEvent) => void) | undefined;
   const messages = [assistant("")];
   const updates: AgentProgress[] = [];
   const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({
     transport: "local", session: { transport: "local", sessionId: "progress", locator: { sessionFile: "/sessions/progress.jsonl" } }, messages, getSessionStats: sessionStats,
     subscribe(next) { listener = next; return () => { listener = undefined; }; },
     async prompt() {
-      listener?.({ type: "message_start", message: messages[0] } as AgentSessionEvent);
-      listener?.({ type: "message_update", message: messages[0], assistantMessageEvent: { type: "thinking_start", contentIndex: 0, partial: messages[0] } } as AgentSessionEvent);
-      listener?.({ type: "message_update", message: messages[0], assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "REASONING_ONE", partial: messages[0] } } as AgentSessionEvent);
-      listener?.({ type: "message_update", message: messages[0], assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "REASONING_TWO", partial: messages[0] } } as AgentSessionEvent);
-      for (let index = 0; index < 100; index += 1) listener?.({ type: "message_update", message: messages[0], assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "reasoning", partial: messages[0] } } as AgentSessionEvent);
-      listener?.({ type: "tool_execution_start", toolCallId: "call-1", toolName: "read", args: {} });
+      listener?.(messageStart(messages[0]));
+      listener?.(messageUpdate(messages[0], thinkingStart(messages[0])));
+      listener?.(messageUpdate(messages[0], thinkingDelta(messages[0], "REASONING_ONE")));
+      listener?.(messageUpdate(messages[0], thinkingDelta(messages[0], "REASONING_TWO")));
+      for (let index = 0; index < 100; index += 1) listener?.(messageUpdate(messages[0], thinkingDelta(messages[0], "reasoning")));
+      listener?.(toolExecutionStart("call-1", "read", {}));
       messages[0] = assistant("done");
-      listener?.({ type: "message_update", message: messages[0], assistantMessageEvent: { type: "text_start", contentIndex: 0, partial: messages[0] } } as AgentSessionEvent);
-      listener?.({ type: "message_update", message: messages[0], assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "RESPONSE_ONE", partial: messages[0] } } as AgentSessionEvent);
-      listener?.({ type: "message_update", message: messages[0], assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "RESPONSE_TWO", partial: messages[0] } } as AgentSessionEvent);
-      for (let index = 0; index < 100; index += 1) listener?.({ type: "message_update", message: messages[0], assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "response", partial: messages[0] } } as AgentSessionEvent);
-      listener?.({ type: "tool_execution_end", toolCallId: "call-1", toolName: "read", result: {}, isError: false });
-      listener?.({ type: "message_end", message: messages[0] } as AgentSessionEvent);
+      listener?.(messageUpdate(messages[0], textStart(messages[0])));
+      listener?.(messageUpdate(messages[0], textDelta(messages[0], "RESPONSE_ONE")));
+      listener?.(messageUpdate(messages[0], textDelta(messages[0], "RESPONSE_TWO")));
+      for (let index = 0; index < 100; index += 1) listener?.(messageUpdate(messages[0], textDelta(messages[0], "response")));
+      listener?.(toolExecutionEnd("call-1", "read", {}, false));
+      listener?.(messageEnd(messages[0]));
     },
     dispose() {},
   })));
@@ -527,7 +549,7 @@ void test("streams non-content and tool-call progress", async () => {
   assert.equal(typeof updates.at(-1)?.lastEventAt, "number");
 });
 void test("uses cumulative session stats after compaction for progress, budget, and attempts", async () => {
-  let listener: ((event: AgentSessionEvent) => void) | undefined;
+  let listener: ((event: TestPiSessionEvent) => void) | undefined;
   const updates: AgentProgress[] = [];
   const budgetAccounting: AgentProgress["accounting"][] = [];
   const activeMessages = [assistant("compacted response")];
@@ -536,8 +558,8 @@ void test("uses cumulative session stats after compaction for progress, budget, 
     transport: "local", session: { transport: "local", sessionId: "compaction-safe", locator: { sessionFile: "/sessions/compaction-safe.jsonl" } }, messages: activeMessages, getSessionStats: () => cumulative,
     subscribe(next) { listener = next; return () => {}; },
     async prompt() {
-      listener?.({ type: "message_start", message: activeMessages[0] } as AgentSessionEvent);
-      listener?.({ type: "message_end", message: activeMessages[0] } as AgentSessionEvent);
+      listener?.(messageStart(activeMessages[0]));
+      listener?.(messageEnd(activeMessages[0]));
     },
     dispose() {},
   })));
@@ -550,14 +572,17 @@ void test("uses cumulative session stats after compaction for progress, budget, 
 });
 
 void test("keeps workflow_result present, validates invalid values, and allows one repair", async () => {
-  const responses: Array<unknown> = [{ wrong: true }, { wrong: true }, { answer: 9 }];
+  const responses: Array<{ wrong: boolean } | { answer: number }> = [{ wrong: true }, { wrong: true }, { answer: 9 }];
   const calls: Array<{ prompt: string; result: unknown }> = [];
   const toolResults: unknown[] = [];
   const executor = new WorkflowAgentExecutor(root, testTransport(async ({ resultTool }) => {
     assert.ok(resultTool);
     return { transport: "local", session: { transport: "local", sessionId: "schema", locator: { sessionFile: "/sessions/schema.jsonl" } }, messages: [assistant("ignored")], getSessionStats: sessionStats, async prompt(prompt) {
       const result = responses.shift();
-      if (result !== undefined) { calls.push({ prompt, result }); toolResults.push(await resultTool.execute("id", result, new AbortController().signal, () => {}, {} as never)); }
+      if (result !== undefined) {
+        calls.push({ prompt, result });
+        toolResults.push(await ("answer" in result ? executeTool(resultTool, "id", result) : executeToolUnchecked(resultTool, "id", result)));
+      }
     }, dispose() {} };
   }));
   const result = await executor.execute("structured", { label: "schema", workflowName: "flow", role: "reviewer", schema: { type: "object", properties: { answer: { type: "number" } }, required: ["answer"], additionalProperties: false } });
@@ -572,7 +597,7 @@ void test("keeps workflow_result present, validates invalid values, and allows o
 });
 
 void test("accepts workflow_result before agent_end without repair or overwrite", async () => {
-  let listener: ((event: AgentSessionEvent) => void) | undefined;
+  let listener: ((event: TestPiSessionEvent) => void) | undefined;
   let prompts = 0;
   let aborts = 0;
   const executor = new WorkflowAgentExecutor(root, testTransport(async ({ resultTool }) => {
@@ -583,15 +608,15 @@ void test("accepts workflow_result before agent_end without repair or overwrite"
       subscribe(next) { listener = next; return () => { listener = undefined; }; },
       async prompt() {
         prompts += 1;
-        listener?.({ type: "message_start", message } as unknown as AgentSessionEvent);
-        listener?.({ type: "tool_execution_start", toolCallId: "early", toolName: "workflow_result", args: { answer: 7 } });
-        const accepted = await resultTool.execute("early", { answer: 7 }, new AbortController().signal, () => {}, {} as never);
-        assert.equal((accepted as unknown as { isError?: boolean }).isError, undefined);
-        const duplicate = await resultTool.execute("duplicate", { answer: 9 }, new AbortController().signal, () => {}, {} as never);
-        assert.equal((duplicate as unknown as { isError?: boolean }).isError, true);
-        listener?.({ type: "tool_execution_end", toolCallId: "early", toolName: "workflow_result", result: accepted, isError: false });
-        listener?.({ type: "message_end", message } as unknown as AgentSessionEvent);
-        listener?.({ type: "agent_end" } as AgentSessionEvent);
+        listener?.(messageStart(message));
+        listener?.(toolExecutionStart("early", "workflow_result", { answer: 7 }));
+        const accepted = await executeTool(resultTool, "early", { answer: 7 });
+        assert.equal((accepted as { isError?: boolean }).isError, undefined);
+        const duplicate = await executeTool(resultTool, "duplicate", { answer: 9 });
+        assert.equal((duplicate as { isError?: boolean }).isError, true);
+        listener?.(toolExecutionEnd("early", "workflow_result", accepted, false));
+        listener?.(messageEnd(message));
+        listener?.(agentEnd());
       },
       async abort() { aborts += 1; },
       dispose() {},
@@ -680,7 +705,7 @@ void test("retries native terminal errors as fresh workflow attempts", async () 
     const prompts: string[] = [];
     promptsByAttempt.push(prompts);
     const messages = attempt === 1 ? [terminalAssistant(errorMessage)] : [assistant("ready")];
-    return { sessionId: `terminal-retry-${String(attempt)}`, sessionFile: `/sessions/terminal-retry-${String(attempt)}.jsonl`, messages, getSessionStats: sessionStats, async prompt(prompt) { prompts.push(prompt); if (attempt === 2 && prompt.includes("Submit the final result")) { assert.ok(resultTool); await resultTool.execute("id", { answer: 42 }, new AbortController().signal, () => {}, {} as never); } }, dispose() {} };
+    return { sessionId: `terminal-retry-${String(attempt)}`, sessionFile: `/sessions/terminal-retry-${String(attempt)}.jsonl`, messages, getSessionStats: sessionStats, async prompt(prompt) { prompts.push(prompt); if (attempt === 2 && prompt.includes("Submit the final result")) { assert.ok(resultTool); await executeTool(resultTool, "id", { answer: 42 }); } }, dispose() {} };
   }));
   const result = await executor.execute("structured", { label: "schema", workflowName: "flow", retries: 1, schema: { type: "object", properties: { answer: { type: "number" } }, required: ["answer"], additionalProperties: false } });
   assert.deepEqual(result.value, { answer: 42 });
@@ -703,7 +728,7 @@ void test("continues terminal provider errors in the same native session when re
       async prompt(prompt) {
         prompts.push(prompt);
         if (prompts.length === 2) messages[0] = assistant("continued");
-        if (prompt.includes("Submit the final result")) await resultTool.execute("id", { answer: 42 }, new AbortController().signal, () => {}, {} as never);
+        if (prompt.includes("Submit the final result")) await executeTool(resultTool, "id", { answer: 42 });
       },
       dispose() { disposals += 1; },
     };
@@ -758,7 +783,7 @@ void test("keeps an accepted structured result when same-session continuation ab
       async prompt(prompt) {
         prompts += 1;
         if (prompt === "The provider error was transient. Continue the task from your current state.") {
-          await resultTool.execute("id", { answer: 7 }, new AbortController().signal, () => {}, {} as never);
+          await executeTool(resultTool, "id", { answer: 7 });
           messages[0] = assistant("accepted");
           throw new Error("aborted after workflow_result");
         }
@@ -779,7 +804,7 @@ void test("keeps an accepted structured result when same-session continuation ab
 void test("does not overwrite a terminal result with a post-handoff assistant", async () => {
   const completed = { ...assistant("original report"), stopReason: "stop" };
   const messages: Array<{ role: string; content: unknown; stopReason?: string; usage?: typeof usage }> = [completed];
-  let listener: ((event: AgentSessionEvent) => void) | undefined;
+  let listener: ((event: TestPiSessionEvent) => void) | undefined;
   let triggerHandoff: (() => void) | undefined;
   let handoffPromise: Promise<void> | undefined;
   let prompts = 0;
@@ -788,10 +813,10 @@ void test("does not overwrite a terminal result with a post-handoff assistant", 
     subscribe(next) { listener = next; return () => { listener = undefined; }; },
     async prompt() {
       prompts += 1;
-      listener?.({ type: "turn_started" } as unknown as AgentSessionEvent);
+      listener?.(malformedEvent());
       triggerHandoff?.();
-      listener?.({ type: "message_end", message: completed } as AgentSessionEvent);
-      listener?.({ type: "turn_end", message: completed } as AgentSessionEvent);
+      listener?.(messageEnd(completed));
+      listener?.(turnEnd(completed));
       await handoffPromise;
     },
     dispose() {},
@@ -808,7 +833,7 @@ void test("continues after a Herdr handoff with an aborted assistant", async () 
   const aborted = { role: "assistant", content: [], stopReason: "aborted" };
   const messages: Array<{ role: string; content: unknown; stopReason?: string; usage?: typeof usage }> = [aborted];
   const prompts: string[] = [];
-  let listener: ((event: AgentSessionEvent) => void) | undefined;
+  let listener: ((event: TestPiSessionEvent) => void) | undefined;
   let triggerHandoff: (() => void) | undefined;
   let handoffPromise: Promise<void> | undefined;
   const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({
@@ -817,10 +842,10 @@ void test("continues after a Herdr handoff with an aborted assistant", async () 
     async prompt(prompt) {
       prompts.push(prompt);
       if (prompts.length === 1) {
-        listener?.({ type: "turn_started" } as unknown as AgentSessionEvent);
+        listener?.(malformedEvent());
         triggerHandoff?.();
-        listener?.({ type: "message_end", message: aborted } as unknown as AgentSessionEvent);
-        listener?.({ type: "turn_end", message: aborted } as unknown as AgentSessionEvent);
+        listener?.(messageEnd(aborted));
+        listener?.(turnEnd(aborted));
         await handoffPromise;
       } else {
         messages[0] = assistant("continued report");
@@ -853,7 +878,7 @@ void test("retries in fresh persisted sessions and reports terminal attempt hist
 void test("top-level worktree cwd is inherited and reused by retries", async () => {
   const cwds: string[] = [];
   const snapshots: string[] = [];
-  const worktreeRoot = { ...root, runStore: { worktree: async () => ({ owner: "worker", path: "/runs/worktree", branch: "pi-extensible-workflows/run/key", cwd: "/runs/worktree/subdir" }), validateWorktree: async () => ({ owner: "worker", path: "/runs/worktree", branch: "pi-extensible-workflows/run/key", cwd: "/runs/worktree/subdir" }), snapshotWorktree: async (owner: string) => { snapshots.push(owner); return "commit"; } } as unknown as RunStore };
+  const worktreeRoot = { ...root, runStore: { ...runStoreDefaults, worktree: async () => ({ owner: "worker", path: "/runs/worktree", branch: "pi-extensible-workflows/run/key", cwd: "/runs/worktree/subdir", base: "base" }), validateWorktree: async () => ({ owner: "worker", path: "/runs/worktree", branch: "pi-extensible-workflows/run/key", cwd: "/runs/worktree/subdir", base: "base" }), snapshotWorktree: async (owner: string) => { snapshots.push(owner); return "commit"; } } satisfies AgentExecutionRunStore };
   let attempt = 0;
   const executor = new WorkflowAgentExecutor(worktreeRoot, testTransport(async (input) => {
     cwds.push(input.cwd);
@@ -871,7 +896,7 @@ void test("top-level worktree cwd is inherited and reused by retries", async () 
 
 void test("concurrent siblings keep their own cwd and plain top-level calls use root cwd", async () => {
   const cwds: Record<string, string> = {};
-  const worktreeRoot = { ...root, runStore: { worktree: async (owner: string) => ({ owner, path: `/runs/${owner}`, branch: `branch/${owner}`, cwd: `/runs/${owner}/repo` }), validateWorktree: async (owner: string, cwd: string) => ({ owner, path: `/runs/${owner}`, branch: `branch/${owner}`, cwd }), snapshotWorktree: async () => "commit" } as unknown as RunStore };
+  const worktreeRoot = { ...root, runStore: { ...runStoreDefaults, worktree: async (owner: string) => ({ owner, path: `/runs/${owner}`, branch: `branch/${owner}`, cwd: `/runs/${owner}/repo`, base: "base" }), validateWorktree: async (owner: string, cwd: string) => ({ owner, path: `/runs/${owner}`, branch: `branch/${owner}`, cwd, base: "base" }), snapshotWorktree: async () => "commit" } satisfies AgentExecutionRunStore };
   const executor = new WorkflowAgentExecutor(worktreeRoot, testTransport(async (input) => ({ sessionId: input.sessionLabel, sessionFile: `/sessions/${input.sessionLabel}.jsonl`, messages: [assistant("ok")], getSessionStats: sessionStats, async prompt() { cwds[input.sessionLabel] = input.cwd; await Promise.resolve(); }, dispose() {} })));
   const [left, right] = await Promise.all([
     executor.execute("left", { label: "left", workflowName: "flow", worktreeOwner: "left" }),
@@ -895,7 +920,7 @@ void test("rejects arbitrary child cwd before launching a session", async () => 
 });
 
 void test("stale worktree parent cwd fails before launching a session", async () => {
-  const worktreeRoot = { ...root, runStore: { validateWorktree: async () => { throw new WorkflowError("WORKTREE_FAILED", "stale"); } } as unknown as RunStore };
+  const worktreeRoot = { ...root, runStore: { ...runStoreDefaults, validateWorktree: async () => { throw new WorkflowError("WORKTREE_FAILED", "stale"); } } satisfies AgentExecutionRunStore };
   const executor = new WorkflowAgentExecutor(worktreeRoot, testTransport(async () => { throw new Error("must not launch"); }));
   await assert.rejects(executor.execute("child", { label: "child", workflowName: "flow", parent: "worker", worktreeOwner: "worker", cwd: "/runs/stale" }), (error: unknown) => error instanceof WorkflowError && error.code === "WORKTREE_FAILED");
 });
@@ -907,14 +932,14 @@ void test("worktree scope without persisted ownership fails without launching a 
 
 void test("snapshot failures stay WORKTREE_FAILED without a second snapshot", async () => {
   let snapshots = 0;
-  const worktreeRoot = { ...root, runStore: { worktree: async () => ({ owner: "worker", path: "/runs/worker", branch: "branch/worker", cwd: "/runs/worker/repo" }), snapshotWorktree: async () => { snapshots += 1; throw new WorkflowError("WORKTREE_FAILED", "snapshot failed"); } } as unknown as RunStore };
+  const worktreeRoot = { ...root, runStore: { ...runStoreDefaults, worktree: async () => ({ owner: "worker", path: "/runs/worker", branch: "branch/worker", cwd: "/runs/worker/repo", base: "base" }), snapshotWorktree: async () => { snapshots += 1; throw new WorkflowError("WORKTREE_FAILED", "snapshot failed"); } } satisfies AgentExecutionRunStore };
   const executor = new WorkflowAgentExecutor(worktreeRoot, testTransport(async () => ({ transport: "local", session: { transport: "local", sessionId: "s", locator: { sessionFile: "/sessions/s.jsonl" } }, messages: [assistant("ok")], getSessionStats: sessionStats, async prompt() {}, dispose() {} })));
   await assert.rejects(executor.execute("worktree", { label: "worker", workflowName: "flow", worktreeOwner: "worker" }), (error: unknown) => error instanceof WorkflowError && error.code === "WORKTREE_FAILED" && error.message === "snapshot failed");
   assert.equal(snapshots, 1);
 });
 
 void test("failed best-effort snapshots do not mask agent failures", async () => {
-  const worktreeRoot = { ...root, runStore: { worktree: async () => ({ owner: "worker", path: "/runs/worker", branch: "branch/worker", cwd: "/runs/worker/repo" }), snapshotWorktree: async () => { throw new WorkflowError("WORKTREE_FAILED", "snapshot failed"); } } as unknown as RunStore };
+  const worktreeRoot = { ...root, runStore: { ...runStoreDefaults, worktree: async () => ({ owner: "worker", path: "/runs/worker", branch: "branch/worker", cwd: "/runs/worker/repo", base: "base" }), snapshotWorktree: async () => { throw new WorkflowError("WORKTREE_FAILED", "snapshot failed"); } } satisfies AgentExecutionRunStore };
   const executor = new WorkflowAgentExecutor(worktreeRoot, testTransport(async () => ({ transport: "local", session: { transport: "local", sessionId: "s", locator: { sessionFile: "/sessions/s.jsonl" } }, messages: [assistant("bad")], getSessionStats: sessionStats, async prompt() { throw new Error("agent failed"); }, dispose() {} })));
   await assert.rejects(executor.execute("worktree", { label: "worker", workflowName: "flow", worktreeOwner: "worker" }), (error: unknown) => error instanceof WorkflowError && error.code === "AGENT_FAILED" && error.message === "agent failed");
 });
@@ -1209,11 +1234,11 @@ void test("local session suspend and resume retain the session seam with a stubb
   const events: string[] = [];
   AgentSession.prototype.prompt = async function (text) {
     prompts.push(text);
-    for (const listener of (this as unknown as { agent: { listeners: Set<(event: unknown) => void> } }).agent.listeners) listener({ type: "agent_end", messages: [], willRetry: false });
+    for (const listener of (this.agent["listeners"] as Set<(event: unknown) => void>)) listener({ type: "agent_end", messages: [], willRetry: false });
   };
   try {
     const prepared = { cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], sessionLabel: "handoff-real-local" } satisfies import("../src/types.js").PreparedAgentSession;
-    const session = await localAgentTransport.createSession(prepared, {} as never);
+    const session = await localAgentTransport.createSession(prepared, testTransportContext);
     try {
       session.subscribe((event) => { if (event.type === "agent_end") events.push(event.type); });
       assert.ok(session.reference.locator);
@@ -1231,7 +1256,7 @@ void test("local session suspend and resume retain the session seam with a stubb
     }
     Object.defineProperty(AgentSession.prototype, "sessionFile", { configurable: true, get: () => undefined });
     try {
-      const noFile = await localAgentTransport.createSession(prepared, {} as never);
+      const noFile = await localAgentTransport.createSession(prepared, testTransportContext);
       try {
         assert.equal(noFile.reference.locator, undefined);
         assert.equal(typeof noFile.suspendForHandoff, "function");
@@ -1277,7 +1302,7 @@ void test("local transport waits for an in-flight prompt and abort before dispos
   AgentSession.prototype.dispose = function (this: AgentSession) { events.push("dispose"); Reflect.apply(originalDispose.value as (this: AgentSession) => void, this, []); };
   try {
     const prepared = { cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], sessionLabel: "async-dispose-contract" } satisfies import("../src/types.js").PreparedAgentSession;
-    const session = await localAgentTransport.createSession(prepared, {} as never);
+    const session = await localAgentTransport.createSession(prepared, testTransportContext);
     const prompt = session.prompt("work");
     await promptStarted;
     const abort = session.abort();
@@ -1323,7 +1348,7 @@ void test("local transport waits for every in-flight prompt before disposing", a
   AgentSession.prototype.dispose = function () { events.push("dispose"); };
   try {
     const prepared = { cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], sessionLabel: "async-multi-dispose-contract" } satisfies import("../src/types.js").PreparedAgentSession;
-    const session = await localAgentTransport.createSession(prepared, {} as never);
+    const session = await localAgentTransport.createSession(prepared, testTransportContext);
     const firstPrompt = session.prompt("first");
     await firstStarted;
     const secondPrompt = session.prompt("second");
@@ -1366,7 +1391,7 @@ void test("local transport resets abort state for each prompt and disposal", asy
   AgentSession.prototype.dispose = function (this: AgentSession) { events.push("dispose"); Reflect.apply(originalDispose.value as (this: AgentSession) => void, this, []); };
   try {
     const prepared = { cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], sessionLabel: "async-abort-lifecycle" } satisfies import("../src/types.js").PreparedAgentSession;
-    const session = await localAgentTransport.createSession(prepared, {} as never);
+    const session = await localAgentTransport.createSession(prepared, testTransportContext);
     const firstPrompt = session.prompt("first");
     await firstPromptStarted;
     releaseFirstPrompt();
@@ -1401,7 +1426,7 @@ void test("local transport swallows an in-flight prompt rejection during idempot
   AgentSession.prototype.prompt = async function () { markPromptStarted(); await new Promise<void>((_, reject) => { rejectPrompt = reject; }); };
   try {
     const prepared = { cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], sessionLabel: "rejected-prompt-dispose" } satisfies import("../src/types.js").PreparedAgentSession;
-    const session = await localAgentTransport.createSession(prepared, {} as never);
+    const session = await localAgentTransport.createSession(prepared, testTransportContext);
     const prompt = session.prompt("work");
     await promptStarted;
     const firstDispose = session.dispose();
@@ -1434,7 +1459,7 @@ void test("local transport ignores abort failure while finishing disposal", asyn
   AgentSession.prototype.dispose = function (this: AgentSession) { events.push("dispose"); Reflect.apply(originalDispose.value as (this: AgentSession) => void, this, []); };
   try {
     const prepared = { cwd: process.cwd(), model: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "medium" }, tools: [], sessionLabel: "abort-failure-dispose" } satisfies import("../src/types.js").PreparedAgentSession;
-    const session = await localAgentTransport.createSession(prepared, {} as never);
+    const session = await localAgentTransport.createSession(prepared, testTransportContext);
     const prompt = session.prompt("work");
     await promptStarted;
     const disposal = session.dispose();
@@ -1727,7 +1752,7 @@ void test("scoped tools honor the root capability boundary and cancel orphan des
   assert.deepEqual(scopedTools.map(({ name }) => name), ["agent", "get_subagent_result", "steer_subagent"]);
   const resultTool = scopedTools[1];
   assert.ok(resultTool);
-  await assert.rejects(resultTool.execute("x", { id: orphanId }, undefined, undefined, {} as never), /direct children/);
+  await assert.rejects(executeTool(resultTool, "x", { id: orphanId }), /direct children/);
   scheduler.cancel(outsider.id);
   await outsider.result;
 });
@@ -1742,7 +1767,7 @@ void test("nested role policy conflicts fail before scheduler spawn", async () =
   const agentTool = scheduler.toolsFor(parent.id)[0];
   assert.ok(agentTool);
   for (const extra of [{ model: "openai/gpt" }, { thinking: "low" }, { tools: ["read"] }]) {
-    await assert.rejects(agentTool.execute("call", { prompt: "child", label: "child", role: "reviewer", ...extra }, undefined, undefined, {} as never), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+    await assert.rejects(executeToolUnchecked(agentTool, "call", { prompt: "child", label: "child", role: "reviewer", ...extra }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   }
   assert.equal(scheduler.snapshot().length, 1);
   scheduler.cancel(parent.id);
@@ -1755,11 +1780,11 @@ void test("child tool validates raw input and preserves extension options", asyn
   const agentTool = scheduler.toolsFor(parent.id)[0];
   assert.ok(agentTool);
   for (const params of [{ prompt: "child", label: "child", thinking: "invalid" }, { prompt: "child", label: "child", providerOptions: () => undefined }]) {
-    await assert.rejects(agentTool.execute("call", params, undefined, undefined, {} as never), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+    await assert.rejects(executeToolUnchecked(agentTool, "call", params), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   }
   assert.equal(scheduler.snapshot().length, 1);
-  const response = await agentTool.execute("call", { prompt: "child", label: "child", providerOptions: { temperature: 0.2 }, timeoutMs: null }, undefined, undefined, {} as never);
-  const childId = (response.details as { id: string }).id;
+  const response = await executeTool(agentTool, "call", { prompt: "child", label: "child", providerOptions: { temperature: 0.2 }, timeoutMs: null });
+  const childId = ((response as { details: { id: string } }).details).id;
   const child = scheduler.snapshot().find(({ id }) => id === childId);
   assert.deepEqual(child?.options.agentOptions, { label: "child", providerOptions: { temperature: 0.2 }, timeoutMs: null });
   scheduler.cancel(parent.id);
@@ -1775,7 +1800,7 @@ void test("nested agent roles resolve tools before scheduler spawn", async () =>
   const parent = scheduler.spawn("run", "parent", { label: "parent", cwd: "/repo", tools: ["agent", "read", "bash"] });
   const agentTool = scheduler.toolsFor(parent.id, (role, tools) => role === "reviewer" && tools === undefined ? ["read"] : tools ?? ["bash"])[0];
   assert.ok(agentTool);
-  await agentTool.execute("call", { prompt: "child", label: "child", role: "reviewer", retries: 1, timeoutMs: null }, undefined, undefined, {} as never);
+  await executeTool(agentTool, "call", { prompt: "child", label: "child", role: "reviewer", retries: 1, timeoutMs: null });
   assert.deepEqual(scheduler.snapshot().find(({ options }) => options.label === "child")?.options.tools, ["read"]);
   scheduler.cancel(parent.id);
   await parent.result;
@@ -1789,10 +1814,10 @@ void test("nested child agents accept role override objects and resolve their to
   const parent = scheduler.spawn("run", "parent", { label: "parent", cwd: "/repo", tools: ["agent", "read", "bash"] });
   const agentTool = scheduler.toolsFor(parent.id, (role, tools) => roleNameOf(role) === "reviewer" ? tools ?? ["read"] : tools ?? ["bash"])[0];
   assert.ok(agentTool);
-  await agentTool.execute("call", { prompt: "child", label: "child", role: { name: "reviewer", model: "openai/gpt", tools: null } }, undefined, undefined, {} as never);
+  await executeTool(agentTool, "call", { prompt: "child", label: "child", role: { name: "reviewer", model: "openai/gpt", tools: null } });
   const child = scheduler.snapshot().find(({ options }) => options.label === "child");
   assert.deepEqual(child?.options.role, { name: "reviewer", model: "openai/gpt", tools: null });
-  await assert.rejects(agentTool.execute("call", { prompt: "bad", label: "bad", role: { name: "reviewer", tools: 1 } }, undefined, undefined, {} as never), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
+  await assert.rejects(executeToolUnchecked(agentTool, "call", { prompt: "bad", label: "bad", role: { name: "reviewer", tools: 1 } }), (error: unknown) => error instanceof WorkflowError && error.code === "INVALID_METADATA");
   scheduler.cancel(parent.id);
   await parent.result;
 });
@@ -1953,8 +1978,9 @@ void test("filters disabled native extensions before factories and skills before
   writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ extensions: [projectDisabledExtension, projectAllowedExtension], skills: [projectSkills] }));
   const resourcePolicy: AgentResourcePolicy = { globalSettingsPath: "/workflow/settings.json", projectSettingsPath: "/project/.pi/pi-extensible-workflows/settings.json", projectTrusted: false, global: { skills: ["disabled-skill"], extensions: [resolve(disabledExtension)] }, project: { skills: [], extensions: [] }, effective: { skills: ["disabled-skill"], extensions: [resolve(disabledExtension)] }, unmatchedSkills: [], unmatchedExtensions: [] };
   const session = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-filter", resourcePolicy, extensionFactories: [() => {}] });
-  const loaded = (session as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> }; getExtensions(): { extensions: Array<{ resolvedPath: string }> } } }).resourceLoader;
-  const resourcePaths = (session as unknown as { herdrResourcePaths: { extensions: readonly string[]; skills: readonly string[] } }).herdrResourcePaths;
+  const loaded = (session as typeof session & { resourceLoader: { getSkills(): { skills: Array<{ name: string }> }; getExtensions(): { extensions: Array<{ resolvedPath: string }> } } }).resourceLoader;
+  const resourcePaths = session.herdrResourcePaths;
+  assert.ok(resourcePaths);
   assert.deepEqual(resourcePaths.extensions, [realpathSync(allowedExtension)]);
   assert.ok(resourcePaths.skills.includes(realpathSync(join(skillsDir, "kept-skill", "SKILL.md"))));
   assert.equal(resourcePaths.skills.some((path) => path.includes("disabled-skill")), false);
@@ -1970,7 +1996,7 @@ void test("filters disabled native extensions before factories and skills before
   assert.ok(loaded.getExtensions().extensions.every(({ resolvedPath }) => resolvedPath !== realpathSync(disabledExtension)));
   assert.match(session.systemPrompt ?? "", /kept-skill/);
   assert.doesNotMatch(session.systemPrompt ?? "", /disabled-skill/);
-  const commands = (session as unknown as { _extensionRunner: { runtime: { getCommands(): Array<{ name: string }> } } })._extensionRunner.runtime.getCommands();
+  const commands = (session as typeof session & { _extensionRunner: { runtime: { getCommands(): Array<{ name: string }> } } })._extensionRunner.runtime.getCommands();
   assert.ok(commands.some(({ name }) => name === "skill:kept-skill"));
   const preparedPrompt = await session.preparePrompt("/skill:kept-skill");
   assert.equal(preparedPrompt.diagnostics.length, 0);
@@ -1981,7 +2007,7 @@ void test("filters disabled native extensions before factories and skills before
   await session.dispose();
   const trustedPolicy = { globalSettingsPath: "/workflow/settings.json", projectSettingsPath: "/project/.pi/pi-extensible-workflows/settings.json", projectTrusted: true, global: { skills: ["disabled-skill"], extensions: [resolve(disabledExtension)] }, project: { skills: ["project-disabled-skill"], extensions: [resolve(projectDisabledExtension)] }, effective: { skills: ["disabled-skill", "project-disabled-skill"], extensions: [resolve(disabledExtension), resolve(projectDisabledExtension)] }, unmatchedSkills: [], unmatchedExtensions: [] };
   const trusted = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-trusted", resourcePolicy: trustedPolicy });
-  const trustedLoaded = (trusted as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> }; getExtensions(): { extensions: Array<{ resolvedPath: string }> } } }).resourceLoader;
+  const trustedLoaded = (trusted as typeof trusted & { resourceLoader: { getSkills(): { skills: Array<{ name: string }> }; getExtensions(): { extensions: Array<{ resolvedPath: string }> } } }).resourceLoader;
   assert.equal(existsSync(projectDisabledMarker), false);
   assert.equal(existsSync(projectAllowedMarker), true);
   const trustedSkillNames = trustedLoaded.getSkills().skills.map(({ name }) => name);
@@ -2059,7 +2085,7 @@ void test("applies ordered minimatch resource exclusions and records concrete ma
   writeFileSync(join(agentDir, "skills", "kept-skill", "SKILL.md"), "---\nname: kept-skill\ndescription: Kept\n---\nKept");
   const resourcePolicy: AgentResourcePolicy = { globalSettingsPath: "/workflow/settings.json", projectSettingsPath: "/project/.pi/pi-extensible-workflows/settings.json", projectTrusted: false, global: { skills: [], extensions: [] }, project: { skills: [], extensions: [] }, effective: { skills: ["disabled-*", "!kept-skill"], extensions: ["**/*", `!${allowedExtension}`] }, unmatchedSkills: [], unmatchedExtensions: [] };
   const session = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: ["read"], sessionLabel: "resource-glob", resourcePolicy });
-  const loaded = (session as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> }; getExtensions(): { extensions: Array<{ resolvedPath: string }> } } }).resourceLoader;
+  const loaded = (session as typeof session & { resourceLoader: { getSkills(): { skills: Array<{ name: string }> }; getExtensions(): { extensions: Array<{ resolvedPath: string }> } } }).resourceLoader;
   const skillNames = loaded.getSkills().skills.map(({ name }) => name);
   assert.ok(skillNames.includes("kept-skill"));
   assert.equal(skillNames.includes("disabled-skill"), false);
@@ -2085,7 +2111,7 @@ void test("filters local context files by the role scope policy", async () => {
   writeFileSync(join(cwd, "AGENTS.md"), "cwd");
   const session = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "context-files", contextFiles: ["global", "project"] });
   try {
-    assert.deepEqual((session as unknown as { herdrContextFiles?: readonly { path: string; content: string }[] }).herdrContextFiles?.map(({ content }) => content), ["global", "ancestor", "project"]);
+    assert.deepEqual(session.herdrContextFiles?.map(({ content }) => content), ["global", "ancestor", "project"]);
   } finally {
     await session.dispose();
   }
@@ -2103,7 +2129,7 @@ void test("selected skill paths load in native Pi sessions", async () => {
   writeFileSync(join(agentDir, "auth.json"), "{}");
   writeFileSync(join(skillDir, "SKILL.md"), "---\nname: bundle-skill\ndescription: Selected bundle skill\n---\nUse this selected bundle skill.");
   const session = await createLocalPiSession({ cwd, agentDir, model: { provider: "openai-codex", model: "gpt-5.6-sol" }, tools: [], sessionLabel: "bundle-skill", additionalSkillPaths: [skillDir] });
-  const loaded = (session as unknown as { resourceLoader: { getSkills(): { skills: Array<{ name: string }> } } }).resourceLoader;
+  const loaded = (session as typeof session & { resourceLoader: { getSkills(): { skills: Array<{ name: string }> } } }).resourceLoader;
   assert.ok(loaded.getSkills().skills.some(({ name }) => name === "bundle-skill"));
   await session.dispose();
 });

@@ -1,8 +1,9 @@
 import { join } from "node:path";
 import { structuralPath as operationPath, type PersistedRun, type RunStore } from "./persistence.js";
-import { ERROR_CODES, type JsonValue, type WorkflowErrorCode, type WorkflowFailureAgent, type WorkflowFailureDiagnostics, type WorkflowMetadata, type WorkflowSiblingAgent } from "./types.js";
+import { ERROR_CODES, WorkflowError, type JsonValue, type WorkflowErrorCode, type WorkflowFailureAgent, type WorkflowFailureDiagnostics, type WorkflowMetadata, type WorkflowSiblingAgent } from "./types.js";
 import { errorCode, errorText, isWorkflowAuthored, object } from "./utils.js";
-export const WORKFLOW_FAILURE_DIAGNOSTICS = Symbol("workflowFailureDiagnostics");
+const workflowFailureDiagnostics = new WeakMap<WorkflowError, WorkflowFailureDiagnostics>();
+export function markWorkflowFailureDiagnostics(error: WorkflowError, diagnostic: WorkflowFailureDiagnostics): void { workflowFailureDiagnostics.set(error, diagnostic); }
 
 function workflowDetail(message: string): string {
   const detail = message.trim().replace(new RegExp(`\\b(?:${ERROR_CODES.join("|")})\\b:?\\s*`, "g"), "").replace(/^\s*[A-Z][A-Z0-9_]+:\s*/, "").split("\n").filter((line) => !/^\s*at\s/.test(line)).join("\n").replace(/^Run \S+(?=\s(?:exceeded|is))/i, "Run").replace(/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b/gi, "the workflow").replace(/^(?:Pi )session \S+(?=\s(?:is|has))/i, "session").replace(/^(Unknown scheduler run|Missing production ownership record|Persisted agent belongs to another run):\s*\S+/i, "$1").replace(/\b(?:runId|sessionId|callSite|occurrence|failedAt|id)[:=]\s*\S+/gi, "").replace(/\s{2,}/g, " ").trim();
@@ -67,8 +68,7 @@ export function utf8Prefix(value: string, maxBytes: number): string {
 }
 const DIAGNOSTIC_LIMIT_BYTES = DELIVERY_LIMIT_BYTES - 512;
 export function failureDiagnosticsFrom(error: unknown): WorkflowFailureDiagnostics | undefined {
-  if (!error || typeof error !== "object") return undefined;
-  return (error as { [WORKFLOW_FAILURE_DIAGNOSTICS]?: WorkflowFailureDiagnostics })[WORKFLOW_FAILURE_DIAGNOSTICS];
+  return error instanceof WorkflowError ? workflowFailureDiagnostics.get(error) : undefined;
 }
 
 function boundedWorkflowFailureDiagnostics(value: WorkflowFailureDiagnostics): WorkflowFailureDiagnostics {
@@ -136,8 +136,7 @@ export function incompleteRetryPaths(paths: readonly string[], completedPaths: r
   return [...new Set(paths)].filter((path) => !completedPaths.some((completedPath) => completedPath === path || completedPath.startsWith(`${path}/`)));
 }
 export async function createWorkflowFailureDiagnostics(store: RunStore, metadata: WorkflowMetadata, error: unknown, run: PersistedRun): Promise<WorkflowFailureDiagnostics> {
-  const rawFailedAt = error && typeof error === "object" ? (error as { failedAt?: unknown }).failedAt : undefined;
-  const failedAt = typeof rawFailedAt === "string" && rawFailedAt ? rawFailedAt : null;
+  const failedAt = workflowFailedAt(error) ?? null;
   const failedAgents = run.agents.filter((agent) => agent.state === "failed");
   const failedAgentRecord = failedAgents.find((agent) => {
     if (failedAt === null) return false;

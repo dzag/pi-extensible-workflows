@@ -3,20 +3,23 @@ import { Minimatch } from "minimatch";
 
 export function object(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 export { object as isObject };
+function isStringKey(key: PropertyKey): key is string { return typeof key === "string"; }
+function stringKeyValue(value: object, key: string): unknown { return object(value) ? value[key] : undefined; }
 export function jsonValue(value: unknown, seen = new Set<object>()): value is JsonValue {
   if (value === null || typeof value === "boolean" || typeof value === "string") return true;
   if (typeof value === "number") return Number.isFinite(value);
   if (typeof value !== "object" || seen.has(value)) return false;
   if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return false;
-  const keys = Reflect.ownKeys(value);
-  if (keys.some((key) => typeof key !== "string")) return false;
+  const ownKeys = Reflect.ownKeys(value);
+  const keys = ownKeys.filter(isStringKey);
+  if (keys.length !== ownKeys.length) return false;
   seen.add(value);
-  const valid = (Array.isArray(value) ? Array.from(value) : keys.map((key) => (value as Record<string, unknown>)[key as string])).every((item) => jsonValue(item, seen));
+  const valid = (Array.isArray(value) ? Array.from(value) : keys.map((key) => stringKeyValue(value, key))).every((item) => jsonValue(item, seen));
   seen.delete(value);
   return valid;
 }
 export function jsonObject(value: unknown): value is Record<string, JsonValue> { return jsonValue(value) && object(value); }
-export function positiveInteger(value: unknown): value is number { return Number.isInteger(value) && (value as number) > 0; }
+export function positiveInteger(value: unknown): value is number { return typeof value === "number" && Number.isInteger(value) && value > 0; }
 export function deepFreeze<T>(value: T): T {
   if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
     Object.freeze(value);
@@ -24,12 +27,13 @@ export function deepFreeze<T>(value: T): T {
   }
   return value;
 }
-export function errorText(error: unknown): string { return error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string" ? (error as { message: string }).message : error instanceof Error ? error.message : String(error); }
+export function isNodeError(error: unknown, code: string): error is { code: string } { return object(error) && error.code === code; }
+function isWorkflowErrorCode(value: unknown): value is WorkflowErrorCode { return ERROR_CODES.some((candidate) => candidate === value); }
+export function errorText(error: unknown): string { return object(error) && typeof error.message === "string" ? error.message : error instanceof Error ? error.message : String(error); }
 export function errorCode(error: unknown): WorkflowErrorCode | undefined {
-  if (error instanceof WorkflowError) return ERROR_CODES.includes(error.code) ? error.code : undefined;
-  if (!error || typeof error !== "object") return undefined;
-  const code = (error as { code?: unknown }).code;
-  return typeof code === "string" && ERROR_CODES.includes(code as WorkflowErrorCode) ? code as WorkflowErrorCode : undefined;
+  if (error instanceof WorkflowError) return isWorkflowErrorCode(error.code) ? error.code : undefined;
+  if (!object(error)) return undefined;
+  return isWorkflowErrorCode(error.code) ? error.code : undefined;
 }
 const WORKFLOW_AUTHORED_ERROR = Symbol("workflowAuthoredError");
 export function markWorkflowAuthored(error: WorkflowError, authored = false): WorkflowError {
@@ -44,14 +48,16 @@ export function asWorkflowError(error: unknown): WorkflowError {
 export function fail(code: WorkflowErrorCode, message: string): never { throw new WorkflowError(code, message); }
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+type ThinkingLevel = NonNullable<ModelSpec["thinking"]>;
+function isThinkingLevel(value: unknown): value is ThinkingLevel { return typeof value === "string" && THINKING_LEVELS.some((level) => level === value); }
 const MODEL_ALIAS_NAME = /^[A-Za-z][A-Za-z0-9_-]*$/;
-export function parseThinking(value: unknown): ModelSpec["thinking"] | undefined { return typeof value === "string" && THINKING_LEVELS.includes(value as (typeof THINKING_LEVELS)[number]) ? value as ModelSpec["thinking"] : undefined; }
+export function parseThinking(value: unknown): ModelSpec["thinking"] | undefined { return isThinkingLevel(value) ? value : undefined; }
 export function parseModelReference(value: string): ModelSpec {
   const match = /^([^/:\s]+)\/([^:\s]+)(?::([^:\s]+))?$/.exec(value);
   if (!match?.[1] || !match[2]) fail("UNKNOWN_MODEL", `Invalid model spec: ${value}`);
   const thinking = match[3];
-  if (thinking && !THINKING_LEVELS.includes(thinking as (typeof THINKING_LEVELS)[number])) fail("UNKNOWN_MODEL", `Invalid thinking level: ${thinking}`);
-  return { provider: match[1], model: match[2], ...(thinking ? { thinking: thinking as NonNullable<ModelSpec["thinking"]> } : {}) };
+  if (thinking !== undefined && !isThinkingLevel(thinking)) fail("UNKNOWN_MODEL", `Invalid thinking level: ${thinking}`);
+  return { provider: match[1], model: match[2], ...(thinking !== undefined ? { thinking } : {}) };
 }
 const MODEL_ALIAS_ERROR_NAME = Symbol("modelAliasErrorName");
 type ModelAliasError = WorkflowError & { [MODEL_ALIAS_ERROR_NAME]?: string };
@@ -94,17 +100,22 @@ export function resolveModelReference(value: string, aliases: Readonly<Record<st
     if (reference.includes("/")) return parseModelReference(reference);
     const match = /^([^:\s]+)(?::([^:\s]+))?$/.exec(reference);
     const thinking = match?.[2];
-    if (!match?.[1] || thinking && !THINKING_LEVELS.includes(thinking as (typeof THINKING_LEVELS)[number])) unknownModel(reference, undefined, settingsPath);
+    if (!match?.[1] || thinking !== undefined && !isThinkingLevel(thinking)) unknownModel(reference, undefined, settingsPath);
     const alias = modelAliasName(reference, aliases);
     if (alias) {
       if (chain.includes(alias)) fail("UNKNOWN_MODEL", `Circular model alias: ${[...chain, alias].join(" -> ")}${settingsPath ? ` (settings: ${settingsPath})` : ""}`);
-      const parsed = resolveReference(aliases[alias] as string, [...chain, alias]);
-      return thinking ? { ...parsed, thinking: thinking as NonNullable<ModelSpec["thinking"]> } : parsed;
+      const { [alias]: target } = aliases;
+      if (typeof target !== "string") unknownModel(reference, undefined, settingsPath);
+      const parsed = resolveReference(target, [...chain, alias]);
+      return thinking !== undefined ? { ...parsed, thinking } : parsed;
     }
     const candidates = [...(knownModels ?? [])].filter((model) => model.slice(model.indexOf("/") + 1) === match[1]);
     if (candidates.length === 1) {
-      const parsed = parseModelReference(candidates[0] as string);
-      return thinking ? { ...parsed, thinking: thinking as NonNullable<ModelSpec["thinking"]> } : parsed;
+      const [candidate] = candidates;
+      if (candidate !== undefined) {
+        const parsed = parseModelReference(candidate);
+        return thinking !== undefined ? { ...parsed, thinking } : parsed;
+      }
     }
     unknownModel(reference, undefined, settingsPath);
   };

@@ -16,14 +16,23 @@ import { type AgentAttemptActionContext, type AgentAttemptSummary, type AgentRec
 type UiSelect = (title: string, options: string[]) => Promise<string | undefined>;
 type UiInput = (title: string, placeholder?: string) => Promise<string | undefined>;
 type UiSetStatus = (key: string, text?: string) => void;
-export type UiHostCapabilities = { select?: UiSelect; input?: UiInput; setStatus?: UiSetStatus; custom?: ExtensionUIContext["custom"] };
-function asFn(value: unknown): ((...args: never[]) => unknown) | undefined { return typeof value === "function" ? value as (...args: never[]) => unknown : undefined; }
+type UiCustom = ExtensionUIContext["custom"];
+export type UiHostCapabilities = { select?: UiSelect; input?: UiInput; setStatus?: UiSetStatus; custom?: UiCustom };
+function isUiSelect(value: unknown): value is UiSelect { return typeof value === "function"; }
+function isUiInput(value: unknown): value is UiInput { return typeof value === "function"; }
+function isUiSetStatus(value: unknown): value is UiSetStatus { return typeof value === "function"; }
+function isUiCustom(value: unknown): value is UiCustom { return typeof value === "function"; }
+function isCheckpointDecision(value: unknown): value is "Approve" | "Reject" { return value === "Approve" || value === "Reject"; }
 export function uiHostCapabilities(ui: unknown): UiHostCapabilities | undefined {
   if (!object(ui)) return undefined;
-  const select = asFn(ui.select) as UiSelect | undefined;
-  const input = asFn(ui.input) as UiInput | undefined;
-  const setStatus = asFn(ui.setStatus) as UiSetStatus | undefined;
-  const custom = asFn(ui.custom) as ExtensionUIContext["custom"] | undefined;
+  const selectValue = ui.select;
+  const inputValue = ui.input;
+  const setStatusValue = ui.setStatus;
+  const customValue = ui.custom;
+  const select = isUiSelect(selectValue) ? selectValue.bind(ui) : undefined;
+  const input = isUiInput(inputValue) ? inputValue.bind(ui) : undefined;
+  const setStatus = isUiSetStatus(setStatusValue) ? setStatusValue.bind(ui) : undefined;
+  const custom = isUiCustom(customValue) ? customValue.bind(ui) : undefined;
   return { ...(select ? { select } : {}), ...(input ? { input } : {}), ...(setStatus ? { setStatus } : {}), ...(custom ? { custom } : {}) };
 }
 function tuiRows(tui: unknown): number {
@@ -39,9 +48,12 @@ function borderWorkflowOverlay(component: WorkflowOverlayComponent, theme: { fg(
   return { ...component, render(width: number) { const border = theme.fg("border", "─".repeat(Math.max(1, width))); return [border, ...component.render(width), border]; } };
 }
 type KeybindingsHostCapabilities = { getKeys?: (name: string) => readonly string[] };
+type KeybindingGetKeys = NonNullable<KeybindingsHostCapabilities["getKeys"]>;
+function isKeybindingGetKeys(value: unknown): value is KeybindingGetKeys { return typeof value === "function"; }
 function keybindingKeys(keybindings: unknown, name: string): readonly string[] | undefined {
-  const getKeys = object(keybindings) ? asFn(keybindings.getKeys) as NonNullable<KeybindingsHostCapabilities["getKeys"]> | undefined : undefined;
-  return getKeys ? getKeys.call(keybindings, name) : undefined;
+  if (!object(keybindings)) return undefined;
+  const getKeys = keybindings.getKeys;
+  return isKeybindingGetKeys(getKeys) ? getKeys.call(keybindings, name) : undefined;
 }
 type WorkflowKeybindings = { matches(data: string, binding: string): boolean };
 const WORKFLOW_VIM_KEYS: Readonly<Record<string, string>> = { "tui.select.up": "k", "tui.select.down": "j", "tui.editor.cursorLeft": "h", "tui.editor.cursorRight": "l" };
@@ -54,7 +66,7 @@ function workflowKeyLabel(keybindings: unknown, binding: string, fallback: strin
 }
 
 export type WorkflowNavigatorDependencies = {
-  pi: ExtensionAPI;
+  pi: Pick<ExtensionAPI, "registerCommand">;
   home: string | undefined;
   clipboard: (value: string) => Promise<void>;
   extensionAgentDir: string;
@@ -404,7 +416,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
               else if (result.state === "awaiting_approval") ctx.ui.notify(`Budget adjustment for ${result.workflowName} is awaiting approval.`, "warning");
               else if (result.state === "running") ctx.ui.notify(`Resumed workflow ${result.workflowName} in ${mode.toLowerCase()}.`, "info");
             } catch (error) {
-              if (error && typeof error === "object" && (error as { workflowResumeAttached?: boolean }).workflowResumeAttached) return;
+              if (error && typeof error === "object" && "workflowResumeAttached" in error && error.workflowResumeAttached === true) return;
               const diagnostic = failureDiagnosticsFrom(error);
               const message = diagnostic ? formatWorkflowFailureDelivery(diagnostic) : formatWorkflowFailureDeliveryFallback(dashboard.run.workflowName, store.runId, store.directory, error);
               ctx.ui.notify(`Cannot resume workflow ${store.runId}: ${message}`, "warning");
@@ -686,7 +698,10 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                     else if (workflowKeyMatches(keybindings, data, "tui.select.down")) selectedIndex = (selectedIndex + 1) % options.length;
                     else if (workflowKeyMatches(keybindings, data, "tui.select.pageUp")) move(-layout().contentViewport);
                     else if (workflowKeyMatches(keybindings, data, "tui.select.pageDown")) move(layout().contentViewport);
-                    else if (workflowKeyMatches(keybindings, data, "tui.select.confirm")) done(options[selectedIndex] === "Cancel" ? undefined : options[selectedIndex] as "Approve" | "Reject");
+                    else if (workflowKeyMatches(keybindings, data, "tui.select.confirm")) {
+                      const selected = options[selectedIndex];
+                      done(isCheckpointDecision(selected) ? selected : undefined);
+                    }
                     else if (workflowKeyMatches(keybindings, data, "tui.select.cancel")) done(undefined);
                     tui.requestRender();
                   },
