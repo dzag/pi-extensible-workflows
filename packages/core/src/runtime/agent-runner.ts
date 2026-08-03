@@ -36,6 +36,25 @@ export interface RuntimeUsage {
   readonly costUsd?: number;
 }
 
+export type RuntimeAgentProviderRecovery = "retry" | "abort" | { readonly model: string };
+
+export interface RuntimeAgentProviderFailure {
+  readonly provider: string;
+  readonly model: string;
+  readonly error: string;
+}
+
+export class RuntimeAgentProviderError extends Error {
+  constructor(
+    readonly failure: RuntimeAgentProviderFailure,
+    readonly recovery: RuntimeAgentProviderRecovery | undefined,
+    readonly handled: boolean,
+  ) {
+    super(failure.error);
+    this.name = "RuntimeAgentProviderError";
+  }
+}
+
 export interface RuntimeAgentIdentity {
   readonly id: string;
   readonly structuralPath: readonly string[];
@@ -89,19 +108,28 @@ export interface RuntimeAgentProgress {
   readonly persist: boolean;
 }
 
+export interface RuntimeAgentTurnPolicy {
+  beforeTurn(): void;
+  afterTurn(usage: RuntimeUsage, final: boolean, requestInstruction?: boolean): string | undefined;
+}
 export interface RuntimeAgentRunRequest {
   readonly task: string;
   readonly cwd: string;
   readonly model: RuntimeModel;
   readonly enabledTools: readonly string[];
+  /** Tools owned by the runtime runner; host-specific adapters may map them at session creation. */
   readonly customTools: readonly RuntimeTool[];
   readonly resultSchema?: RuntimeJsonSchema;
   readonly run: RuntimeRunIdentity;
   readonly agent: RuntimeAgentIdentity;
   readonly signal: AbortSignal;
+  readonly timeoutMs?: number | null;
   readonly onProgress?: (progress: RuntimeAgentProgress) => void | Promise<void>;
   readonly handoff?: RuntimeAgentHandoff;
   readonly onControl?: (control: RuntimeAgentRunControl) => void | Promise<void>;
+  readonly turnPolicy?: RuntimeAgentTurnPolicy;
+  readonly onProviderError?: (failure: RuntimeAgentProviderFailure) => Promise<RuntimeAgentProviderRecovery>;
+  readonly onProviderLimit?: () => Promise<void>;
 }
 
 export interface RuntimeAgentReference {
@@ -110,6 +138,7 @@ export interface RuntimeAgentReference {
 }
 
 export interface RuntimeAgentRunResult {
+  /** Final text, or the accepted schema value when resultSchema was requested. */
   readonly value: RuntimeJsonValue;
   readonly usage: RuntimeUsage;
   readonly reference?: RuntimeAgentReference;

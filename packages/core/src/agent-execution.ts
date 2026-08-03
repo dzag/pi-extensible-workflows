@@ -47,8 +47,9 @@ import { deepFreeze, jsonObject, jsonValue, object, disabledResources, mergeAgen
 import { roleNameOf } from "./types.js";
 import { WorkflowError } from "./types.js";
 import { createLiveSessionHandoff } from "./session-handoff.js";
-import { createPiRuntimeSessionAdapter, isTurnEnd, isTurnBoundaryStart, normalizePiMessage, normalizePiSessionEvent, runtimeProgressToAgentProgress, type PiRuntimeSessionAdapter } from "./pi-runtime-adapter.js";
-import type { RuntimeAgentProgress } from "./runtime/agent-runner.js";
+import { normalizePiMessage, normalizePiSessionEvent, runtimeProgressToAgentProgress } from "./pi-runtime-adapter.js";
+import { createPiRuntimeAgentRunner, isRuntimeAgentProviderError, normalizePiRuntimeError } from "./pi-runtime-runner.js";
+import type { RuntimeAgentProgress, RuntimeUsage } from "./runtime/agent-runner.js";
 import { validateSchema } from "./validation.js";
 import type { RunStore } from "./persistence.js";
 type AgentExecutionRunStore = Pick<RunStore, "recordSystemPrompt" | "validateWorktree" | "worktree" | "snapshotWorktree">;
@@ -120,56 +121,12 @@ function parseModel(value: string | undefined, fallback: ModelSpec, thinking?: T
   return { ...parsed, ...(thinking ? { thinking } : !parsed.thinking && fallback.thinking ? { thinking: fallback.thinking } : {}) };
 }
 
-function text(message: WorkflowAgentMessage | undefined): string {
-  if (!message || !Array.isArray(message.content)) return "";
-  return message.content.filter((part: unknown): part is { type: "text"; text: string } => typeof part === "object" && part !== null && "type" in part && part.type === "text" && "text" in part && typeof part.text === "string").map((part) => part.text).join("");
-}
 function isEmptyAbortedAssistant(message: WorkflowAgentMessage | undefined): boolean { return message?.stopReason === "aborted" && Array.isArray(message.content) && message.content.length === 0; }
-
-function hasToolCall(message: unknown): boolean {
-  return typeof message === "object" && message !== null && Array.isArray((message as { content?: unknown }).content) && (message as { content: unknown[] }).content.some((part) => typeof part === "object" && part !== null && (part as { type?: unknown }).type === "toolCall");
-}
-
-function latestAssistantHasToolCall(message: WorkflowAgentMessage | undefined): boolean { return hasToolCall(message); }
-function isTerminalAssistant(message: WorkflowAgentMessage | undefined): boolean { return Boolean(message) && message?.stopReason !== "aborted" && !hasToolCall(message); }
-
-type TerminalProviderError = { provider: string; model: string; error: string };
-const terminalProviderErrors = new WeakMap<WorkflowError, TerminalProviderError>();
-function throwIfTerminalAssistantError(session: WorkflowAgentSession, message: WorkflowAgentMessage | undefined): void {
-  if (message?.stopReason !== "error") return;
-  const state = session.getState();
-  const error = message.errorMessage ?? "Workflow agent session ended with a terminal provider error";
-  const failure = new WorkflowError("AGENT_FAILED", error);
-  terminalProviderErrors.set(failure, { provider: state.model.provider, model: state.model.model, error });
-  throw failure;
-}
-function terminalProviderError(error: WorkflowError): TerminalProviderError | undefined {
-  return terminalProviderErrors.get(error);
-}
-type ProviderRecoveryMarker = { providerRecoveryHandled?: boolean; providerRecovery?: AgentProviderRecovery; providerRecoveryFailed?: boolean };
-const providerRecoveryMarkers = new WeakMap<WorkflowError, ProviderRecoveryMarker>();
-const providerContinuationPrompt = "The provider error was transient. Continue the task from your current state.";
-const handoffContinuationPrompt = "Continue the task from the current session state.";
-async function recoverTerminalProviderError(session: WorkflowAgentSession, label: string, recovery: AgentExecutionOptions["providerErrorRecovery"], continuePrompt: () => Promise<void>, getAssistant: () => WorkflowAgentMessage | undefined): Promise<boolean> {
-  let continued = false;
-  for (;;) {
-    try { throwIfTerminalAssistantError(session, getAssistant()); return continued; }
-    catch (error) {
-      const typed = error instanceof WorkflowError ? error : new WorkflowError("AGENT_FAILED", error instanceof Error ? error.message : String(error));
-      const terminal = terminalProviderError(typed);
-      if (!terminal || !recovery) throw error;
-      let action: AgentProviderRecovery;
-      try { action = await recovery({ label, ...terminal }); } catch { providerRecoveryMarkers.set(typed, { providerRecoveryHandled: true, providerRecoveryFailed: true }); throw typed; }
-      if (action === "retry") { continued = true; await continuePrompt(); continue; }
-      providerRecoveryMarkers.set(typed, { providerRecoveryHandled: true, providerRecovery: action });
-      throw typed;
-    }
-  }
-}
 
 function accounting(stats: WorkflowAgentSessionStats): AgentAccounting {
   return { input: stats.tokens.input, output: stats.tokens.output, cacheRead: stats.tokens.cacheRead, cacheWrite: stats.tokens.cacheWrite, cost: stats.cost };
 }
+
 function canonicalSourcePath(path: string): string { try { return realpathSync(path); } catch { return resolve(path); } }
 const extensionDirectory = dirname(fileURLToPath(import.meta.url));
 const workflowPackageRoot = basename(dirname(extensionDirectory)) === "dist" ? resolve(extensionDirectory, "../..") : resolve(extensionDirectory, "..");
@@ -832,13 +789,14 @@ export class WorkflowAgentExecutor {
       if (options.cwd) throw new WorkflowError("INVALID_METADATA", "Only child agents or worktree scopes may provide a cwd");
       cwd = this.root.cwd;
     }
+
     const attempts: AgentAttempt[] = [];
     let maxAttempts = (options.retries ?? 0) + 1;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const attemptSignal = executionSignal ?? new AbortController().signal;
       if (recoveryModel) resolved = this.resolve({ ...options, modelOverride: recoveryModel });
       options.budget?.beforeAttempt();
-      let schemaResult: JsonValue | undefined;
+
       let session: WorkflowAgentSession | undefined;
       let handoff: LiveSessionHandoff | undefined;
       let handoffAbort: (() => void) | undefined;
@@ -849,219 +807,162 @@ export class WorkflowAgentExecutor {
           handoffAbort = undefined;
         }
       };
-      const releaseIfAttemptCancelled = (): void => {
-        if (attemptSignal.aborted) releaseHandoff("attempt cancelled");
-      };
+      const releaseIfAttemptCancelled = (): void => { if (attemptSignal.aborted) releaseHandoff("attempt cancelled"); };
       let setup: AgentSetup | undefined;
       let setupSummary: AgentSetupSummary = { hookNames: [], model: { ...resolved.model }, tools: [...resolved.tools], cwd };
       let setupFailed = false;
-      let budgetError: WorkflowError | undefined;
-      const hasSchemaResult = () => schemaResult !== undefined;
+      let completedAttempt: AgentAttempt | undefined;
+      let attemptCallbackFailure: unknown;
       const resultSchema = options.schema ? Compile(options.schema) : undefined;
+      let resultAccepted = false;
       const resultTool = resultSchema ? defineTool({
         name: "workflow_result", label: "Workflow Result", description: "Submit the terminal structured workflow result", parameters: resultSchema.Type(),
         async execute(_id: string, value: unknown) {
           if (!resultSchema.Check(value) || !jsonValue(value)) return { content: [{ type: "text" as const, text: "Result does not match the required schema." }], details: {}, isError: true };
-          if (schemaResult !== undefined) return { content: [{ type: "text" as const, text: "Result has already been accepted." }], details: {}, isError: true };
-          schemaResult = structuredClone(value);
+          if (resultAccepted) return { content: [{ type: "text" as const, text: "Result has already been accepted." }], details: {}, isError: true };
+          resultAccepted = true;
           const currentSession = session;
           if (currentSession) void currentSession.abort().catch(() => undefined);
           return { content: [{ type: "text" as const, text: "Result accepted." }], details: {} };
         },
       }) : undefined;
-      let runtimeAdapter: PiRuntimeSessionAdapter | undefined;
-      let progress = Promise.resolve();
-      let unsubscribe: (() => void) | undefined;
-      let systemPromptTurn = 0;
-      let systemPromptWrite = Promise.resolve();
-      let systemPromptWriteError: unknown;
-      let turnStarted = false;
-      let completedAttempt: AgentAttempt | undefined;
-      const flushSystemPrompts = async () => {
-        await systemPromptWrite;
-        if (systemPromptWriteError) throw new WorkflowError("INTERNAL_ERROR", `Failed to persist effective system prompt: ${systemPromptWriteError instanceof Error ? systemPromptWriteError.message : typeof systemPromptWriteError === "string" ? systemPromptWriteError : "unknown error"}`);
-      };
       let lastKnownAccounting: AgentAccounting = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-      const report = (value: RuntimeAgentProgress | (() => RuntimeAgentProgress)) => {
-        if (!options.onProgress) return;
-        const runtimeValue = typeof value === "function" ? value() : value;
-        const complete = runtimeValue.usage.availability === "complete";
-        const reportableValue = complete ? runtimeValue : { ...runtimeValue, usage: { availability: "complete" as const, input: lastKnownAccounting.input, output: lastKnownAccounting.output, cacheRead: lastKnownAccounting.cacheRead, cacheWrite: lastKnownAccounting.cacheWrite, costUsd: lastKnownAccounting.cost } };
-        const update = runtimeProgressToAgentProgress(reportableValue);
-        if (complete) lastKnownAccounting = { ...update.accounting };
-        progress = progress.then(() => options.onProgress?.(update)).then(() => undefined);
+      const accountingFromRuntime = (usage: RuntimeUsage, active: WorkflowAgentSession): AgentAccounting => {
+        const input = usage.input;
+        const output = usage.output;
+        const cacheRead = usage.cacheRead;
+        const cacheWrite = usage.cacheWrite;
+        const cost = usage.costUsd;
+        if (usage.availability === "complete" && typeof input === "number" && Number.isFinite(input) && typeof output === "number" && Number.isFinite(output) && typeof cacheRead === "number" && Number.isFinite(cacheRead) && typeof cacheWrite === "number" && Number.isFinite(cacheWrite) && typeof cost === "number" && Number.isFinite(cost)) return { input, output, cacheRead, cacheWrite, cost };
+        return accounting(active.getSessionStats());
       };
+      const progressHandler = options.onProgress;
+      const reportProgress = progressHandler ? async (value: RuntimeAgentProgress): Promise<void> => {
+        const values = [value.usage.input, value.usage.output, value.usage.cacheRead, value.usage.cacheWrite, value.usage.costUsd];
+        const complete = value.usage.availability === "complete" && values.every((entry): entry is number => typeof entry === "number" && Number.isFinite(entry));
+        const reportable = complete ? value : { ...value, usage: { availability: "complete" as const, input: lastKnownAccounting.input, output: lastKnownAccounting.output, cacheRead: lastKnownAccounting.cacheRead, cacheWrite: lastKnownAccounting.cacheWrite, costUsd: lastKnownAccounting.cost } };
+        const update = runtimeProgressToAgentProgress(reportable);
+        if (complete) lastKnownAccounting = { ...update.accounting };
+        await progressHandler(update);
+      } : undefined;
+
       try {
         setupFailed = true;
         const prepared = await prepareAgentSetup(this.root, this.transport, task, options, resolved, cwd, attempt, attemptSignal, customTools, resultTool);
         setup = prepared.setup;
+        const attemptSetup = prepared.setup;
         setupSummary = prepared.summary;
         if (prepared.failure) throw prepared.failure.error;
         setupFailed = false;
         if (attemptSignal.aborted) throw new WorkflowError("CANCELLED", "Agent cancelled");
-        const started = Date.now();
-        const transportSignal = attemptSignal;
-        await options.onAttempt?.({ attempt, transport: setup.transport.id, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, setup: setupSummary });
-        const transportBase = fallbackSetupContext(this.root, options, transportSignal);
-        const createdSession = await setup.transport.createSession(setup.prepared, Object.freeze({ run: transportBase.run, identity: transportBase.identity, attempt, signal: transportSignal, ...(transportBase.tuiIndex === undefined ? {} : { tuiIndex: transportBase.tuiIndex }), ...(transportBase.tuiLabel === undefined ? {} : { tuiLabel: transportBase.tuiLabel }) }));
-        if (createdSession.reference.transport !== setup.transport.id) {
-          await createdSession.dispose();
-          throw new WorkflowError("INTERNAL_ERROR", `Agent transport ${setup.transport.id} created a session for ${createdSession.reference.transport}`);
-        }
-        session = createdSession;
+        await options.onAttempt?.({ attempt, transport: attemptSetup.transport.id, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, setup: setupSummary });
+
+        const transportBase = fallbackSetupContext(this.root, options, attemptSignal);
+        const transportContext = Object.freeze({ run: transportBase.run, identity: transportBase.identity, attempt, signal: attemptSignal, ...(transportBase.tuiIndex === undefined ? {} : { tuiIndex: transportBase.tuiIndex }), ...(transportBase.tuiLabel === undefined ? {} : { tuiLabel: transportBase.tuiLabel }) });
         handoff = createLiveSessionHandoff();
-        const adapter = createPiRuntimeSessionAdapter(session, handoff);
-        runtimeAdapter = adapter;
         handoffAbort = () => { releaseHandoff("attempt cancelled"); };
         attemptSignal.addEventListener("abort", handoffAbort, { once: true });
         releaseIfAttemptCancelled();
-        await options.onAttempt?.({ attempt, transport: setup.transport.id, session: session.reference, liveSession: session, prepared: setup.prepared, handoff, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, setup: setupSummary });
-        const preparedTools = new Set([...setup.prepared.tools, ...(setup.prepared.customTools ?? []).map(({ name }) => name), ...(setup.prepared.resultTool ? [setup.prepared.resultTool.name] : [])]);
-        if (session.getState().tools.some((tool) => !preparedTools.has(tool))) throw new WorkflowError("INTERNAL_ERROR", `Agent transport ${setup.transport.id} widened the prepared tool policy`);
-        if (setup.sessionInput.resourcePolicy) setupSummary = { ...setupSummary, disabledAgentResources: resourcePolicySummary(setup.sessionInput.resourcePolicy) };
-        const activeSession = session;
-        let lastAssistant: WorkflowAgentMessage | undefined;
-        let handoffBoundaryAssistant: WorkflowAgentMessage | undefined;
-        const acceptAssistant = (candidate: WorkflowAgentMessage | undefined) => {
-          if (isEmptyAbortedAssistant(candidate)) {
-            const previous = activeSession.getLastAssistant();
-            if (previous && !isEmptyAbortedAssistant(previous)) lastAssistant = previous;
-          } else if (candidate) lastAssistant = candidate;
-        };
-        const recoverTerminal = () => recoverTerminalProviderError(activeSession, options.label, options.providerErrorRecovery, async () => { try { acceptAssistant((await promptWithProviderPause(activeSession, providerContinuationPrompt, remaining(options.timeoutMs, started), attemptSignal, this.root.providerPause)).assistant); } catch (error) { acceptAssistant(activeSession.getLastAssistant() ?? lastAssistant); if (!hasSchemaResult()) throw error; } }, () => lastAssistant);
-        const throwIfAttemptCancelled = (): void => { if (attemptSignal.aborted) throw new WorkflowError("CANCELLED", "Agent cancelled"); };
-        const promptAndRecover = async (prompt: string): Promise<void> => {
-          let promptFailed = false;
-          let promptError: unknown;
-          try { acceptAssistant((await promptWithProviderPause(activeSession, prompt, remaining(options.timeoutMs, started), attemptSignal, this.root.providerPause)).assistant); } catch (error) { acceptAssistant(activeSession.getLastAssistant() ?? lastAssistant); promptFailed = true; promptError = error; }
-          const recovered = await recoverTerminal();
-          const preHandoffAssistant = handoffBoundaryAssistant;
-          handoffBoundaryAssistant = undefined;
-          throwIfAttemptCancelled();
-          await handoff?.waitForResume();
-          throwIfAttemptCancelled();
-          const resumed = activeSession.getLastAssistant();
-          const preservePreHandoffResult = Boolean(handoff?.transferred && isTerminalAssistant(preHandoffAssistant));
-          if (preservePreHandoffResult) lastAssistant = preHandoffAssistant;
-          else acceptAssistant(resumed);
-          let handoffError: unknown;
-          if (handoff?.transferred && !preservePreHandoffResult && !hasSchemaResult() && (!resumed || resumed.stopReason === "aborted" || latestAssistantHasToolCall(resumed))) {
-            try { acceptAssistant((await promptWithProviderPause(activeSession, handoffContinuationPrompt, remaining(options.timeoutMs, started), attemptSignal, this.root.providerPause)).assistant); } catch (error) { handoffError = error; }
-          }
-          if (handoffError && !hasSchemaResult()) throw handoffError instanceof Error ? handoffError : new Error(typeof handoffError === "string" ? handoffError : "Herdr handoff continuation failed");
-          if (promptFailed && !hasSchemaResult() && !recovered && !handoff?.transferred) throw promptError;
-        };
-        const handleSessionEvent = async (event: WorkflowAgentSessionEvent) => {
-          const observation = runtimeAdapter?.observe(event);
-          if (!observation) return;
-          const observedEvent = observation.event;
-          const turnEnded = isTurnEnd(observedEvent.type);
-          if (turnEnded) handoffBoundaryAssistant = observedEvent.message?.role === "assistant" ? observedEvent.message : activeSession.getLastAssistant() ?? lastAssistant;
-          if (turnEnded && handoff?.state === "handoff-pending") void activeSession.abort().catch(() => undefined);
-          if (observedEvent.type === "agent_start" && session?.getState().systemPrompt !== undefined) {
-            if (this.root.runStore) {
-              systemPromptTurn += 1;
-              const entry = { sessionId: session.reference.sessionId, attempt, turn: systemPromptTurn, prompt: session.getState().systemPrompt ?? "" };
-              systemPromptWrite = systemPromptWrite.then(() => this.root.runStore?.recordSystemPrompt(entry)).then(() => undefined).catch((error: unknown) => { systemPromptWriteError ??= error; });
-            }
-          }
-          if (isTurnBoundaryStart(observedEvent.type) && !turnStarted) { try { options.budget?.beforeTurn(); turnStarted = true; } catch (error) { budgetError ??= error instanceof WorkflowError ? error : new WorkflowError("BUDGET_EXHAUSTED", error instanceof Error ? error.message : String(error)); void activeSession.abort().catch(() => undefined); } }
-          if (observedEvent.type === "message_start" && observedEvent.message?.role === "assistant" && !turnStarted) { try { options.budget?.beforeTurn(); turnStarted = true; } catch (error) { budgetError ??= error instanceof WorkflowError ? error : new WorkflowError("BUDGET_EXHAUSTED", error instanceof Error ? error.message : String(error)); void activeSession.abort().catch(() => undefined); } }
-          if (observedEvent.type === "message_end" && observedEvent.message?.role === "assistant") {
-            acceptAssistant(observedEvent.message);
-            const needsMoreWork = hasToolCall(observedEvent.message);
-            const final = !needsMoreWork || (options.schema !== undefined && hasSchemaResult());
-            if (!budgetError) { try { options.budget?.afterTurn(accounting(activeSession.getSessionStats()), final); if (!final) { const instruction = options.budget?.instruction(); if (instruction) void activeSession.steer(instruction).catch(() => undefined); } } catch (error) { budgetError ??= error instanceof WorkflowError ? error : new WorkflowError("BUDGET_EXHAUSTED", error instanceof Error ? error.message : String(error)); void activeSession.abort().catch(() => undefined); } }
-            turnStarted = false;
-          }
-          if (observation.report) report(() => observation.progress);
-        };
-        unsubscribe = activeSession.subscribeAsync ? activeSession.subscribeAsync(handleSessionEvent) : activeSession.subscribe((event) => { void handleSessionEvent(event).catch(() => undefined); });
-        report(() => adapter.snapshot(false));
-        if (setSteer) {
-          setSteer((message) => activeSession.steer(message));
-        }
-        const context = [`Workflow: ${options.workflowName}`, `Agent: ${options.label}`, options.phase ? `Phase: ${options.phase}` : "", options.parent ? `Parent: ${options.parent}` : "", "You own this task and any direct child agents you create. Return child results to your parent; do not leave descendants running.", attempt > 1 ? `Retry attempt ${String(attempt)}. Previous state: ${options.retryState ?? attempts.at(-1)?.error?.message ?? "failed attempt"}` : ""].filter(Boolean).join("\n");
+        const runStore = this.root.runStore;
+
+        const runner = createPiRuntimeAgentRunner({
+          transport: setup.transport,
+          prepared: setup.prepared,
+          context: transportContext,
+          handoff,
+          callbacks: {
+            onSession: async (createdSession, createdHandoff, createdPrepared) => {
+              session = createdSession;
+              releaseIfAttemptCancelled();
+              const activeAttempt: AgentAttempt = { attempt, transport: attemptSetup.transport.id, session: createdSession.reference, liveSession: createdSession, prepared: createdPrepared, handoff: createdHandoff, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, setup: setupSummary };
+              await options.onAttempt?.(activeAttempt);
+            },
+            onSessionReady: async () => {
+              if (attemptSetup.sessionInput.resourcePolicy) setupSummary = { ...setupSummary, disabledAgentResources: resourcePolicySummary(attemptSetup.sessionInput.resourcePolicy) };
+            },
+            onBeforeComplete: async () => {
+              if (options.worktreeOwner) await runStore?.snapshotWorktree(options.worktreeOwner);
+            },
+            ...(runStore ? { onSystemPrompt: (entry: { readonly sessionId: string; readonly turn: number; readonly prompt: string }) => runStore.recordSystemPrompt({ ...entry, attempt }) } : {}),
+            onComplete: async (result, completedSession) => {
+              const completedAccounting = accountingFromRuntime(result.usage, completedSession);
+              completedAttempt = attemptRecord(attemptSetup.transport.id, attempt, completedSession, setupSummary, completedAccounting, result.value);
+              attempts.push(completedAttempt);
+              try { await options.onAttempt?.(completedAttempt); }
+              catch (error) { attemptCallbackFailure = error; throw error; }
+              finally { releaseHandoff("session completed"); }
+            },
+            onFailure: async (failure, failedSession) => {
+              releaseHandoff("attempt failed");
+              const failedAccounting = accounting(failedSession.getSessionStats());
+              const failedAttempt = attemptRecord(attemptSetup.transport.id, attempt, failedSession, setupSummary, failedAccounting, undefined, { code: failure.code, message: failure.message });
+              attempts.push(failedAttempt);
+              try { await options.onAttempt?.(failedAttempt); }
+              catch (error) { attemptCallbackFailure = error; throw error; }
+            },
+          },
+        });
+        const basePrompt = [`Workflow: ${options.workflowName}`, `Agent: ${options.label}`, options.phase ? `Phase: ${options.phase}` : "", options.parent ? `Parent: ${options.parent}` : "", "You own this task and any direct child agents you create. Return child results to your parent; do not leave descendants running.", attempt > 1 ? `Retry attempt ${String(attempt)}. Previous state: ${options.retryState ?? attempts.at(-1)?.error?.message ?? "failed attempt"}` : ""].filter(Boolean).join("\n");
         const instruction = options.budget?.instruction();
-        const promptText = `${context}\n\nTask:\n${setup.prompt}${instruction ? `\n\n${instruction}` : ""}`;
-        options.budget?.beforeTurn();
-        turnStarted = true;
-        await promptAndRecover(promptText);
-        { const completedAccounting = accounting(session.getSessionStats()); options.budget?.afterTurn(completedAccounting, options.schema !== undefined ? hasSchemaResult() : !latestAssistantHasToolCall(lastAssistant)); turnStarted = false; }
-        if (budgetError) throw budgetError;
-        if (options.schema) {
-          if (!hasSchemaResult()) {
-            options.budget?.beforeTurn();
-            turnStarted = true;
-            await promptAndRecover("Submit the final result now by calling workflow_result exactly once. Do not return prose.");
-            { const completedAccounting = accounting(session.getSessionStats()); options.budget?.afterTurn(completedAccounting, true); turnStarted = false; }
-          }
-          if (!hasSchemaResult()) {
-            options.budget?.beforeTurn();
-            turnStarted = true;
-            await promptAndRecover("Your result was missing or invalid. Repair it by calling workflow_result exactly once with a schema-valid value.");
-            { const completedAccounting = accounting(session.getSessionStats()); options.budget?.afterTurn(completedAccounting, true); turnStarted = false; }
-          }
-          if (schemaResult === undefined) throw new WorkflowError("RESULT_INVALID", "Agent did not submit a valid workflow_result after one repair");
-        }
-        const value = options.schema ? schemaResult as JsonValue : text(lastAssistant);
-        if (options.worktreeOwner) await this.root.runStore?.snapshotWorktree(options.worktreeOwner);
-        report(() => adapter.snapshot(true));
-        await progress;
-        await flushSystemPrompts();
-        unsubscribe();
-        adapter.dispose();
-        runtimeAdapter = undefined;
-        const attemptAccounting = accounting(session.getSessionStats());
-        completedAttempt = attemptRecord(setup.transport.id, attempt, session, setupSummary, attemptAccounting, value);
-        attempts.push(completedAttempt);
-        try { await options.onAttempt?.(completedAttempt); } finally { releaseHandoff("session completed"); await session.dispose(); }
-        return { value, attempts, cwd: setupSummary.cwd };
+        const promptText = `${basePrompt}\n\nTask:\n${setup.prompt}${instruction ? `\n\n${instruction}` : ""}`;
+        const runtimeRun = { id: transportBase.run.runId, namespaceId: transportBase.run.sessionId, workflowName: transportBase.run.workflow.name };
+        const providerRecovery = options.providerErrorRecovery;
+        const runtimeAgent = { id: transportBase.identity.callSite, structuralPath: [...transportBase.identity.structuralPath], ...(options.parent ? { parentId: options.parent } : {}) };
+        const runtimeRequest = {
+          task: promptText,
+          cwd: setup.prepared.cwd,
+          model: { ...setup.prepared.model },
+          enabledTools: [...setup.prepared.tools],
+          // Pi sessions execute the prepared native definitions; the executor does not duplicate them as neutral request tools.
+          customTools: [],
+          ...(options.schema ? { resultSchema: options.schema } : {}),
+          run: runtimeRun,
+          agent: runtimeAgent,
+          signal: attemptSignal,
+          ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+          ...(reportProgress ? { onProgress: reportProgress } : {}),
+          ...(setSteer ? { onControl: async (control: { steer(message: string): Promise<void> }) => { setSteer((message) => control.steer(message)); } } : {}),
+          ...(options.budget ? { turnPolicy: {
+            beforeTurn: () => {
+              try { options.budget?.beforeTurn(); }
+              catch (error) { throw error instanceof WorkflowError ? error : new WorkflowError("BUDGET_EXHAUSTED", error instanceof Error ? error.message : String(error)); }
+            },
+            afterTurn: (usage: RuntimeUsage, final: boolean, requestInstruction?: boolean) => {
+              const active = session;
+              if (!active) return undefined;
+              options.budget?.afterTurn(accountingFromRuntime(usage, active), final);
+              return requestInstruction && !final ? options.budget?.instruction() : undefined;
+            },
+          } } : {}),
+          ...(providerRecovery ? { onProviderError: (failure: { provider: string; model: string; error: string }) => providerRecovery({ label: options.label, ...failure }) } : {}),
+          ...(this.root.providerPause ? { onProviderLimit: this.root.providerPause } : {}),
+        } as const;
+        const result = await runner.run(runtimeRequest);
+        if (attemptCallbackFailure) throw errorWithAttempts(attemptCallbackFailure, attempts);
+        return { value: result.value, attempts, cwd: setupSummary.cwd };
       } catch (error) {
-        if (completedAttempt) throw errorWithAttempts(error, attempts);
+        if (attemptCallbackFailure || completedAttempt) throw errorWithAttempts(attemptCallbackFailure ?? error, attempts);
+        const providerError = isRuntimeAgentProviderError(error) ? error : undefined;
+        const typed = normalizePiRuntimeError(error, attemptSignal, setupFailed);
         releaseHandoff("attempt failed");
-        const typed = budgetError ?? (error instanceof WorkflowError ? error : new WorkflowError(attemptSignal.aborted && setupFailed ? "CANCELLED" : "AGENT_FAILED", error instanceof Error ? error.message : String(error)));
         if (!session) {
           const failedAttempt: AgentAttempt = { attempt, transport: setup?.transport.id ?? this.transport.id, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, error: { code: typed.code, message: typed.message }, setup: setupSummary };
           attempts.push(failedAttempt);
-          try { await options.onAttempt?.(failedAttempt); } catch (persistenceError) { throw errorWithAttempts(persistenceError, attempts); }
-        }
-        if (session) {
-          if (runtimeAdapter) { const adapter = runtimeAdapter; report(() => adapter.snapshot(true)); }
-          await progress.catch(() => undefined);
-          try { await flushSystemPrompts(); } catch { /* Preserve the agent failure that prompted this cleanup. */ }
-          unsubscribe?.();
-          runtimeAdapter?.dispose();
-          runtimeAdapter = undefined;
-          const attemptAccounting = accounting(session.getSessionStats());
-          if (!budgetError && typed.code !== "BUDGET_EXHAUSTED") { try { options.budget?.afterTurn(attemptAccounting, true); } catch (budgetFailure) { budgetError ??= budgetFailure instanceof WorkflowError ? budgetFailure : new WorkflowError("BUDGET_EXHAUSTED", budgetFailure instanceof Error ? budgetFailure.message : String(budgetFailure)); } }
-          const failedAttempt = attemptRecord(setup?.transport.id ?? this.transport.id, attempt, session, setupSummary, attemptAccounting, undefined, { code: typed.code, message: typed.message });
-          attempts.push(failedAttempt);
           try { await options.onAttempt?.(failedAttempt); }
           catch (persistenceError) { throw errorWithAttempts(persistenceError, attempts); }
-          finally { await session.dispose().catch(() => undefined); }
         }
         if (options.worktreeOwner && typed.code !== "WORKTREE_FAILED") await this.root.runStore?.snapshotWorktree(options.worktreeOwner).catch(() => undefined);
-        const terminal = terminalProviderError(typed);
-        const recoveryState = providerRecoveryMarkers.get(typed);
-        let recovery = recoveryState?.providerRecovery;
-        if (terminal && options.providerErrorRecovery && !recoveryState?.providerRecoveryHandled) {
-          try { recovery = await options.providerErrorRecovery({ label: options.label, ...terminal }); } catch { throw errorWithAttempts(typed, attempts); }
-          if (recovery === "retry") {
+        if (providerError?.handled) {
+          if (typeof providerError.recovery === "object" && typeof providerError.recovery.model === "string") {
+            try {
+              const selected = resolveModelReference(providerError.recovery.model, this.root.modelAliases, this.root.knownModels ?? this.root.availableModels, this.root.settingsPath);
+              recoveryModel = selected.thinking === undefined && resolved.model.thinking ? { ...selected, thinking: resolved.model.thinking } : selected;
+            } catch { throw errorWithAttempts(typed, attempts); }
             maxAttempts += 1;
             beforeRetry?.();
             continue;
           }
-        }
-        if (recoveryState?.providerRecoveryFailed || recovery === "abort") throw errorWithAttempts(typed, attempts);
-        if (typeof recovery === "object" && typeof recovery.model === "string") {
-          try {
-            const selected = resolveModelReference(recovery.model, this.root.modelAliases, this.root.knownModels ?? this.root.availableModels, this.root.settingsPath);
-            recoveryModel = selected.thinking === undefined && resolved.model.thinking ? { ...selected, thinking: resolved.model.thinking } : selected;
-          } catch { throw errorWithAttempts(typed, attempts); }
-          maxAttempts += 1;
-          beforeRetry?.();
-          continue;
+          throw errorWithAttempts(typed, attempts);
         }
         if (attempt === maxAttempts || setupFailed || typed.code === "CANCELLED" || typed.code === "WORKTREE_FAILED" || typed.code === "RESUME_INCOMPATIBLE") throw errorWithAttempts(typed, attempts);
         beforeRetry?.();
@@ -1399,31 +1300,3 @@ export class FairAgentScheduler {
 }
 
 function resolvePath(path: string): string { return path.replace(/[\\/]+$/, ""); }
-
-function remaining(timeoutMs: number | null | undefined, started: number): number | null | undefined {
-  return timeoutMs === null || timeoutMs === undefined ? timeoutMs : Math.max(1, timeoutMs - (Date.now() - started));
-}
-
-function providerLimited(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  const candidate = error as { status?: unknown; code?: unknown };
-  return candidate.status === 429 || candidate.code === 429 || candidate.code === "rate_limit_exceeded" || candidate.code === "RATE_LIMITED";
-}
-
-async function promptWithProviderPause(session: WorkflowAgentSession, text: string, timeoutMs: number | null | undefined, signal: AbortSignal | undefined, pause?: () => Promise<void>): Promise<WorkflowAgentTurnResult> {
-  for (;;) {
-    try { return await withTimeout(session.prompt(text), timeoutMs, signal, session); }
-    catch (error) { if (!pause || !providerLimited(error)) throw error; await pause(); }
-  }
-}
-
-async function withTimeout(work: Promise<WorkflowAgentTurnResult>, timeoutMs: number | null | undefined, signal: AbortSignal | undefined, session: WorkflowAgentSession): Promise<WorkflowAgentTurnResult> {
-  if (signal?.aborted) throw new WorkflowError("CANCELLED", "Agent cancelled");
-  let timer: NodeJS.Timeout | undefined;
-  let abort: (() => void) | undefined;
-  const state = { interrupted: false };
-  const timeout = timeoutMs ? new Promise<never>((_, reject) => { timer = setTimeout(() => { state.interrupted = true; reject(new WorkflowError("AGENT_TIMEOUT", "Agent attempt timed out")); }, timeoutMs); }) : new Promise<never>(() => {});
-  const cancelled = signal ? new Promise<never>((_, reject) => { abort = () => { state.interrupted = true; reject(new WorkflowError("CANCELLED", "Agent cancelled")); }; signal.addEventListener("abort", abort, { once: true }); }) : new Promise<never>(() => {});
-  try { return await Promise.race([work, timeout, cancelled]); }
-  finally { if (timer) clearTimeout(timer); if (abort) signal?.removeEventListener("abort", abort); if (state.interrupted) await session.abort(); }
-}

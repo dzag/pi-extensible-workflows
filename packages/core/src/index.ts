@@ -14,5 +14,7 @@ export type { AgentAttempt, AgentBudgetHooks, AgentExecutionOptions, AgentExecut
 export { createLiveSessionHandoff } from "./session-handoff.js";
 export { createPiRuntimeSessionAdapter, createRuntimeHandoffAdapter, isTurnBoundaryEnd, isTurnBoundaryStart, isTurnEnd, normalizePiMessage, normalizePiSessionEvent, runtimeProgressToAgentProgress } from "./pi-runtime-adapter.js";
 export type { PiRuntimeProgressObservation, PiRuntimeSessionAdapter } from "./pi-runtime-adapter.js";
+export { PiRuntimeAgentRunner, createPiRuntimeAgentRunner, isRuntimeAgentProviderError, normalizePiRuntimeError } from "./pi-runtime-runner.js";
+export type { PiRuntimeAgentRunnerCallbacks, PiRuntimeAgentRunnerOptions } from "./pi-runtime-runner.js";
 export * from "./herdr.js";
 export * from "./runtime/index.js";
