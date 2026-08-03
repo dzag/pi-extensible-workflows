@@ -24,7 +24,8 @@
     "./utils": "./dist/src/utils.js",
     "./budget": "./dist/src/budget.js",
     "./validation": "./dist/src/validation.js",
-    "./registry": "./dist/src/registry.js"
+    "./registry": "./dist/src/registry.js",
+    "./runtime": "./dist/src/runtime/index.js"
   },
   "files": [
     "dist/src",
