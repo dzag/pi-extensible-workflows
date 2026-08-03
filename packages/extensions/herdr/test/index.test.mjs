@@ -21,6 +21,7 @@ function writeFixtureStream(res, id = "fixture") {
     "",
   ].join("\n\n"));
 }
+function settlesWithin(promise, timeoutMs = 2_000) { return new Promise((resolve) => { const timer = globalThis.setTimeout(() => resolve(false), timeoutMs); promise.then(() => { globalThis.clearTimeout(timer); resolve(true); }, () => { globalThis.clearTimeout(timer); resolve(true); }); }); }
 async function createFixtureModel(agentDir) {
   const server = createServer((req, res) => {
     if (req.method === "POST" && req.url?.endsWith("/chat/completions")) {
@@ -54,13 +55,14 @@ void test("uses the global extension setting and complete breadcrumb labels", ()
 void test("registers session and live actions when enabled", () => {
   const extension = createHerdrExtension({ agentDir: mkdtempSync(join(tmpdir(), "herdr-extension-default-")), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" } });
   assert.deepEqual(Object.values(extension.agentAttemptActions ?? {}).map(({ label }) => label), ["Open session in Herdr pane", "Open live session in Herdr pane"]);
-  const context = { session: { sessionId: "session", locator: { sessionFile: "/tmp/session.jsonl" } }, liveSession: {}, prepared: {}, handoff: {}, attempt: { setup: { cwd: process.cwd() } }, agent: { state: "completed" }, run: { cwd: process.cwd() }, signal: new AbortController().signal, ui: {} };
+  const context = { session: { sessionId: "session", locator: { sessionFile: "/tmp/session.jsonl" } }, liveSession: { reference: { sessionId: "session", locator: { sessionFile: "/tmp/session.jsonl" } } }, prepared: {}, handoff: {}, attempt: { setup: { cwd: process.cwd() } }, agent: { state: "completed" }, run: { cwd: process.cwd() }, signal: new AbortController().signal, ui: {} };
   assert.equal(extension.agentAttemptActions.openSession.visible({ ...context, liveSession: undefined }), true);
   assert.equal(extension.agentAttemptActions.openSession.visible({ ...context, liveSession: undefined, agent: { state: "running" } }), false);
   assert.equal(extension.agentAttemptActions.openSession.visible(context), false);
   assert.equal(extension.agentAttemptActions.openSession.visible({ ...context, session: undefined, liveSession: undefined }), false);
   assert.equal(extension.agentAttemptActions.openLiveSession.visible(context), true);
   assert.equal(extension.agentAttemptActions.openLiveSession.visible({ ...context, liveSession: undefined }), false);
+  assert.equal(extension.agentAttemptActions.openLiveSession.visible({ ...context, liveSession: { reference: { sessionId: "session" } } }), false);
   const root = mkdtempSync(join(tmpdir(), "herdr-extension-full-action-"));
   mkdirSync(join(root, "agent"), { recursive: true });
   mkdirSync(join(root, "agent", "pi-extensible-workflows"), { recursive: true });
@@ -68,6 +70,12 @@ void test("registers session and live actions when enabled", () => {
   const fullyInspectable = createHerdrExtension({ agentDir: join(root, "agent"), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" } });
   assert.equal(fullyInspectable.agentAttemptActions.openLiveSession.visible(context), false);
   assert.equal(fullyInspectable.agentAttemptActions.openSession.visible({ ...context, liveSession: undefined }), true);
+});
+void test("rejects live handoff without a transferable session file", async () => {
+  const calls = [];
+  const extension = createHerdrExtension({ agentDir: mkdtempSync(join(tmpdir(), "herdr-extension-no-file-")), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" }, runner: async (args) => { calls.push([...args]); return ""; } });
+  await assert.rejects(extension.agentAttemptActions.openLiveSession.run({ liveSession: { reference: { transport: "local", sessionId: "session" } }, prepared: {}, handoff: {}, attempt: { attempt: 1 }, agent: {}, run: {}, signal: new AbortController().signal, ui: {} }), /transferable session file/);
+  assert.deepEqual(calls, []);
 });
 void test("skips Herdr transport replacement during inspection", () => {
   const herdr = createHerdrExtension({ agentDir: mkdtempSync(join(tmpdir(), "herdr-extension-inspection-")), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" } });
@@ -190,7 +198,45 @@ void test("opens the active session after the handoff boundary and releases on p
   assert.ok(calls.some(([command, subcommand]) => command === "pane" && subcommand === "release-agent"));
   assert.equal(handoff.state, "completed");
   assert.ok(runCommand.length > 4096);
-  assert.deepEqual(ownership, ["suspend", "resume"]);
+  assert.deepEqual(ownership, ["abort", "suspend", "resume"]);
+});
+void test("cancellation during live pane launch restores local ownership", async () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-extension-live-cancel-"));
+  const controller = new AbortController();
+  const handoff = createLiveSessionHandoff();
+  handoff.observe({ type: "turn_started" });
+  const calls = [];
+  let startPaneRun;
+  let releasePaneRun;
+  const paneRunStarted = new Promise((resolve) => { startPaneRun = resolve; });
+  const paneRunGate = new Promise((resolve) => { releasePaneRun = resolve; });
+  const runner = async (args) => {
+    calls.push([...args]);
+    if (args[1] === "layout") return JSON.stringify({ result: { layout: { panes: [{ pane_id: "pane", rect: { width: 80, height: 20 } }] } } });
+    if (args[1] === "split") return JSON.stringify({ result: { pane: { pane_id: "new-pane" } } });
+    if (args[0] === "pane" && args[1] === "run") { startPaneRun(); await paneRunGate; }
+    return "";
+  };
+  const extension = createHerdrExtension({ agentDir: root, env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" }, runner });
+  const ownership = [];
+  const session = { reference: { transport: "local", sessionId: "session", locator: { sessionFile: join(root, "session.jsonl") } }, abort: async () => ownership.push("abort"), suspendForHandoff: async () => ownership.push("suspend"), resumeFromHandoff: async () => ownership.push("resume"), getLastAssistant: () => ({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] }) };
+  const opening = extension.agentAttemptActions.openLiveSession.run({ liveSession: session, prepared: { cwd: process.cwd(), model: { provider: "openai", model: "gpt" }, tools: [], piRuntime }, handoff, attempt: { attempt: 1 }, agent: {}, run: {}, signal: controller.signal, ui: {} });
+  handoff.observe({ type: "turn_end" });
+  try {
+    assert.equal(await settlesWithin(paneRunStarted), true, "pane launch should reach Herdr");
+    controller.abort();
+    releasePaneRun();
+    assert.equal(await settlesWithin(opening), true, "cancellation should settle the handoff");
+    await opening;
+    assert.deepEqual(ownership, ["abort", "suspend", "resume"]);
+    assert.equal(handoff.transferred, false);
+    assert.ok(calls.some(([command, subcommand]) => command === "pane" && subcommand === "close"));
+  } finally {
+    releasePaneRun();
+    handoff.release();
+    await Promise.allSettled([opening]);
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 void test("fails a Herdr handoff when the originating Pi runtime is unavailable", async () => {
   const calls = [];
@@ -198,7 +244,7 @@ void test("fails a Herdr handoff when the originating Pi runtime is unavailable"
   const herdr = createHerdrExtension({ agentDir: mkdtempSync(join(tmpdir(), "herdr-extension-runtime-missing-")), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" }, runner });
   const handoff = createLiveSessionHandoff();
   handoff.observe({ type: "turn_started" });
-  const session = { reference: { transport: "local", sessionId: "session" }, getLastAssistant: () => ({ role: "assistant", content: [{ type: "toolCall", name: "read" }] }), suspendForHandoff: async () => {}, resumeFromHandoff: async () => {} };
+  const session = { reference: { transport: "local", sessionId: "session", locator: { sessionFile: "/tmp/session.jsonl" } }, getLastAssistant: () => ({ role: "assistant", content: [{ type: "toolCall", name: "read" }] }), suspendForHandoff: async () => {}, resumeFromHandoff: async () => {} };
   const opening = herdr.agentAttemptActions.openLiveSession.run({ liveSession: session, prepared: { initialPrompt: "continue", piRuntimeError: "resolution failed" }, handoff, attempt: { attempt: 1 }, agent: {}, run: {}, signal: new AbortController().signal, ui: {} });
   handoff.observe({ type: "turn_end" });
   await assert.rejects(opening, /originating Pi runtime is unavailable \(resolution failed\)/);
@@ -226,15 +272,15 @@ void test("opens a terminal live session without inventing a continuation", asyn
   const extension = createHerdrExtension({ agentDir: mkdtempSync(join(tmpdir(), "herdr-extension-terminal-")), env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane" }, runner });
   const handoff = createLiveSessionHandoff();
   handoff.observe({ type: "turn_started" });
-  const session = { reference: { transport: "local", sessionId: "session" }, getLastAssistant: () => ({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "completed report" }] }), suspendForHandoff: async () => ownership.push("suspend"), resumeFromHandoff: async () => ownership.push("resume") };
+  const session = { reference: { transport: "local", sessionId: "session", locator: { sessionFile: "/tmp/session.jsonl" } }, getLastAssistant: () => ({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "completed report" }] }), suspendForHandoff: async () => ownership.push("suspend"), resumeFromHandoff: async () => ownership.push("resume") };
   const opening = extension.agentAttemptActions.openLiveSession.run({ liveSession: session, prepared: { cwd: "/repo", model: { provider: "openai", model: "gpt" }, tools: [], piRuntime }, handoff, attempt: { attempt: 1 }, agent: {}, run: {}, signal: new AbortController().signal, ui: {} });
   handoff.observe({ type: "turn_end" });
   await opening;
   const runCall = calls.find(([command, subcommand]) => command === "pane" && subcommand === "run");
   assert.ok(runCall);
   assert.ok(runCommand);
-  assert.match(runCommand, /--session-id 'session'/);
-  assert.doesNotMatch(runCommand, /Continue the current workflow task/);
+  assert.match(runCommand, /--session '\/tmp\/session\.jsonl'/);
+  assert.doesNotMatch(runCommand, /--session-id/);
   assert.deepEqual(ownership, ["suspend", "resume"]);
 });
 void test("reports terminal turns as idle", async () => {
@@ -715,7 +761,7 @@ void test("routes fully inspectable agents into one labeled workflow workspace",
   const extension = createHerdrExtension({ agentDir, env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "parent" }, runner });
   const prepared = { cwd: "/repo", model: { provider: "openai", model: "gpt" }, tools: ["read"], systemPromptPath: "/repo/.pi/pi-extensible-workflows/SYSTEM.md", contextFiles: ["project"], initialPrompt: "x".repeat(5000), sessionLabel: "flow:review:attempt-1", piRuntime };
   let received;
-  const agent = { transport: { id: "local", async createSession(value) { received = value; return { reference: { transport: "local", sessionId: "session" }, getHerdrContextFiles: () => [{ path: "/repo/AGENTS.md", content: "project instructions" }], getState: () => ({ model: value.model, tools: value.tools }), getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), subscribe: () => () => {}, prompt: async () => ({}), steer: async () => {}, abort: async () => {}, dispose: async () => {} }; } } };
+  const agent = { transport: { id: "local", async createSession(value) { received = value; return { reference: { transport: "local", sessionId: "session", locator: { sessionFile: "/tmp/herdr-test.jsonl" } }, getHerdrContextFiles: () => [{ path: "/repo/AGENTS.md", content: "project instructions" }], getState: () => ({ model: value.model, tools: value.tools }), getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), subscribe: () => () => {}, prompt: async () => ({}), steer: async () => {}, abort: async () => {}, dispose: async () => {} }; } } };
   const identity = { structuralPath: ["review"], parentBreadcrumb: "flow", callSite: "function:agent/work", occurrence: 1 };
   extension.agentSetupHooks.fullyInspectable.setup(agent, { identity, run: { runId: "run", workflow: { name: "flow" } }, signal: new AbortController().signal, tuiIndex: 1, tuiLabel: "reviewer" });
   const session = await agent.transport.createSession(prepared, { identity, attempt: 1 });
@@ -759,7 +805,7 @@ void test("hands off sequential fully inspectable prompts and cleans the active 
   const extension = createHerdrExtension({ agentDir, env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "parent" }, runner });
   const ownership = [];
   const controller = new AbortController();
-  const agent = { transport: { id: "local", async createSession(value) { return { reference: { transport: "local", sessionId: "session" }, suspendForHandoff: async () => ownership.push("suspend"), resumeFromHandoff: async () => ownership.push("resume"), abort: async () => ownership.push("abort"), getLastAssistant: () => ({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] }), dispose: async () => {}, getState: () => ({ model: value.model, tools: value.tools }), getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }) }; } } };
+  const agent = { transport: { id: "local", async createSession(value) { return { reference: { transport: "local", sessionId: "session", locator: { sessionFile: "/tmp/herdr-test.jsonl" } }, suspendForHandoff: async () => ownership.push("suspend"), resumeFromHandoff: async () => ownership.push("resume"), abort: async () => ownership.push("abort"), getLastAssistant: () => ({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] }), dispose: async () => {}, getState: () => ({ model: value.model, tools: value.tools }), getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }) }; } } };
   const run = { runId: "run", workflow: { name: "flow" } };
   const context = { identity: { structuralPath: ["review"], parentBreadcrumb: "flow", callSite: "agent", occurrence: 1 }, run, signal: controller.signal, tuiIndex: 1, tuiLabel: "reviewer" };
   extension.agentSetupHooks.fullyInspectable.setup(agent, context);
@@ -793,7 +839,7 @@ void test("bridges unknown tools and aborts forwarded tool calls", async () => {
   };
   const entered = []; const tool = { name: "slow", label: "Slow", description: "Wait", parameters: { type: "object", properties: {}, additionalProperties: false }, async execute(_id, _params, signal) { entered.push(true); await new Promise((resolve, reject) => { const abort = () => reject(new Error("tool observed abort")); if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true }); }); return { content: [{ type: "text", text: "done" }] }; } };
   const herdr = createHerdrExtension({ agentDir, env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "parent" }, runner });
-  const agent = { transport: { id: "local", async createSession(value) { return { reference: { transport: "local", sessionId: "session" }, getState: () => ({ model: value.model, tools: value.tools }), getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => ({}), abort: async () => {}, dispose: async () => {} }; } } };
+  const agent = { transport: { id: "local", async createSession(value) { return { reference: { transport: "local", sessionId: "session", locator: { sessionFile: "/tmp/herdr-test.jsonl" } }, getState: () => ({ model: value.model, tools: value.tools }), getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => ({}), abort: async () => {}, dispose: async () => {} }; } } };
   const controller = new AbortController();
   herdr.agentSetupHooks.fullyInspectable.setup(agent, { identity: { structuralPath: ["review"], parentBreadcrumb: "flow", callSite: "agent", occurrence: 1 }, run: { runId: "run", workflow: { name: "flow" } }, signal: controller.signal });
   const prepared = { cwd: "/repo", model: { provider: "fake", model: "model" }, tools: [], customTools: [tool], initialPrompt: "work", sessionLabel: "flow:review", piRuntime };
@@ -855,7 +901,7 @@ void test("default workspace manager reuses one workspace and closes it once on 
   const hook = loadingRegistry().agentSetupHooks().find(({ name }) => name === "fullyInspectable");
   assert.ok(hook);
   const run = { runId: "run", workflow: { name: "flow" } };
-  const agent = { transport: { id: "local", async createSession(value) { return { reference: { transport: "local", sessionId: `session-${value.initialPrompt}` }, suspendForHandoff: async () => {}, getLastAssistant: () => ({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] }), dispose: async () => {}, getState: () => ({ model: value.model, tools: value.tools }), getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }) }; } } };
+  const agent = { transport: { id: "local", async createSession(value) { return { reference: { transport: "local", sessionId: `session-${value.initialPrompt}`, locator: { sessionFile: "/tmp/herdr-test.jsonl" } }, suspendForHandoff: async () => {}, getLastAssistant: () => ({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] }), dispose: async () => {}, getState: () => ({ model: value.model, tools: value.tools }), getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }) }; } } };
   hook.setup(agent, { identity: { structuralPath: ["review"], parentBreadcrumb: "flow", callSite: "agent", occurrence: 1 }, run, signal: new AbortController().signal });
   const prepared = { cwd: "/repo", model: { provider: "fake", model: "model" }, tools: [], initialPrompt: "work", sessionLabel: "flow:review", piRuntime };
   const first = await agent.transport.createSession(prepared, { attempt: 1 });
@@ -889,7 +935,7 @@ void test("relays generated tool bridge results, errors, and updates", async () 
     return { content: [{ type: "text", text: "tool result" }] };
   } };
   const herdr = createHerdrExtension({ agentDir, env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "parent" }, runner, workspaces });
-  const agent = { transport: { id: "local", async createSession(value) { return { reference: { transport: "local", sessionId: "session" }, getState: () => ({ model: value.model, tools: value.tools }), getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), abort: async () => {}, dispose: async () => {} }; } } };
+  const agent = { transport: { id: "local", async createSession(value) { return { reference: { transport: "local", sessionId: "session", locator: { sessionFile: "/tmp/herdr-test.jsonl" } }, getState: () => ({ model: value.model, tools: value.tools }), getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), abort: async () => {}, dispose: async () => {} }; } } };
   const controller = new AbortController();
   herdr.agentSetupHooks.fullyInspectable.setup(agent, { identity: { structuralPath: ["review"], parentBreadcrumb: "flow", callSite: "agent", occurrence: 1 }, run: { runId: "run", workflow: { name: "flow" } }, signal: controller.signal });
   const prepared = { cwd: "/repo", model: { provider: "fake", model: "model" }, tools: [], customTools: [tool], initialPrompt: "work", sessionLabel: "flow:review", piRuntime };

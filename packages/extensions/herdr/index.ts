@@ -123,8 +123,8 @@ function resourcePaths(session: HerdrSession): HerdrResourcePaths {
     skills: Array.isArray(value.skills) ? value.skills.filter((path): path is string => typeof path === "string") : [],
   };
 }
-function sessionPath(reference: WorkflowAgentSessionReference): string | undefined {
-  const locator = reference.locator;
+function sessionPath(reference: WorkflowAgentSessionReference | undefined): string | undefined {
+  const locator = reference?.locator;
   return locator && typeof locator === "object" && !Array.isArray(locator) && typeof locator.sessionFile === "string" ? locator.sessionFile : undefined;
 }
 
@@ -239,7 +239,8 @@ function sessionCommand(session: HerdrSession, prepared: Readonly<PreparedAgentS
     throw error;
   }
   const source = sessionPath(session.reference);
-  const sessionArg = source ? `--session ${quote(source)}` : `--session-id ${quote(session.reference.sessionId)}`;
+  if (!source) throw new Error("Herdr cannot hand off a live session without a transferable session file.");
+  const sessionArg = `--session ${quote(source)}`;
   const model = `${prepared.model.provider}/${prepared.model.model}${prepared.model.thinking ? `:${prepared.model.thinking}` : ""}`;
   const toolNames = [...new Set([...prepared.tools, ...(prepared.customTools ?? []).map(({ name }) => name), ...(prepared.resultTool ? [prepared.resultTool.name] : [])])];
   const tools = toolNames.length ? ` --tools ${quote(toolNames.join(","))}` : " --no-tools";
@@ -557,14 +558,19 @@ export function createHerdrExtension(options: HerdrExtensionOptions = {}): Herdr
       },
       openLiveSession: {
         label: "Open live session in Herdr pane",
-        visible(context) { return herdrAvailable(env) && !fullyInspectable && Boolean(context.liveSession && context.prepared && context.handoff); },
+        visible(context) { return herdrAvailable(env) && !fullyInspectable && Boolean(context.liveSession && sessionPath(context.liveSession.reference) && context.prepared && context.handoff); },
         async run(context) {
           const session = context.liveSession;
           const prepared = context.prepared;
           const handoff = context.handoff;
           if (!session || !prepared || !handoff) return;
+          if (!sessionPath(session.reference)) {
+            throw new Error("Herdr cannot hand off a live session without a transferable session file.");
+          }
           const label = typeof context.agent.label === "string" && context.agent.label.trim() ? context.agent.label : typeof context.agent.name === "string" && context.agent.name.trim() ? context.agent.name : "workflow agent";
           const setWorkingMessage = (state?: HerdrAgentStatus | "done" | "completed"): void => context.ui.setWorkingMessage?.(state ? `${label}: ${state}` : undefined);
+          const handoffReleased = (): boolean => handoff.state === "completed";
+          const handoffCancelled = (): boolean => context.signal.aborted || handoffReleased();
           await handoff.request(async () => {
             const continueTask = needsContinuation(session.getLastAssistant());
             let opened: PaneHandle | undefined;
@@ -581,16 +587,14 @@ export function createHerdrExtension(options: HerdrExtensionOptions = {}): Herdr
               }
             };
             try {
-              if (session.suspendForHandoff) {
-                await session.suspendForHandoff();
-                suspended = true;
-              }
+              await abortSession(session);
+              if (handoffCancelled()) return;
+              if (session.suspendForHandoff) await session.suspendForHandoff();
+              suspended = true;
+              if (handoffCancelled()) return;
               opened = await launchPane({ session, prepared, identity: { structuralPath: context.agent.structuralPath ?? [], ...(context.agent.parentBreadcrumb ? { parentBreadcrumb: context.agent.parentBreadcrumb } : {}), callSite: context.agent.label ?? context.agent.name, occurrence: context.attempt.attempt }, attempt: context.attempt.attempt, runner, fullyInspectable: false, env, signal: context.signal, prompt: continueTask ? "Continue the current workflow task from this session." : undefined, directPrompt: continueTask, onStatus: reportStatus });
+              if (handoffCancelled()) { if (handoffReleased()) await opened.closeRemote().catch(() => undefined); await opened.monitor; return; }
               handoff.takeover();
-              if (!session.suspendForHandoff) {
-                await abortSession(session);
-                suspended = true;
-              }
               if (displayedState === undefined || lastState === "idle") {
                 displayedState = "working";
                 setWorkingMessage("working");

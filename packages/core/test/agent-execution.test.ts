@@ -863,6 +863,94 @@ void test("continues after a Herdr handoff with an aborted assistant", async () 
   assert.equal(prompts.length, 2);
 });
 
+void test("does not deadlock or fail when an async subscriber rejects a handed-off prompt", async () => {
+  type Event = import("../src/types.js").WorkflowAgentSessionEvent;
+  let listener: ((event: Event) => void | Promise<void>) | undefined;
+  let handoffOpening: Promise<void> | undefined;
+  let takeover: import("../src/types.js").LiveSessionHandoff | undefined;
+  let beginHandoff: (() => void) | undefined;
+  let releasePromptSettlement!: () => void;
+  const promptSettled = new Promise<void>((resolve) => { releasePromptSettlement = resolve; });
+  const completed = assistant("completed");
+  const messages = [completed];
+  const session = {
+    reference: { transport: "local", sessionId: "async-handoff", locator: { sessionFile: "/sessions/async-handoff.jsonl" } },
+    getState: () => ({ model: root.model, tools: [...root.tools] }),
+    getSessionStats: () => sessionStats(),
+    getLastAssistant: () => messages[0],
+    subscribe(next: (event: Event) => void) { listener = next; return () => { listener = undefined; }; },
+    subscribeAsync(next: (event: Event) => void | Promise<void>) { listener = next; return () => { listener = undefined; }; },
+    steer: async () => {},
+    async prompt() {
+      await listener?.({ type: "turn_started" });
+      beginHandoff?.();
+      await listener?.({ type: "turn_end", message: completed });
+      releasePromptSettlement();
+      throw new Error("prompt aborted during handoff");
+    },
+    async suspendForHandoff() { await promptSettled; },
+    async abort() { releasePromptSettlement(); },
+    async dispose() {},
+  };
+  const transport: import("../src/types.js").AgentTransport = { id: "local", async createSession() { return session; } };
+  const executor = new WorkflowAgentExecutor(root, transport);
+  const execution = executor.execute("work", { label: "worker", workflowName: "flow", onAttempt: (attempt) => {
+    if (!attempt.liveSession || !attempt.handoff) return;
+    const currentHandoff = attempt.handoff;
+    beginHandoff = () => {
+      takeover = currentHandoff;
+      handoffOpening = currentHandoff.request(async () => { await session.suspendForHandoff(); currentHandoff.takeover(); });
+    };
+  } });
+  const settled = await settlesWithin(execution, 2_000);
+  if (!settled) takeover?.takeover();
+  await Promise.allSettled([execution, handoffOpening ?? Promise.resolve()]);
+  assert.equal(settled, true, "handoff must not wait on the subscriber that is settling the prompt");
+  await execution;
+  await handoffOpening;
+});
+void test("cancellation settles while a Herdr pane launch is pending", async () => {
+  type Event = import("../src/types.js").WorkflowAgentSessionEvent;
+  let listener: ((event: Event) => void) | undefined;
+  let handoffOpening: Promise<void> | undefined;
+  let releaseLaunch!: () => void;
+  const launchGate = new Promise<void>((resolve) => { releaseLaunch = resolve; });
+  const completed = assistant("completed");
+  const messages = [completed];
+  let promptFinished!: () => void;
+  const promptDone = new Promise<void>((resolve) => { promptFinished = resolve; });
+  const session = {
+    reference: { transport: "local", sessionId: "cancelled-handoff", locator: { sessionFile: "/sessions/cancelled-handoff.jsonl" } },
+    getState: () => ({ model: root.model, tools: [...root.tools] }),
+    getSessionStats: () => sessionStats(),
+    getLastAssistant: () => messages[0],
+    subscribe(next: (event: Event) => void) { listener = next; return () => { listener = undefined; }; },
+    steer: async () => {},
+    async prompt() {
+      listener?.({ type: "turn_started" });
+      listener?.({ type: "turn_end", message: completed });
+      promptFinished();
+      return { assistant: completed };
+    },
+    async abort() {},
+    async dispose() {},
+  };
+  const transport: import("../src/types.js").AgentTransport = { id: "local", async createSession() { return session; } };
+  const controller = new AbortController();
+  const executor = new WorkflowAgentExecutor(root, transport);
+  const execution = executor.execute("work", { label: "worker", workflowName: "flow", onAttempt: (attempt) => {
+    if (!attempt.liveSession || !attempt.handoff) return;
+    handoffOpening = attempt.handoff.request(async () => { await launchGate; attempt.handoff?.takeover(); });
+  } }, controller.signal);
+  await promptDone;
+  controller.abort();
+  const settled = await settlesWithin(execution, 2_000);
+  releaseLaunch();
+  await Promise.allSettled([execution, handoffOpening ?? Promise.resolve()]);
+  assert.equal(settled, true, "cancellation must release a pending handoff wait");
+  await assert.rejects(execution, (error: unknown) => error instanceof WorkflowError && error.code === "CANCELLED");
+});
+
 void test("retries in fresh persisted sessions and reports terminal attempt history", async () => {
   let created = 0;
   const executor = new WorkflowAgentExecutor(root, testTransport(async () => {

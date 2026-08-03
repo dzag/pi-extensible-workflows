@@ -767,6 +767,17 @@ export class WorkflowAgentExecutor {
       let schemaResult: JsonValue | undefined;
       let session: WorkflowAgentSession | undefined;
       let handoff: LiveSessionHandoff | undefined;
+      let handoffAbort: (() => void) | undefined;
+      const releaseHandoff = (reason: string): void => {
+        handoff?.release(reason);
+        if (handoffAbort) {
+          attemptSignal.removeEventListener("abort", handoffAbort);
+          handoffAbort = undefined;
+        }
+      };
+      const releaseIfAttemptCancelled = (): void => {
+        if (attemptSignal.aborted) releaseHandoff("attempt cancelled");
+      };
       let setup: AgentSetup | undefined;
       let setupSummary: AgentSetupSummary = { hookNames: [], model: { ...resolved.model }, tools: [...resolved.tools], cwd };
       let setupFailed = false;
@@ -829,6 +840,9 @@ export class WorkflowAgentExecutor {
         }
         session = createdSession;
         handoff = createLiveSessionHandoff();
+        handoffAbort = () => { releaseHandoff("attempt cancelled"); };
+        attemptSignal.addEventListener("abort", handoffAbort, { once: true });
+        releaseIfAttemptCancelled();
         await options.onAttempt?.({ attempt, transport: setup.transport.id, session: session.reference, liveSession: session, prepared: setup.prepared, handoff, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, setup: setupSummary });
         const preparedTools = new Set([...setup.prepared.tools, ...(setup.prepared.customTools ?? []).map(({ name }) => name), ...(setup.prepared.resultTool ? [setup.prepared.resultTool.name] : [])]);
         if (session.getState().tools.some((tool) => !preparedTools.has(tool))) throw new WorkflowError("INTERNAL_ERROR", `Agent transport ${setup.transport.id} widened the prepared tool policy`);
@@ -843,6 +857,7 @@ export class WorkflowAgentExecutor {
           } else if (candidate) lastAssistant = candidate;
         };
         const recoverTerminal = () => recoverTerminalProviderError(activeSession, options.label, options.providerErrorRecovery, async () => { try { acceptAssistant((await promptWithProviderPause(activeSession, providerContinuationPrompt, remaining(options.timeoutMs, started), attemptSignal, this.root.providerPause)).assistant); } catch (error) { acceptAssistant(activeSession.getLastAssistant() ?? lastAssistant); if (!hasSchemaResult()) throw error; } }, () => lastAssistant);
+        const throwIfAttemptCancelled = (): void => { if (attemptSignal.aborted) throw new WorkflowError("CANCELLED", "Agent cancelled"); };
         const promptAndRecover = async (prompt: string): Promise<void> => {
           let promptFailed = false;
           let promptError: unknown;
@@ -850,7 +865,9 @@ export class WorkflowAgentExecutor {
           const recovered = await recoverTerminal();
           const preHandoffAssistant = handoffBoundaryAssistant;
           handoffBoundaryAssistant = undefined;
+          throwIfAttemptCancelled();
           await handoff?.waitForResume();
+          throwIfAttemptCancelled();
           const resumed = activeSession.getLastAssistant();
           const preservePreHandoffResult = Boolean(handoff?.transferred && isTerminalAssistant(preHandoffAssistant));
           if (preservePreHandoffResult) lastAssistant = preHandoffAssistant;
@@ -860,12 +877,12 @@ export class WorkflowAgentExecutor {
             try { acceptAssistant((await promptWithProviderPause(activeSession, handoffContinuationPrompt, remaining(options.timeoutMs, started), attemptSignal, this.root.providerPause)).assistant); } catch (error) { handoffError = error; }
           }
           if (handoffError && !hasSchemaResult()) throw handoffError instanceof Error ? handoffError : new Error(typeof handoffError === "string" ? handoffError : "Herdr handoff continuation failed");
-          if (promptFailed && !hasSchemaResult() && !recovered) throw promptError;
+          if (promptFailed && !hasSchemaResult() && !recovered && !handoff?.transferred) throw promptError;
         };
         const handleSessionEvent = async (event: WorkflowAgentSessionEvent) => {
           if (event.type === "turn_end" || event.type === "turnEnded") handoffBoundaryAssistant = event.message?.role === "assistant" ? event.message : activeSession.getLastAssistant() ?? lastAssistant;
           handoff?.observe(event);
-          if (event.type === "turn_end" || event.type === "turnEnded") await handoff?.waitForTakeover();
+          if ((event.type === "turn_end" || event.type === "turnEnded") && handoff?.state === "handoff-pending") void activeSession.abort().catch(() => undefined);
           lastEventAt = Date.now();
           let persist = false;
           let shouldReport = false;
@@ -947,10 +964,11 @@ export class WorkflowAgentExecutor {
         const attemptAccounting = accounting(session.getSessionStats());
         completedAttempt = attemptRecord(setup.transport.id, attempt, session, setupSummary, attemptAccounting, value);
         attempts.push(completedAttempt);
-        try { await options.onAttempt?.(completedAttempt); } finally { await session.dispose(); }
+        try { await options.onAttempt?.(completedAttempt); } finally { releaseHandoff("session completed"); await session.dispose(); }
         return { value, attempts, cwd: setupSummary.cwd };
       } catch (error) {
         if (completedAttempt) throw errorWithAttempts(error, attempts);
+        releaseHandoff("attempt failed");
         const typed = budgetError ?? (error instanceof WorkflowError ? error : new WorkflowError(attemptSignal.aborted && setupFailed ? "CANCELLED" : "AGENT_FAILED", error instanceof Error ? error.message : String(error)));
         if (!session) {
           const failedAttempt: AgentAttempt = { attempt, transport: setup?.transport.id ?? this.transport.id, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }, error: { code: typed.code, message: typed.message }, setup: setupSummary };
