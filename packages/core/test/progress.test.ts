@@ -3,10 +3,10 @@ import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { testExtensionApi } from "./support.js";
+import { contextualWorkflowAction, testExtensionApi, waitForIssue105 } from "./support.js";
 import workflowExtension, { createLaunchSnapshot, DEFAULT_SETTINGS, formatNavigatorDashboard, formatNavigatorRun, formatWorkflowPhaseDashboard, formatWorkflowProgress, mergeBudget, RunStore, truncateWorkflowProgress, WORKFLOW_AGENT_STALL_THRESHOLD_MS, type AgentRecord, type PersistedRun } from "../src/index.js";
+import { listRunIds } from "../src/persistence.js";
 import { testTransport, type TestPiSession, type TestPiSessionEvent } from "./test-transport.js";
-import { waitForIssue105 } from "./support.js";
 
 function makeAgent(overrides: Partial<AgentRecord> = {}): AgentRecord {
   return { id: "run:1", name: "worker", path: "run:1", state: "running", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1, ...overrides };
@@ -187,6 +187,112 @@ void test("streams foreground workflow progress into its tool card", async () =>
   assert.ok(updates.some(({ details }) => details.run.phase === "work"));
   assert.equal(updates.at(-1)?.details.run.state, "completed");
   assert.match(formatWorkflowProgress(result.details.run), /✓ Workflow: progress/);
+});
+void test("host persists neutral live tool and state progress while preserving captured system prompts", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-neutral-host-progress-"));
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  let listener: ((event: TestPiSessionEvent) => void) | undefined;
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => { release = resolve; });
+  const message = { role: "assistant" as const, content: [{ type: "text" as const, text: "done" }] };
+  const messages = [message];
+  const native: TestPiSession & { systemPrompt?: string } = {
+    sessionId: "neutral-host-progress",
+    sessionFile: "/sessions/neutral-host-progress.jsonl",
+    model: { provider: "changed", model: "model" },
+    agent: { state: { tools: [{ name: "read" }] } },
+    systemPrompt: "effective",
+    messages,
+    getSessionStats: () => ({ tokens: { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, total: 14 }, cost: 0.25 }),
+    subscribe(candidate: (event: TestPiSessionEvent) => void) { listener = candidate; return () => { listener = undefined; }; },
+    async prompt() {
+      listener?.({ type: "state_changed", state: { model: { provider: "changed", model: "model" }, tools: ["read"], systemPrompt: "effective" } });
+      listener?.({ type: "tool_execution_start", toolCallId: "call", toolName: "read", args: {} });
+      delete native.systemPrompt;
+      listener?.({ type: "state_changed", state: { model: { provider: "changed", model: "model" }, tools: ["read"] } });
+      await hold;
+      listener?.({ type: "tool_execution_end", toolCallId: "call", toolName: "read", isError: false });
+      listener?.({ type: "message_end", message });
+    },
+    steer: async () => {},
+    dispose() {},
+  };
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "read"] }), home, undefined, testTransport(async () => native));
+  const workflow = tools.find(({ name }) => name === "workflow");
+  assert.ok(workflow);
+  let live: PersistedRun | undefined;
+  const running = workflow.execute("id", { name: "neutral-host-progress", script: `return agent("work", { tools: ["read"] });`, foreground: true }, new AbortController().signal, (update: { details: { run: PersistedRun } }) => { live = update.details.run; }, { cwd: home, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } });
+  await waitForIssue105(() => live !== undefined && live.agents.some((agent) => agent.toolCalls?.some(({ state }) => state === "running") === true));
+  assert.ok(live);
+  const liveAgent = live.agents[0];
+  assert.ok(liveAgent);
+  assert.match(formatWorkflowProgress(live), /#1 .* gpt .*read/);
+  assert.match(formatWorkflowPhaseDashboard(live, createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "neutral-host-progress" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: ["read"], agentTypes: [], schemas: [] }), 120, { agentId: liveAgent.id }).join("\n"), /Model: changed\/model[\s\S]*Tools: read/);
+  release();
+  await running;
+  const ids = await listRunIds(home, "session", home);
+  const loaded = await new RunStore(home, "session", ids[0] as string, home).load();
+  const agent = loaded.run.agents[0];
+  assert.ok(agent);
+  assert.deepEqual(agent.accounting, { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, cost: 0.25 });
+  assert.deepEqual(agent.toolCalls, []);
+  assert.deepEqual(agent.model, { provider: "openai", model: "gpt", thinking: "medium" });
+  assert.deepEqual(agent.tools, ["read"]);
+  assert.equal(agent.systemPrompt, "effective");
+  assert.equal(typeof agent.lastEventAt, "number");
+});
+void test("host restart recovers persisted neutral state with the declared ownership policy", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-host-restart-recovery-"));
+  const store = new RunStore(home, "session", "run", home);
+  const snapshot = createLaunchSnapshot({ script: `return await agent("work");`, args: null, metadata: { name: "host-restart" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: ["agent", "read"], agentTypes: [], roles: {}, schemas: [] });
+  await store.create({ id: "run", workflowName: "host-restart", cwd: home, sessionId: "session", state: "interrupted", agents: [{ id: "run:1", name: "work", path: "run:1", state: "cancelled", systemPrompt: "persisted prompt", model: { provider: "stale", model: "stale", thinking: "high" }, tools: ["agent", "read", "injected"], attempts: 1 }], agentSessions: [] }, snapshot);
+  await store.saveOwnership([]);
+  const createSession = async (): Promise<TestPiSession> => ({
+    sessionId: "host-restart-session",
+    sessionFile: "/sessions/host-restart-session.jsonl",
+    messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+    getSessionStats: () => ({ tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 }, cost: 0.5 }),
+    prompt: async () => {},
+    steer: async () => {},
+    dispose() {},
+  });
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
+  let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let shutdown: (() => Promise<void>) | undefined;
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "agent", "read"] }), home, undefined, testTransport(createSession));
+  const workflow = tools.find(({ name }) => name === "workflow");
+  const command = commands[0]?.handler;
+  assert.ok(workflow && start && command);
+  const context = { cwd: home, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
+  await start({}, context);
+  await contextualWorkflowAction(command, context, "run", "Resume");
+  const loaded = await store.load();
+  assert.equal(loaded.run.id, "run");
+  assert.equal(loaded.run.state, "completed");
+  assert.deepEqual(loaded.run.agents.map(({ model, tools }) => ({ model, tools })), [{ model: { provider: "openai", model: "gpt", thinking: "medium" }, tools: ["agent", "read"] }]);
+  assert.equal(loaded.run.agents[0]?.systemPrompt, "persisted prompt");
+  await shutdown?.();
+});
+void test("host restart restores declared ownership over stale live session policy", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-host-restart-policy-"));
+  const store = new RunStore(home, "session", "run", home);
+  const snapshot = createLaunchSnapshot({ script: "return true;", args: null, metadata: { name: "host-restart-policy" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: ["agent", "read"], agentTypes: [], roles: {}, schemas: [] });
+  await store.create({ id: "run", workflowName: "host-restart-policy", cwd: home, sessionId: "session", state: "interrupted", agents: [{ id: "run:1", name: "work", path: "run:1", state: "running", model: { provider: "stale", model: "stale", thinking: "high" }, tools: ["agent", "read", "injected"], attempts: 1 }], agentSessions: [] }, snapshot);
+  await store.saveOwnership([{ id: "run:1", label: "work", state: "running", options: { label: "work", cwd: home, model: "openai/gpt", tools: ["agent", "read"] } }]);
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let shutdown: (() => Promise<void>) | undefined;
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "agent", "read"] }), home);
+  const stop = tools.find(({ name }) => name === "workflow_stop");
+  assert.ok(stop && start);
+  const context = { cwd: home, hasUI: false, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
+  await start({}, context);
+  await stop.execute("stop", { runId: "run" });
+  const loaded = await store.load();
+  assert.equal(loaded.run.state, "stopped");
+  assert.deepEqual(loaded.run.agents.map(({ model, tools }) => ({ model, tools })), [{ model: { provider: "openai", model: "gpt", thinking: "medium" }, tools: ["agent", "read"] }]);
+  await shutdown?.();
 });
 void test("inline workflow progress refreshes persisted state for stalled agents", async () => {
   type Rendered = { render: (width: number) => string[]; invalidate?: () => void };

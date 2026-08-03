@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { executeCommand, testExtensionApi } from "./support.js";
-import workflowExtension, { createLaunchSnapshot, DEFAULT_SETTINGS, formatNavigatorDashboard, formatNavigatorRun, registerWorkflowExtension, RunStore, openWorkflowArtifact } from "../src/index.js";
+import workflowExtension, { createLaunchSnapshot, DEFAULT_SETTINGS, formatNavigatorDashboard, formatNavigatorRun, registerWorkflowExtension, RunStore, openWorkflowArtifact, WorkflowError } from "../src/index.js";
 import { testTransport, type TestPiSession } from "./test-transport.js";
 
 type OwnershipNodes = Parameters<RunStore["saveOwnership"]>[0];
@@ -119,6 +119,91 @@ void test("latest-attempt actions receive the active session and lose it after c
   commandInvocations = 2;
   await executeCommand(command, "", context);
   assert.deepEqual(actionRuns, [true, false]);
+});
+void test("navigator attempt actions retain live steering and takeover handoff", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-navigator-handoff-actions-"));
+  let listener: ((event: import("../src/types.js").WorkflowAgentSessionEvent) => void) | undefined;
+  let releasePrompt!: () => void;
+  let markPromptStarted!: () => void;
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
+  const promptStarted = new Promise<void>((resolve) => { markPromptStarted = resolve; });
+  const message = { role: "assistant" as const, content: [{ type: "text" as const, text: "done" }] };
+  const messages = [message];
+  const steered: string[] = [];
+  const createSession = async (): Promise<TestPiSession> => ({
+    sessionId: "handoff-action-session",
+    sessionFile: "/sessions/handoff-action.jsonl",
+    messages,
+    getSessionStats: () => ({ tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 }, cost: 0.5 }),
+    subscribe(candidate) { listener = candidate; return () => { listener = undefined; }; },
+    async prompt() { markPromptStarted(); listener?.({ type: "turn_start" }); await promptGate; listener?.({ type: "turn_end", message }); },
+    steer: async (text) => { steered.push(text); },
+    abort: async () => {},
+    dispose() {},
+  });
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
+  let expectedSession: import("../src/types.js").WorkflowAgentSession | undefined;
+  const baseTransport = testTransport(createSession);
+  const transport: import("../src/types.js").AgentTransport = { id: "local", async createSession(prepared, context) { expectedSession = await baseTransport.createSession(prepared, context); return expectedSession; } };
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home, undefined, transport);
+  const actionResults: Array<{ live: boolean; transferred: boolean; steered: string }> = [];
+  registerWorkflowExtension({ version: "1.0.0", headline: "Handoff actions", agentAttemptActions: { takeOver: { label: "Take over live attempt", visible: (context) => context.liveSession !== undefined && context.handoff !== undefined, run: async (context) => { const handoff = context.handoff; if (!handoff) throw new Error("missing handoff"); await context.liveSession?.steer("continue"); const opening = handoff.request(async () => { handoff.takeover(); }); releasePrompt(); await opening; actionResults.push({ live: context.liveSession === expectedSession, transferred: handoff.transferred, steered: steered.at(-1) ?? "" }); } } } });
+  const workflow = tools.find(({ name }) => name === "workflow");
+  const command = commands[0]?.handler;
+  assert.ok(workflow && command);
+  const context = { cwd: home, mode: "rpc", hasUI: true, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt" }] }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {}, select: async (_title: string, options: string[]) => { if (options.some((option) => option.includes("handoff-actions"))) return actionResults.length ? "Close" : options.find((option) => option.includes("handoff-actions")); if (options.includes("Agents...")) return actionResults.length ? "Back" : "Agents..."; if (options.some((option) => option.startsWith("#1 "))) return options.find((option) => option.startsWith("#1 ")); if (options.includes("Take over live attempt")) return "Take over live attempt"; return "Back"; }, confirm: async () => false, input: async () => undefined } };
+  const running = workflow.execute("id", { name: "handoff-actions", script: "return agent('work');", foreground: true }, new AbortController().signal, undefined, context);
+  await promptStarted;
+  await executeCommand(command, "", context);
+  await running;
+  assert.deepEqual(actionResults, [{ live: true, transferred: true, steered: "continue" }]);
+});
+void test("host cancellation releases a navigator handoff", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-navigator-handoff-cancel-"));
+  let listener: ((event: import("../src/types.js").WorkflowAgentSessionEvent) => void) | undefined;
+  let releasePrompt!: () => void;
+  let markPromptStarted!: () => void;
+  let markActionStarted!: () => void;
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
+  const promptStarted = new Promise<void>((resolve) => { markPromptStarted = resolve; });
+  const actionStarted = new Promise<void>((resolve) => { markActionStarted = resolve; });
+  const message = { role: "assistant" as const, content: [{ type: "text" as const, text: "done" }] };
+  const messages = [message];
+  let promptAborted = false;
+  const createSession = async (): Promise<TestPiSession> => ({
+    sessionId: "handoff-cancel-session",
+    sessionFile: "/sessions/handoff-cancel.jsonl",
+    messages,
+    getSessionStats: () => ({ tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 }, cost: 0.5 }),
+    subscribe(candidate) { listener = candidate; return () => { listener = undefined; }; },
+    async prompt() { markPromptStarted(); listener?.({ type: "turn_start" }); await promptGate; if (!promptAborted) listener?.({ type: "turn_end", message }); },
+    steer: async () => {},
+    abort: async () => { promptAborted = true; releasePrompt(); listener?.({ type: "turn_end", message }); },
+    dispose() {},
+  });
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
+  const baseTransport = testTransport(createSession);
+  const transport: import("../src/types.js").AgentTransport = { id: "local", async createSession(prepared, context) { return baseTransport.createSession(prepared, context); } };
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home, undefined, transport);
+  let actionFinished = false;
+  let handoffLaunched = false;
+  registerWorkflowExtension({ version: "1.0.0", headline: "Handoff cancellation", agentAttemptActions: { holdHandoff: { label: "Hold handoff", visible: (context) => context.liveSession !== undefined && context.handoff !== undefined, run: async (context) => { const handoff = context.handoff; if (!handoff) throw new Error("missing handoff"); markActionStarted(); await handoff.request(async () => { handoffLaunched = true; }); actionFinished = true; } } } });
+  const workflow = tools.find(({ name }) => name === "workflow");
+  const command = commands[0]?.handler;
+  assert.ok(workflow && command);
+  const controller = new AbortController();
+  const context = { cwd: home, mode: "rpc", hasUI: true, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt" }] }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {}, select: async (_title: string, options: string[]) => { if (options.some((option) => option.includes("handoff-cancel"))) return actionFinished ? "Close" : options.find((option) => option.includes("handoff-cancel")); if (options.includes("Agents...")) return actionFinished ? "Back" : "Agents..."; if (options.some((option) => option.startsWith("#1 "))) return options.find((option) => option.startsWith("#1 ")); if (options.includes("Hold handoff")) return "Hold handoff"; return "Back"; }, confirm: async () => false, input: async () => undefined } };
+  const running = workflow.execute("id", { name: "handoff-cancel", script: "return agent('work');", foreground: true }, controller.signal, undefined, context);
+  await promptStarted;
+  const navigating = executeCommand(command, "", context);
+  await actionStarted;
+  controller.abort();
+  await navigating;
+  await assert.rejects(running, (error: unknown) => error instanceof WorkflowError && error.code === "CANCELLED");
+  assert.equal(actionFinished, true);
+  assert.equal(handoffLaunched, false);
 });
 void test("TUI navigator exposes agent-scoped worktree actions without transcript actions", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-agent-actions-"));

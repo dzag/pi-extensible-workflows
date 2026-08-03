@@ -130,6 +130,18 @@ export const WORKFLOW_RETRY_PARAMETERS = Type.Object({ runId: Type.String({ desc
 function workflowToolUpdate(run: PersistedRun): WorkflowToolUpdate {
   return { content: [{ type: "text", text: formatWorkflowProgress(run) }], details: { runId: run.id, run } };
 }
+function agentWithProgress(agent: AgentRecord, progress: AgentProgress): AgentRecord {
+  const next = { ...agent, accounting: progress.accounting, toolCalls: progress.toolCalls };
+  if (progress.state !== undefined) {
+    next.model = progress.state.model;
+    next.tools = progress.state.tools;
+    if (progress.state.systemPrompt !== undefined) next.systemPrompt = progress.state.systemPrompt;
+  }
+  if (progress.activity === undefined) delete next.activity;
+  else next.activity = progress.activity;
+  if (progress.lastEventAt !== undefined) next.lastEventAt = progress.lastEventAt;
+  return next;
+}
 
 type WorkflowToolResult = { runId?: string; run?: PersistedRun; value?: JsonValue; preview?: string };
 function isWorkflowToolResult(value: unknown): value is WorkflowToolResult {
@@ -509,11 +521,11 @@ export default function workflowExtension(pi: WorkflowExtensionAPI, home?: strin
       const onProgress = async (progress: AgentProgress) => {
         let runState: PersistedRun;
         if (progress.persist) {
-          runState = await persistRunState(run.store, run.metadata, (current) => current.agents.some((agent) => agent.id === id) ? { ...current, ...run.budget.snapshot(), agents: current.agents.map((agent) => agent.id === id ? { ...agent, accounting: progress.accounting, toolCalls: progress.toolCalls, ...(progress.state ? { model: progress.state.model, tools: progress.state.tools, ...(progress.state.systemPrompt === undefined ? {} : { systemPrompt: progress.state.systemPrompt }) } : {}), activity: progress.activity, ...(progress.lastEventAt === undefined ? {} : { lastEventAt: progress.lastEventAt }) } : agent) } : current);
+          runState = await persistRunState(run.store, run.metadata, (current) => current.agents.some((agent) => agent.id === id) ? { ...current, ...run.budget.snapshot(), agents: current.agents.map((agent) => agent.id === id ? agentWithProgress(agent, progress) : agent) } : current);
         } else {
           const loaded = await run.store.load();
           if (!loaded.run.agents.some((agent) => agent.id === id)) return;
-          runState = { ...loaded.run, ...run.budget.snapshot(), agents: loaded.run.agents.map((agent) => agent.id === id ? { ...agent, accounting: progress.accounting, toolCalls: progress.toolCalls, ...(progress.state ? { model: progress.state.model, tools: progress.state.tools, ...(progress.state.systemPrompt === undefined ? {} : { systemPrompt: progress.state.systemPrompt }) } : {}), activity: progress.activity, ...(progress.lastEventAt === undefined ? {} : { lastEventAt: progress.lastEventAt }) } : agent) };
+          runState = { ...loaded.run, ...run.budget.snapshot(), agents: loaded.run.agents.map((agent) => agent.id === id ? agentWithProgress(agent, progress) : agent) };
         }
         if (!runState.agents.some((agent) => agent.id === id)) return;
         setLiveActivity(runId, id, progress.activity);
