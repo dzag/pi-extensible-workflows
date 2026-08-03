@@ -48,12 +48,47 @@ export interface RuntimeRunIdentity {
   readonly workflowName: string;
 }
 
+export interface RuntimeAgentState {
+  readonly model: RuntimeModel;
+  readonly thinking?: RuntimeModel["thinking"];
+  readonly tools: readonly string[];
+  readonly systemPrompt?: string;
+}
+
+export interface RuntimeToolCallProgress {
+  readonly id: string;
+  readonly name: string;
+  readonly state: "running" | "completed" | "failed";
+}
+
+export type RuntimeHandoffState = "local-running" | "takeover-pending" | "remote-running" | "returning-local" | "completed";
+
+export interface RuntimeAgentHandoff {
+  readonly state: RuntimeHandoffState;
+  readonly transferred: boolean;
+  observe(event: { readonly type: string }): void;
+  request(launch: () => Promise<void>): Promise<void>;
+  waitForTakeover(): Promise<void>;
+  takeover(): void;
+  waitForResume(): Promise<void>;
+  // The caller owns the handoff lifetime; the runner must not release it.
+  release(reason?: string): void;
+}
+
+export interface RuntimeAgentRunControl {
+  readonly handoff?: RuntimeAgentHandoff;
+  steer(message: string): Promise<void>;
+}
+
 export interface RuntimeAgentProgress {
   readonly usage: RuntimeUsage;
+  readonly toolCalls: readonly RuntimeToolCallProgress[];
+  readonly state?: RuntimeAgentState;
   readonly activity?: { readonly kind: "reasoning" | "tool" | "text"; readonly text: string };
   readonly lastEventAt?: number;
   readonly persist: boolean;
 }
+
 export interface RuntimeAgentRunRequest {
   readonly task: string;
   readonly cwd: string;
@@ -65,7 +100,8 @@ export interface RuntimeAgentRunRequest {
   readonly agent: RuntimeAgentIdentity;
   readonly signal: AbortSignal;
   readonly onProgress?: (progress: RuntimeAgentProgress) => void | Promise<void>;
-  readonly onControl?: (control: { steer(message: string): Promise<void> }) => void | Promise<void>;
+  readonly handoff?: RuntimeAgentHandoff;
+  readonly onControl?: (control: RuntimeAgentRunControl) => void | Promise<void>;
 }
 
 export interface RuntimeAgentReference {
@@ -85,6 +121,7 @@ export interface RuntimeAgentRunner {
     readonly customTools: boolean;
     readonly structuredResults: boolean;
     readonly steering: boolean;
+    readonly handoff: boolean;
     readonly usage: RuntimeUsageAvailability;
   };
   run(request: Readonly<RuntimeAgentRunRequest>): Promise<RuntimeAgentRunResult>;
