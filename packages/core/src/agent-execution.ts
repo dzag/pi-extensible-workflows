@@ -47,6 +47,8 @@ import { deepFreeze, jsonObject, jsonValue, object, disabledResources, mergeAgen
 import { roleNameOf } from "./types.js";
 import { WorkflowError } from "./types.js";
 import { createLiveSessionHandoff } from "./session-handoff.js";
+import { createPiRuntimeSessionAdapter, isTurnEnd, isTurnBoundaryStart, normalizePiMessage, normalizePiSessionEvent, runtimeProgressToAgentProgress, type PiRuntimeSessionAdapter } from "./pi-runtime-adapter.js";
+import type { RuntimeAgentProgress } from "./runtime/agent-runner.js";
 import { validateSchema } from "./validation.js";
 import type { RunStore } from "./persistence.js";
 type AgentExecutionRunStore = Pick<RunStore, "recordSystemPrompt" | "validateWorktree" | "worktree" | "snapshotWorktree">;
@@ -348,7 +350,7 @@ async function createLocalPiSessionHandle(input: SessionInput, sessionStartEvent
   }) as unknown as PiSession;
   return { session: managedSession, shutdown };
 }
-function workflowAgentMessage(message: AgentMessage | undefined): WorkflowAgentMessage | undefined { return message ? { role: message.role, ...(message.content === undefined ? {} : { content: message.content }), ...(message.stopReason === undefined ? {} : { stopReason: message.stopReason }), ...(message.errorMessage === undefined ? {} : { errorMessage: message.errorMessage }), ...(message.usage === undefined ? {} : { usage: message.usage }) } : undefined; }
+function workflowAgentMessage(message: AgentMessage | undefined): WorkflowAgentMessage | undefined { return normalizePiMessage(message); }
 function latestUsableAssistant(messages: readonly AgentMessage[]): WorkflowAgentMessage | undefined { for (let index = messages.length - 1; index >= 0; index -= 1) { const candidate = workflowAgentMessage(messages[index]); if (candidate?.role === "assistant" && !isEmptyAbortedAssistant(candidate)) return candidate; } return undefined; }
 function workflowAgentStats(stats: ReturnType<PiSession["getSessionStats"]>): WorkflowAgentSessionStats { return { tokens: { input: stats.tokens.input, output: stats.tokens.output, cacheRead: stats.tokens.cacheRead, cacheWrite: stats.tokens.cacheWrite, total: stats.tokens.total }, cost: stats.cost }; }
 function workflowAgentState(native: PiSession, prepared: Readonly<PreparedAgentSession>): WorkflowAgentSessionState {
@@ -356,7 +358,11 @@ function workflowAgentState(native: PiSession, prepared: Readonly<PreparedAgentS
   const model = native.model?.provider && (native.model.model ?? native.model.id) ? { provider: native.model.provider, model: native.model.model ?? native.model.id ?? prepared.model.model, ...(prepared.model.thinking ? { thinking: prepared.model.thinking } : {}) } : { ...prepared.model };
   return { model, ...(model.thinking ? { thinking: model.thinking } : {}), tools: [...tools], ...(native.systemPrompt === undefined ? {} : { systemPrompt: native.systemPrompt }) };
 }
-function localSessionEvent(event: unknown): WorkflowAgentSessionEvent { return event as WorkflowAgentSessionEvent; }
+function notifyPiSessionEvent(notify: (event: WorkflowAgentSessionEvent) => Promise<void>, event: unknown, settledOnly = false): Promise<void> | undefined {
+  const normalized = normalizePiSessionEvent(event);
+  if (!normalized || (settledOnly && normalized.type !== "agent_settled")) return undefined;
+  return notify(normalized);
+}
 export async function createLocalWorkflowAgentSession(prepared: Readonly<PreparedAgentSession>, context: Readonly<AgentTransportContext>): Promise<WorkflowAgentSession> {
   void context;
   const input: SessionInput = {
@@ -380,17 +386,65 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
   const listeners = new Set<(event: WorkflowAgentSessionEvent) => void | Promise<void>>();
   let coreUnsubscribe: (() => void) | undefined;
   let sessionUnsubscribe: (() => void) | undefined;
+  const eventNotifications = new Set<Promise<void>>();
+  const noEventNotificationFailure = Symbol("no event notification failure");
+  let eventNotificationFailure: unknown = noEventNotificationFailure;
+  let observationGeneration = 0;
   const notify = async (event: WorkflowAgentSessionEvent) => { for (const listener of listeners) await listener(event); };
+  const trackNotification = (notification: Promise<void> | undefined, generation: number): void => {
+    if (!notification) return;
+    if (generation !== observationGeneration) { void notification.then(() => undefined, () => undefined); return; }
+    eventNotifications.add(notification);
+    void notification.then(() => {
+      eventNotifications.delete(notification);
+    }, (error: unknown) => {
+      eventNotifications.delete(notification);
+      if (generation === observationGeneration && eventNotificationFailure === noEventNotificationFailure) {
+        eventNotificationFailure = error;
+      }
+    });
+  };
+  const flushNotifications = async (): Promise<void> => {
+    let failure: unknown;
+    let failed = false;
+    const takeFailure = () => {
+      if (eventNotificationFailure === noEventNotificationFailure) return;
+      if (!failed) {
+        failure = eventNotificationFailure;
+        failed = true;
+      }
+      eventNotificationFailure = noEventNotificationFailure;
+    };
+    takeFailure();
+    while (eventNotifications.size > 0) {
+      const pending = [...eventNotifications];
+      const outcomes = await Promise.allSettled(pending);
+      for (const outcome of outcomes) {
+        if (outcome.status === "rejected" && !failed) {
+          failure = outcome.reason;
+          failed = true;
+        }
+      }
+      for (const notification of pending) eventNotifications.delete(notification);
+      takeFailure();
+    }
+    takeFailure();
+    if (failed) throw failure;
+  };
   const unbindNative = () => {
+    observationGeneration += 1;
     coreUnsubscribe?.();
     sessionUnsubscribe?.();
     coreUnsubscribe = undefined;
     sessionUnsubscribe = undefined;
+    eventNotifications.clear();
+    eventNotificationFailure = noEventNotificationFailure;
   };
   const bindNative = (next: PiSession) => {
     unbindNative();
-    coreUnsubscribe = next.agent?.subscribe?.((event) => notify(localSessionEvent(event)));
-    sessionUnsubscribe = next.subscribe?.((event) => { if (typeof event === "object" && event !== null && (event as { type?: unknown }).type === "agent_settled") void notify(localSessionEvent(event)); });
+    const generation = observationGeneration;
+    coreUnsubscribe = next.agent?.subscribe?.((event) => { trackNotification(notifyPiSessionEvent(notify, event), generation); });
+    sessionUnsubscribe = next.subscribe?.((event) => { trackNotification(notifyPiSessionEvent(notify, event, true), generation); });
   };
   const enqueue = (operation: () => Promise<void>): Promise<void> => {
     const previous = lifecycle;
@@ -496,10 +550,30 @@ export async function createLocalWorkflowAgentSession(prepared: Readonly<Prepare
     getSessionStats: () => workflowAgentStats(native.getSessionStats()),
     getLastAssistant: () => latestUsableAssistant(native.messages),
     subscribe(listener: (event: WorkflowAgentSessionEvent) => void) { listeners.add(listener); listener({ type: "state_changed", state: workflowAgentState(native, prepared) }); return () => listeners.delete(listener); },
-    subscribeAsync(listener: (event: WorkflowAgentSessionEvent) => void | Promise<void>) { listeners.add(listener); void Promise.resolve(listener({ type: "state_changed", state: workflowAgentState(native, prepared) })).catch(() => undefined); return () => listeners.delete(listener); },
+    subscribeAsync(listener: (event: WorkflowAgentSessionEvent) => void | Promise<void>) {
+      listeners.add(listener);
+      let notification: Promise<void>;
+      try { notification = Promise.resolve(listener({ type: "state_changed", state: workflowAgentState(native, prepared) })); }
+      catch (error) { notification = Promise.resolve().then(() => { throw error; }); }
+      trackNotification(notification, observationGeneration);
+      return () => listeners.delete(listener);
+    },
     async prompt(text: string) {
       if (!isActive()) throw new WorkflowError("INTERNAL_ERROR", "Local workflow session is not active");
-      const prompt = (async () => { await native.prompt(text); const assistant = latestUsableAssistant(native.messages); return assistant ? { assistant } : {}; })();
+      const prompt = (async () => {
+        let promptFailure: unknown;
+        let promptFailed = false;
+        try { await native.prompt(text); }
+        catch (error) { promptFailure = error; promptFailed = true; }
+        let notificationFailure: unknown;
+        let notificationFailed = false;
+        try { await flushNotifications(); }
+        catch (error) { notificationFailure = error; notificationFailed = true; }
+        if (promptFailed) throw promptFailure;
+        if (notificationFailed) throw notificationFailure;
+        const assistant = latestUsableAssistant(native.messages);
+        return assistant ? { assistant } : {};
+      })();
       prompts.add(prompt);
       try { return await prompt; } finally { prompts.delete(prompt); }
     },
@@ -791,14 +865,11 @@ export class WorkflowAgentExecutor {
           if (schemaResult !== undefined) return { content: [{ type: "text" as const, text: "Result has already been accepted." }], details: {}, isError: true };
           schemaResult = structuredClone(value);
           const currentSession = session;
-          if (currentSession) void currentSession.abort();
+          if (currentSession) void currentSession.abort().catch(() => undefined);
           return { content: [{ type: "text" as const, text: "Result accepted." }], details: {} };
         },
       }) : undefined;
-      const toolCalls = new Map<string, AgentToolCallProgress>();
-      let activity: AgentActivity | undefined;
-      let lastEventAt: number | undefined;
-      let lastReportedEventAt: number | undefined;
+      let runtimeAdapter: PiRuntimeSessionAdapter | undefined;
       let progress = Promise.resolve();
       let unsubscribe: (() => void) | undefined;
       let systemPromptTurn = 0;
@@ -810,17 +881,16 @@ export class WorkflowAgentExecutor {
         await systemPromptWrite;
         if (systemPromptWriteError) throw new WorkflowError("INTERNAL_ERROR", `Failed to persist effective system prompt: ${systemPromptWriteError instanceof Error ? systemPromptWriteError.message : typeof systemPromptWriteError === "string" ? systemPromptWriteError : "unknown error"}`);
       };
-      const report = (persist: boolean) => {
-        if (!session || !options.onProgress) return;
-        const update = { accounting: accounting(session.getSessionStats()), toolCalls: [...toolCalls.values()], state: session.getState(), ...(activity ? { activity } : {}), ...(lastEventAt === undefined ? {} : { lastEventAt }), persist };
-        if (lastEventAt !== undefined) lastReportedEventAt = lastEventAt;
+      let lastKnownAccounting: AgentAccounting = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+      const report = (value: RuntimeAgentProgress | (() => RuntimeAgentProgress)) => {
+        if (!options.onProgress) return;
+        const runtimeValue = typeof value === "function" ? value() : value;
+        const complete = runtimeValue.usage.availability === "complete";
+        const reportableValue = complete ? runtimeValue : { ...runtimeValue, usage: { availability: "complete" as const, input: lastKnownAccounting.input, output: lastKnownAccounting.output, cacheRead: lastKnownAccounting.cacheRead, cacheWrite: lastKnownAccounting.cacheWrite, costUsd: lastKnownAccounting.cost } };
+        const update = runtimeProgressToAgentProgress(reportableValue);
+        if (complete) lastKnownAccounting = { ...update.accounting };
         progress = progress.then(() => options.onProgress?.(update)).then(() => undefined);
       };
-      const reportTimestamp = () => {
-        if (lastEventAt !== undefined && lastReportedEventAt !== undefined && lastEventAt - lastReportedEventAt < 1000) return;
-        report(false);
-      };
-      const activityChanged = (previous: AgentActivity | undefined) => previous?.kind !== activity?.kind || previous?.text !== activity?.text;
       try {
         setupFailed = true;
         const prepared = await prepareAgentSetup(this.root, this.transport, task, options, resolved, cwd, attempt, attemptSignal, customTools, resultTool);
@@ -840,6 +910,8 @@ export class WorkflowAgentExecutor {
         }
         session = createdSession;
         handoff = createLiveSessionHandoff();
+        const adapter = createPiRuntimeSessionAdapter(session, handoff);
+        runtimeAdapter = adapter;
         handoffAbort = () => { releaseHandoff("attempt cancelled"); };
         attemptSignal.addEventListener("abort", handoffAbort, { once: true });
         releaseIfAttemptCancelled();
@@ -880,55 +952,32 @@ export class WorkflowAgentExecutor {
           if (promptFailed && !hasSchemaResult() && !recovered && !handoff?.transferred) throw promptError;
         };
         const handleSessionEvent = async (event: WorkflowAgentSessionEvent) => {
-          if (event.type === "turn_end" || event.type === "turnEnded") handoffBoundaryAssistant = event.message?.role === "assistant" ? event.message : activeSession.getLastAssistant() ?? lastAssistant;
-          handoff?.observe(event);
-          if ((event.type === "turn_end" || event.type === "turnEnded") && handoff?.state === "handoff-pending") void activeSession.abort().catch(() => undefined);
-          lastEventAt = Date.now();
-          let persist = false;
-          let shouldReport = false;
-          let removeToolCallId: string | undefined;
-          if (event.type === "agent_start" && session?.getState().systemPrompt !== undefined) {
+          const observation = runtimeAdapter?.observe(event);
+          if (!observation) return;
+          const observedEvent = observation.event;
+          const turnEnded = isTurnEnd(observedEvent.type);
+          if (turnEnded) handoffBoundaryAssistant = observedEvent.message?.role === "assistant" ? observedEvent.message : activeSession.getLastAssistant() ?? lastAssistant;
+          if (turnEnded && handoff?.state === "handoff-pending") void activeSession.abort().catch(() => undefined);
+          if (observedEvent.type === "agent_start" && session?.getState().systemPrompt !== undefined) {
             if (this.root.runStore) {
               systemPromptTurn += 1;
               const entry = { sessionId: session.reference.sessionId, attempt, turn: systemPromptTurn, prompt: session.getState().systemPrompt ?? "" };
               systemPromptWrite = systemPromptWrite.then(() => this.root.runStore?.recordSystemPrompt(entry)).then(() => undefined).catch((error: unknown) => { systemPromptWriteError ??= error; });
             }
           }
-          if (event.type === "state_changed") { shouldReport = true; persist = true; }
-          if (event.type === "turnStarted" || event.type === "turn_started") { if (!turnStarted) { try { options.budget?.beforeTurn(); turnStarted = true; } catch (error) { budgetError ??= error instanceof WorkflowError ? error : new WorkflowError("BUDGET_EXHAUSTED", error instanceof Error ? error.message : String(error)); void activeSession.abort(); } } }
-          if (event.type === "message_start" && event.message?.role === "assistant") {
-            if (!turnStarted) { try { options.budget?.beforeTurn(); turnStarted = true; } catch (error) { budgetError ??= error instanceof WorkflowError ? error : new WorkflowError("BUDGET_EXHAUSTED", error instanceof Error ? error.message : String(error)); void activeSession.abort(); } }
-            activity = { kind: "text", text: "responding" };
-            shouldReport = true;
+          if (isTurnBoundaryStart(observedEvent.type) && !turnStarted) { try { options.budget?.beforeTurn(); turnStarted = true; } catch (error) { budgetError ??= error instanceof WorkflowError ? error : new WorkflowError("BUDGET_EXHAUSTED", error instanceof Error ? error.message : String(error)); void activeSession.abort().catch(() => undefined); } }
+          if (observedEvent.type === "message_start" && observedEvent.message?.role === "assistant" && !turnStarted) { try { options.budget?.beforeTurn(); turnStarted = true; } catch (error) { budgetError ??= error instanceof WorkflowError ? error : new WorkflowError("BUDGET_EXHAUSTED", error instanceof Error ? error.message : String(error)); void activeSession.abort().catch(() => undefined); } }
+          if (observedEvent.type === "message_end" && observedEvent.message?.role === "assistant") {
+            acceptAssistant(observedEvent.message);
+            const needsMoreWork = hasToolCall(observedEvent.message);
+            const final = !needsMoreWork || (options.schema !== undefined && hasSchemaResult());
+            if (!budgetError) { try { options.budget?.afterTurn(accounting(activeSession.getSessionStats()), final); if (!final) { const instruction = options.budget?.instruction(); if (instruction) void activeSession.steer(instruction).catch(() => undefined); } } catch (error) { budgetError ??= error instanceof WorkflowError ? error : new WorkflowError("BUDGET_EXHAUSTED", error instanceof Error ? error.message : String(error)); void activeSession.abort().catch(() => undefined); } }
+            turnStarted = false;
           }
-          if (event.type === "message_update") {
-            const previousActivity = activity;
-            const updateType = event.assistantMessageEvent?.type;
-            if (updateType && ["thinking_start", "thinking_delta", "thinking_end"].includes(updateType)) activity = { kind: "reasoning", text: "reasoning" };
-            else if (updateType && ["text_start", "text_delta", "text_end", "toolcall_start", "toolcall_delta", "toolcall_end"].includes(updateType)) activity = { kind: "text", text: "responding" };
-            shouldReport = activityChanged(previousActivity);
-          }
-          if (event.type === "message_end") {
-            const previousActivity = activity;
-            activity = undefined;
-            shouldReport = activityChanged(previousActivity);
-            if (event.message?.role === "assistant") {
-              acceptAssistant(event.message);
-              const needsMoreWork = hasToolCall(event.message);
-              const final = !needsMoreWork || (options.schema !== undefined && hasSchemaResult());
-              if (!budgetError) { try { options.budget?.afterTurn(accounting(activeSession.getSessionStats()), final); if (!final) { const instruction = options.budget?.instruction(); if (instruction) void activeSession.steer(instruction); } } catch (error) { budgetError ??= error instanceof WorkflowError ? error : new WorkflowError("BUDGET_EXHAUSTED", error instanceof Error ? error.message : String(error)); void activeSession.abort(); } }
-              turnStarted = false;
-              persist = true;
-            }
-          }
-          if (event.type === "tool_execution_start" && event.toolCallId && event.toolName) { toolCalls.set(event.toolCallId, { id: event.toolCallId, name: event.toolName, state: "running" }); activity = { kind: "tool", text: event.toolName }; shouldReport = true; }
-          if (event.type === "tool_execution_update" && event.toolName) { const previousActivity = activity; activity = { kind: "tool", text: event.toolName }; shouldReport = activityChanged(previousActivity); }
-          if (event.type === "tool_execution_end" && event.toolCallId && event.toolName) { toolCalls.set(event.toolCallId, { id: event.toolCallId, name: event.toolName, state: event.isError ? "failed" : "completed" }); if (activity?.kind === "tool" && activity.text === event.toolName) activity = undefined; shouldReport = true; removeToolCallId = event.toolCallId; }
-          if (shouldReport || persist) report(persist); else reportTimestamp();
-          if (removeToolCallId) toolCalls.delete(removeToolCallId);
+          if (observation.report) report(() => observation.progress);
         };
-        unsubscribe = activeSession.subscribeAsync ? activeSession.subscribeAsync(handleSessionEvent) : activeSession.subscribe((event) => { void handleSessionEvent(event); });
-        report(false);
+        unsubscribe = activeSession.subscribeAsync ? activeSession.subscribeAsync(handleSessionEvent) : activeSession.subscribe((event) => { void handleSessionEvent(event).catch(() => undefined); });
+        report(() => adapter.snapshot(false));
         if (setSteer) {
           setSteer((message) => activeSession.steer(message));
         }
@@ -957,10 +1006,12 @@ export class WorkflowAgentExecutor {
         }
         const value = options.schema ? schemaResult as JsonValue : text(lastAssistant);
         if (options.worktreeOwner) await this.root.runStore?.snapshotWorktree(options.worktreeOwner);
-        report(true);
+        report(() => adapter.snapshot(true));
         await progress;
         await flushSystemPrompts();
         unsubscribe();
+        adapter.dispose();
+        runtimeAdapter = undefined;
         const attemptAccounting = accounting(session.getSessionStats());
         completedAttempt = attemptRecord(setup.transport.id, attempt, session, setupSummary, attemptAccounting, value);
         attempts.push(completedAttempt);
@@ -976,10 +1027,12 @@ export class WorkflowAgentExecutor {
           try { await options.onAttempt?.(failedAttempt); } catch (persistenceError) { throw errorWithAttempts(persistenceError, attempts); }
         }
         if (session) {
-          report(true);
+          if (runtimeAdapter) { const adapter = runtimeAdapter; report(() => adapter.snapshot(true)); }
           await progress.catch(() => undefined);
           try { await flushSystemPrompts(); } catch { /* Preserve the agent failure that prompted this cleanup. */ }
           unsubscribe?.();
+          runtimeAdapter?.dispose();
+          runtimeAdapter = undefined;
           const attemptAccounting = accounting(session.getSessionStats());
           if (!budgetError && typed.code !== "BUDGET_EXHAUSTED") { try { options.budget?.afterTurn(attemptAccounting, true); } catch (budgetFailure) { budgetError ??= budgetFailure instanceof WorkflowError ? budgetFailure : new WorkflowError("BUDGET_EXHAUSTED", budgetFailure instanceof Error ? budgetFailure.message : String(budgetFailure)); } }
           const failedAttempt = attemptRecord(setup?.transport.id ?? this.transport.id, attempt, session, setupSummary, attemptAccounting, undefined, { code: typed.code, message: typed.message });

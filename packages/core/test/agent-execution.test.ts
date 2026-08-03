@@ -1099,7 +1099,7 @@ void test("bare no-policy local sessions exclude the workflow host and retain co
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
-void test("local workflow sessions run startup once before their first prompt", async () => {
+void test("local workflow sessions run startup once and surface event listener failures", async () => {
   let sessionStarts = 0;
   const extensionFactory: NonNullable<SessionInput["extensionFactories"]>[number] = (pi) => {
     pi.on("session_start", async () => {
@@ -1110,11 +1110,16 @@ void test("local workflow sessions run startup once before their first prompt", 
   };
   const fixture = await createRespondingLocalSession([extensionFactory]);
   try {
-    await fixture.session.prompt("first user message");
-    assert.equal(sessionStarts, 1);
-    const request = fixture.requests[0] as { messages?: readonly { role?: string; customType?: string; content?: unknown }[] } | undefined;
-    const userMessages = request?.messages?.filter((message) => message.role === "user").map((message) => JSON.stringify(message.content)) ?? [];
-    assert.deepEqual(userMessages.slice(-2), [JSON.stringify([{ type: "text", text: "startup context" }]), JSON.stringify([{ type: "text", text: "first user message" }])]);
+    const unsubscribe = fixture.session.subscribeAsync?.(async (event) => { if (event.type === "message_start") throw new Error("progress listener failed"); });
+    try {
+      await assert.rejects(fixture.session.prompt("first user message"), /progress listener failed/);
+      assert.equal(sessionStarts, 1);
+      const request = fixture.requests[0] as { messages?: readonly { role?: string; customType?: string; content?: unknown }[] } | undefined;
+      const userMessages = request?.messages?.filter((message) => message.role === "user").map((message) => JSON.stringify(message.content)) ?? [];
+      assert.deepEqual(userMessages.slice(-2), [JSON.stringify([{ type: "text", text: "startup context" }]), JSON.stringify([{ type: "text", text: "first user message" }])]);
+    } finally {
+      unsubscribe?.();
+    }
   } finally {
     await fixture.close();
     await fixture.session.dispose();
@@ -2220,4 +2225,52 @@ void test("selected skill paths load in native Pi sessions", async () => {
   const loaded = (session as typeof session & { resourceLoader: { getSkills(): { skills: Array<{ name: string }> } } }).resourceLoader;
   assert.ok(loaded.getSkills().skills.some(({ name }) => name === "bundle-skill"));
   await session.dispose();
+});
+void test("uses the neutral turn_start event for budget turn boundaries", async () => {
+  const triggers: string[] = [];
+  let marker = "initial";
+  let listener: ((event: TestPiSessionEvent) => void) | undefined;
+  const first = { role: "assistant", content: [{ type: "toolCall", id: "call", name: "read" }] };
+  const final = assistant("done");
+  const messages: Array<{ role: string; content: unknown }> = [];
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({
+    sessionId: "budget-boundary", messages, getSessionStats: sessionStats,
+    subscribe(next) { listener = next; return () => { listener = undefined; }; },
+    async prompt() {
+      marker = "first-start"; listener?.({ type: "turn_start" });
+      marker = "first-message-start"; listener?.(messageStart({ role: "assistant" }));
+      messages.push(first);
+      marker = "first-end"; listener?.(messageEnd(first));
+      marker = "agent-start"; listener?.({ type: "agent_start" });
+      marker = "second-start"; listener?.({ type: "turn_start" });
+      marker = "second-message-start"; listener?.(messageStart({ role: "assistant" }));
+      messages.push(final);
+      marker = "second-end"; listener?.(messageEnd(final));
+    },
+    dispose() {},
+  })));
+  await executor.execute("work", { label: "worker", workflowName: "flow", budget: { beforeAttempt() {}, beforeTurn() { triggers.push(marker); }, afterTurn() {}, instruction: () => undefined } });
+  assert.deepEqual(triggers, ["initial", "second-start"]);
+});
+void test("preserves terminal progress when usage becomes unavailable", async () => {
+  const updates: AgentProgress[] = [];
+  let invalidUsage = false;
+  let listener: ((event: TestPiSessionEvent) => void) | undefined;
+  const final = assistant("done");
+  const messages = [final];
+  const executor = new WorkflowAgentExecutor(root, testTransport(async () => ({
+    sessionId: "unavailable-progress", messages, getSessionStats: () => invalidUsage ? { ...sessionStats(), cost: Number.NaN } : sessionStats(),
+    subscribe(next) { listener = next; return () => { listener = undefined; }; },
+    async prompt() {
+      listener?.(messageStart(final));
+      invalidUsage = true;
+      listener?.(messageEnd(final));
+    },
+    dispose() {},
+  })));
+  await executor.execute("work", { label: "worker", workflowName: "flow", onProgress: (update) => { updates.push(update); } });
+  const terminal = updates.at(-1);
+  assert.ok(terminal);
+  assert.equal(terminal.persist, true);
+  assert.deepEqual(terminal.accounting, { input: 2, output: 3, cacheRead: 4, cacheWrite: 5, cost: 0.25 });
 });

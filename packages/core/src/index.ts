@@ -12,5 +12,7 @@ export type { AwaitingCheckpoint, CompletedOperation, PendingWorkflowDecision, P
 export { FairAgentScheduler, WorkflowAgentExecutor, createLocalPiSession, createLocalWorkflowAgentSession, localAgentTransport, prepareAgentSetupForInspection } from "./agent-execution.js";
 export type { AgentAttempt, AgentBudgetHooks, AgentExecutionOptions, AgentExecutionResult, AgentExecutionRoot, AgentInspectionMode, AgentProgress, AgentProviderFailure, AgentProviderRecovery, AgentToolCallProgress, AgentSetup, AgentSetupContext, AgentSetupHook, AgentTransport, AgentTransportContext, PiPromptInspection, PiResourceInspection, PiRuntimeLaunchInfo, PiSession, PreparedAgentSession, PreparedAgentSetup, RegisteredAgentSetupHook, SessionInput, WorkflowAgentMessage, WorkflowAgentSession, WorkflowAgentSessionEvent, WorkflowAgentSessionReference, WorkflowAgentSessionState, WorkflowAgentSessionStats, WorkflowAgentTurnResult } from "./agent-execution.js";
 export { createLiveSessionHandoff } from "./session-handoff.js";
+export { createPiRuntimeSessionAdapter, createRuntimeHandoffAdapter, isTurnBoundaryEnd, isTurnBoundaryStart, isTurnEnd, normalizePiMessage, normalizePiSessionEvent, runtimeProgressToAgentProgress } from "./pi-runtime-adapter.js";
+export type { PiRuntimeProgressObservation, PiRuntimeSessionAdapter } from "./pi-runtime-adapter.js";
 export * from "./herdr.js";
 export * from "./runtime/index.js";
