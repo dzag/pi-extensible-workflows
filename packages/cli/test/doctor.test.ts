@@ -90,6 +90,21 @@ void test("doctor reports malformed settings and Pi discovery rejection diagnost
   assert.match(discovery.hint ?? "", /rerun doctor/);
   assert.equal(doctorExitCode(report), 1);
 });
+void test("doctor discovers per-file symlinked role files", async () => {
+  const paths = fixture();
+  const target = join(paths.root, "source-role.md");
+  const link = join(paths.agentDir, "pi-extensible-workflows", "roles", "linked.md");
+  writeFileSync(target, "---\ndescription: Linked role\n---\nLinked body");
+  symlinkSync(target, link);
+  symlinkSync(join(paths.root, "missing-role.md"), join(paths.agentDir, "pi-extensible-workflows", "roles", "dangling.md"));
+  writeFileSync(join(paths.agentDir, "pi-extensible-workflows", "roles", "sibling.md"), "Sibling role");
+  const report = await withHome(paths.root, () => doctor({ ...paths, role: "linked", discoverPi: async () => pi({ knownModels: [], availableModels: [] }) }));
+  const role = report.roles.find(({ name, scope }) => name === "linked" && scope === "global");
+  assert.ok(role);
+  assert.equal(role.path, link);
+  assert.equal(report.diagnostics.some(({ code }) => code === "ROLE_NOT_FOUND"), false);
+  assert.ok(report.roles.some(({ name, scope }) => name === "sibling" && scope === "global"));
+});
 void test("doctor discovers Pi through local auth, models, and trust fixtures", async () => {
   const paths = fixture();
   writeFileSync(join(paths.cwd, ".pi", "settings.json"), "{}");

@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, realpathSync } from "node:fs";
+import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { InMemoryCredentialStore, type Credential } from "@earendil-works/pi-ai";
 import {
@@ -188,8 +188,15 @@ async function discoverPi(cwd: string, agentDir: string): Promise<DoctorPiState>
   }
 }
 
+function isRoleFile(dir: string, entry: import("node:fs").Dirent): boolean {
+  if (extname(entry.name) !== ".md") return false;
+  if (entry.isFile()) return true;
+  if (!entry.isSymbolicLink()) return false;
+  try { return statSync(join(dir, entry.name)).isFile(); }
+  catch (error) { if (isNodeError(error, "ENOENT")) return false; throw error; }
+}
 function roleFiles(dir: string): string[] {
-  try { return readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isFile() && extname(entry.name) === ".md").map((entry) => join(dir, entry.name)).sort(); }
+  try { return readdirSync(dir, { withFileTypes: true }).filter((entry) => isRoleFile(dir, entry)).map((entry) => join(dir, entry.name)).sort(); }
   catch (error) { if (isNodeError(error, "ENOENT")) return []; throw error; }
 }
 
@@ -207,7 +214,7 @@ function scanExtensionRoleFiles(registrations: readonly WorkflowRoleDirectoryReg
   for (const registration of registrations) {
     try {
       const entries = readdirSync(registration.path, { withFileTypes: true });
-      const roleFiles = entries.filter((entry) => entry.isFile() && extname(entry.name) === ".md");
+      const roleFiles = entries.filter((entry) => isRoleFile(registration.path, entry));
       if (!roleFiles.length) empty.push(registration);
       for (const entry of roleFiles) files.push({ name: basename(entry.name, ".md"), path: join(registration.path, entry.name), directory: registration.path, extension: registration.extension });
     } catch (error) { errors.push({ registration, error }); }

@@ -1,5 +1,5 @@
 import { atomicWriteFile } from "./persistence.js";
-import { mkdirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -237,6 +237,13 @@ function roleDirectorySources(dirs: readonly WorkflowRoleDirectoryInput[]): Role
 function roleDirectoryLabel(source: RoleDirectorySource, extension = true): string {
   return source.extension ? `Extension "${source.extension.headline}" (${source.extension.version})` : extension ? "Registered workflow extension" : "Standard workflow";
 }
+function isRoleFile(dir: string, entry: import("node:fs").Dirent): boolean {
+  if (extname(entry.name) !== ".md") return false;
+  if (entry.isFile()) return true;
+  if (!entry.isSymbolicLink()) return false;
+  try { return statSync(join(dir, entry.name)).isFile(); }
+  catch (error) { if (isNodeError(error, "ENOENT")) return false; throw error; }
+}
 function scanRoleFiles(dirs: readonly WorkflowRoleDirectoryInput[], extension: boolean): RoleFile[] {
   const files: RoleFile[] = [];
   for (const source of roleDirectorySources(dirs)) {
@@ -246,7 +253,7 @@ function scanRoleFiles(dirs: readonly WorkflowRoleDirectoryInput[], extension: b
       if (!extension && isNodeError(error, "ENOENT")) continue;
       fail("INVALID_METADATA", `${roleDirectoryLabel(source, extension)} role directory "${source.path}" could not be scanned: ${errorText(error)}`);
     }
-    for (const entry of entries) if (entry.isFile() && extname(entry.name) === ".md") files.push({ name: basename(entry.name, ".md"), path: join(source.path, entry.name), source });
+    for (const entry of entries) if (isRoleFile(source.path, entry)) files.push({ name: basename(entry.name, ".md"), path: join(source.path, entry.name), source });
   }
   return files.sort((left, right) => left.name.localeCompare(right.name) || left.path.localeCompare(right.path));
 }

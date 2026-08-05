@@ -57,6 +57,21 @@ void test("loads markdown agent roles only from canonical global and project dir
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
   }
 });
+void test("loads markdown agent roles deployed as per-file symlinks", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-extensible-workflows-symlinked-roles-")));
+  const cwd = join(root, "project");
+  const agentDir = join(root, "agent");
+  const roleDirectory = join(agentDir, "pi-extensible-workflows", "roles");
+  const target = join(root, "source-role.md");
+  mkdirSync(roleDirectory, { recursive: true });
+  writeFileSync(target, "---\ndescription: Linked role\n---\nLinked body");
+  symlinkSync(target, join(roleDirectory, "linked.md"));
+  symlinkSync(join(root, "missing-role.md"), join(roleDirectory, "dangling.md"));
+  writeFileSync(join(roleDirectory, "sibling.md"), "Sibling role");
+  const roles = loadAgentDefinitions(cwd, agentDir, true, []);
+  assert.deepEqual(roles.linked, { prompt: "Linked body", description: "Linked role" });
+  assert.deepEqual(roles.sibling, { prompt: "Sibling role" });
+});
 
 void test("strict role frontmatter rejects malformed metadata", () => {
   const invalid = [
