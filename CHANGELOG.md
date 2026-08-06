@@ -1,6 +1,11 @@
 # Changelog
 ## Unreleased
- - Completed local Pi session lifecycle ownership: extension startup/shutdown is balanced for direct and workflow consumers, and Herdr handoff sessions report resume context.
+
+## [5.2.0] - 2026-08-06
+
+### Reliability
+
+- Completed local Pi session lifecycle ownership: extension startup/shutdown is balanced for direct and workflow consumers, and Herdr handoff sessions report resume context.
 
 ## [5.1.1] - 2026-07-31
 
