@@ -4,7 +4,6 @@ export default function (): void {
   registerWorkflowExtension({
     version: "1.0.0",
     headline: "Reusable development workflows",
-    description: "Exposes reusable workflows for the real-session test",
     functions: {
       tddDev: {
         description: "Develop something using TDD, input a task and the shell command to run tests",

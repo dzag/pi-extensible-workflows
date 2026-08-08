@@ -7,8 +7,9 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { doctor, doctorExitCode, formatDoctorReport, type DoctorPiState } from "../src/doctor.js";
 import { writePortableWorkflowBundle } from "../src/bundles.js";
-import { formatWorkflowCliHelp, parseDoctorCleanupArgs, parseWorkflowCliArgs, runCli } from "../src/cli.js";
-import { registerWorkflowExtension, WorkflowRegistry, type JsonValue, type WorkflowExtension } from "pi-extensible-workflows";
+import { formatWorkflowCliHelp, parseDoctorArgs, parseDoctorCleanupArgs, parseWorkflowCliArgs, runCli } from "../src/cli.js";
+import { registerWorkflowExtension, WorkflowRegistry, type WorkflowExtension } from "pi-extensible-workflows";
+import { cliTestErrorOutput, isCliTestBundleExtension, isCliTestBundleModule, readCliTestBundleState, readCliTestManifest, readCliTestPackageMetadata, type CliTestBundleExtension } from "./support.js";
 
 function pi(overrides: Partial<DoctorPiState> = {}): DoctorPiState {
   return {
@@ -51,13 +52,12 @@ async function withHomeAndCwd<T>(home: string, cwd: string, action: () => Promis
 const cliExtension: WorkflowExtension = {
   version: "1.0.0",
   headline: "CLI test workflows",
-  description: "Workflows for CLI acceptance tests",
   functions: {
     cliEcho: {
       description: "Echo a CLI issue",
       input: { type: "object", properties: { issue: { type: "integer" } }, required: ["issue"], additionalProperties: false },
       output: { type: "object", properties: { issue: { type: "integer" } }, required: ["issue"], additionalProperties: false },
-      run: (input) => ({ issue: input.issue as JsonValue }),
+      run: (input) => ({ issue: input.issue }),
     },
     cliRuntime: {
       description: "Runtime progress",
@@ -73,7 +73,7 @@ function runIsolatedCli(paths: { root: string; cwd: string; agentDir: string }, 
   const script = join(paths.root, "isolated-cli.mjs");
   const indexUrl = pathToFileURL(join(process.cwd(), "../core", "dist", "src", "index.js")).href;
   const cliUrl = pathToFileURL(join(process.cwd(), "dist", "src", "cli.js")).href;
-  writeFileSync(script, [`import { registerWorkflowExtension } from ${JSON.stringify(indexUrl)};`, `import { runCli } from ${JSON.stringify(cliUrl)};`, `registerWorkflowExtension({ version: "1.0.0", headline: "Isolated CLI", description: "Isolated CLI test", functions: { ${functionDefinition} } });`, "const controller = new AbortController();", abort ? "setImmediate(() => controller.abort());" : "", `const exit = await runCli(${JSON.stringify(args)}, { cwd: ${JSON.stringify(paths.cwd)}, agentDir: ${JSON.stringify(paths.agentDir)}, signal: controller.signal, stderr: (text) => process.stderr.write(text) });`, "process.exitCode = exit;"].join("\n"));
+  writeFileSync(script, [`import { registerWorkflowExtension } from ${JSON.stringify(indexUrl)};`, `import { runCli } from ${JSON.stringify(cliUrl)};`, `registerWorkflowExtension({ version: "1.0.0", headline: "Isolated CLI", functions: { ${functionDefinition} } });`, "const controller = new AbortController();", abort ? "setImmediate(() => controller.abort());" : "", `const exit = await runCli(${JSON.stringify(args)}, { cwd: ${JSON.stringify(paths.cwd)}, agentDir: ${JSON.stringify(paths.agentDir)}, signal: controller.signal, stderr: (text) => process.stderr.write(text) });`, "process.exitCode = exit;"].join("\n"));
   const result = spawnSync(process.execPath, [script], { cwd: process.cwd(), encoding: "utf8", timeout: 10_000, env: { ...process.env, HOME: paths.root, PI_CODING_AGENT_DIR: paths.agentDir, PI_OFFLINE: "1" } });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
@@ -89,6 +89,21 @@ void test("doctor reports malformed settings and Pi discovery rejection diagnost
   assert.match(discovery.message, /discovery exploded/);
   assert.match(discovery.hint ?? "", /rerun doctor/);
   assert.equal(doctorExitCode(report), 1);
+});
+void test("doctor discovers per-file symlinked role files", async () => {
+  const paths = fixture();
+  const target = join(paths.root, "source-role.md");
+  const link = join(paths.agentDir, "pi-extensible-workflows", "roles", "linked.md");
+  writeFileSync(target, "---\ndescription: Linked role\n---\nLinked body");
+  symlinkSync(target, link);
+  symlinkSync(join(paths.root, "missing-role.md"), join(paths.agentDir, "pi-extensible-workflows", "roles", "dangling.md"));
+  writeFileSync(join(paths.agentDir, "pi-extensible-workflows", "roles", "sibling.md"), "Sibling role");
+  const report = await withHome(paths.root, () => doctor({ ...paths, role: "linked", discoverPi: async () => pi({ knownModels: [], availableModels: [] }) }));
+  const role = report.roles.find(({ name, scope }) => name === "linked" && scope === "global");
+  assert.ok(role);
+  assert.equal(role.path, link);
+  assert.equal(report.diagnostics.some(({ code }) => code === "ROLE_NOT_FOUND"), false);
+  assert.ok(report.roles.some(({ name, scope }) => name === "sibling" && scope === "global"));
 });
 void test("doctor discovers Pi through local auth, models, and trust fixtures", async () => {
   const paths = fixture();
@@ -160,7 +175,7 @@ void test("doctor reports role errors, warnings, overrides, and extension failur
   assert.equal(global.overriddenBy, join(paths.cwd, ".pi", "pi-extensible-workflows", "roles", "override.md"));
   assert.equal(global.active, false);
   assert.equal(doctorExitCode(report), 1);
-  assert.match(formatDoctorReport(report), /Fix: Use a tool listed under Active tools/);
+  assert.match(formatDoctorReport(report), /Fix: Use a tool listed under Pi active tools/);
 });
 
 void test("doctor rejects invalid role descriptions", async () => {
@@ -190,9 +205,9 @@ void test("doctor reports every registered function", async () => {
 void test("doctor reports dynamic model alias provenance", async () => {
   const paths = fixture();
   const registry = new WorkflowRegistry();
-  registry.register({ version: "1.0.0", headline: "Model policy", description: "Selects models", modelAliases: { reviewer: { resolve: () => "openai/gpt" } } });
+  registry.register({ version: "1.0.0", headline: "Model policy", modelAliases: { reviewer: { resolve: () => "openai/gpt" } } });
   const report = await withHome(paths.root, () => doctor({ ...paths, registry, discoverPi: async () => pi() }));
-  assert.deepEqual(report.modelAliases, [{ name: "reviewer", kind: "dynamic", provenance: "extension: Model policy", version: "1.0.0", headline: "Model policy", extensionDescription: "Selects models" }]);
+  assert.deepEqual(report.modelAliases, [{ name: "reviewer", kind: "dynamic", provenance: "extension: Model policy", version: "1.0.0", headline: "Model policy" }]);
   assert.match(formatDoctorReport(report), /\[dynamic\] `reviewer` \(extension: Model policy\)/);
 });
 void test("doctor accepts role files using unshadowed dynamic model aliases without resolving them", async () => {
@@ -200,7 +215,7 @@ void test("doctor accepts role files using unshadowed dynamic model aliases with
   writeFileSync(join(paths.agentDir, "pi-extensible-workflows", "roles", "reviewer.md"), "---\nmodel: policy-model\n---\nReview");
   const registry = new WorkflowRegistry();
   let calls = 0;
-  registry.register({ version: "1.0.0", headline: "Model policy", description: "Selects models", modelAliases: { "policy-model": { resolve: () => { calls += 1; return "openai/gpt"; } } } });
+  registry.register({ version: "1.0.0", headline: "Model policy", modelAliases: { "policy-model": { resolve: () => { calls += 1; return "openai/gpt"; } } } });
   const report = await withHome(paths.root, () => doctor({ ...paths, registry, discoverPi: async () => pi() }));
   assert.equal(calls, 0);
   assert.equal(report.diagnostics.some(({ code }) => code === "MODEL_INVALID" || code === "MODEL_UNAVAILABLE"), false);
@@ -212,7 +227,7 @@ void test("doctor leaves static settings aliases shadowing dynamic aliases", asy
   writeFileSync(join(paths.agentDir, "pi-extensible-workflows", "roles", "reviewer.md"), "---\nmodel: policy-model\n---\nReview");
   const registry = new WorkflowRegistry();
   let calls = 0;
-  registry.register({ version: "1.0.0", headline: "Model policy", description: "Selects models", modelAliases: { "policy-model": { resolve: () => { calls += 1; return "openai/gpt"; } } } });
+  registry.register({ version: "1.0.0", headline: "Model policy", modelAliases: { "policy-model": { resolve: () => { calls += 1; return "openai/gpt"; } } } });
   const report = await withHome(paths.root, () => doctor({ ...paths, registry, discoverPi: async () => pi() }));
   assert.equal(calls, 0);
   assert.equal(report.diagnostics.some(({ code }) => code === "MODEL_INVALID"), false);
@@ -223,6 +238,64 @@ void test("doctor reports registered functions without model availability probes
   const functions: DoctorPiState["functions"] = { unavailable: { description: "unavailable model", input: { type: "object" }, output: { type: "string" }, run: () => "ok" } };
   const report = await withHome(paths.root, () => doctor({ ...paths, discoverPi: async () => pi({ availableModels: [], functions }) }));
   assert.equal(report.functions.find(({ name }) => name === "unavailable")?.valid, true);
+});
+void test("role-targeted doctor inspects effective resources and prepares hooks without provider execution", async () => {
+  const paths = fixture();
+  writeFileSync(join(paths.cwd, ".pi", "settings.json"), "{}");
+  writeFileSync(join(paths.agentDir, "auth.json"), JSON.stringify({ fixture: { type: "api_key", key: "local-fixture" } }));
+  writeFileSync(join(paths.agentDir, "models.json"), JSON.stringify({ providers: { fixture: { baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "fixture", models: [{ id: "fixture-model", name: "Fixture model", reasoning: true, input: ["text"], contextWindow: 1_024, maxTokens: 128 }, { id: "override-model", name: "Override model", reasoning: true, input: ["text"], contextWindow: 1_024, maxTokens: 128 }] } } }));
+  writeFileSync(join(paths.agentDir, "trust.json"), JSON.stringify({ [realpathSync(paths.cwd)]: true }));
+  mkdirSync(join(paths.agentDir, "skills", "review-skill"), { recursive: true });
+  writeFileSync(join(paths.agentDir, "skills", "review-skill", "SKILL.md"), "---\nname: review-skill\ndescription: Review\n---\nReview skill");
+  mkdirSync(join(paths.agentDir, "skills", "invalid_skill"), { recursive: true });
+  writeFileSync(join(paths.agentDir, "skills", "invalid_skill", "SKILL.md"), "---\ndescription: Invalid name fixture\n---\nInvalid skill");
+  mkdirSync(join(paths.agentDir, "extensions"), { recursive: true });
+  const shutdownMarker = join(paths.root, "doctor-shutdown.marker");
+  writeFileSync(join(paths.agentDir, "extensions", "doctor-hook.ts"), `import { appendFileSync } from "node:fs"; export default (pi) => { pi.on('before_agent_start', (event) => ({ systemPrompt: event.systemPrompt + '\\nHOOK:' + event.prompt })); pi.on('session_shutdown', async () => { await new Promise((resolve) => setTimeout(resolve, 25)); appendFileSync(${JSON.stringify(shutdownMarker)}, 'shutdown'); }); };
+`);
+  writeFileSync(join(paths.cwd, ".pi", "pi-extensible-workflows", "roles", "reviewer.md"), "---\nthinking: high\ntools: [read, grep]\ndisabledAgentResources:\n  skills: [review-skill]\n  extensions: [missing-extension]\n---\nReview role");
+  const registry = new WorkflowRegistry();
+  registry.register({ version: "1.0.0", headline: "Doctor setup", agentSetupHooks: { adjust: { setup(agent, context) { assert.equal(context.mode, "inspection"); assert.equal(agent.prepared.model.model, "fixture-model"); assert.equal(agent.prepared.model.thinking, "high"); agent.options.model = "fixture/override-model"; agent.options.thinking = "low"; agent.options.tools = ["grep"]; } } } });
+  const report = await withHomeAndCwd(paths.root, paths.cwd, () => doctor({ ...paths, role: "reviewer", registry, discoverPi: async () => pi({ activeTools: ["read", "grep"], knownModels: ["fixture/fixture-model", "fixture/override-model"], availableModels: ["fixture/fixture-model", "fixture/override-model"], model: { provider: "fixture", model: "fixture-model", thinking: "medium" } }) }));
+  const inspection = report.roleInspection;
+  assert.ok(inspection);
+  assert.equal(inspection.model.model, "override-model");
+  assert.notEqual(inspection.model.inherited, true);
+  assert.equal(inspection.model.thinking, "low");
+  assert.ok(inspection.resources.skills.includes("invalid_skill"));
+  const invalidSkillDiagnostic = report.diagnostics.find(({ message }) => message.includes("invalid characters"));
+  assert.ok(invalidSkillDiagnostic);
+  assert.equal(invalidSkillDiagnostic.severity, "warning");
+  assert.equal(invalidSkillDiagnostic.source, join(paths.agentDir, "skills", "invalid_skill", "SKILL.md"));
+  assert.ok(inspection.resources.excludedSkills.includes("review-skill"));
+  assert.deepEqual(inspection.resources.unmatchedExtensions, [join(paths.cwd, ".pi", "pi-extensible-workflows", "roles", "missing-extension")]);
+  assert.ok(inspection.setup.hooks.includes("adjust"));
+  assert.ok(inspection.setup.diagnostics.every(({ severity }) => severity !== "error"), JSON.stringify(report.diagnostics));
+  assert.ok(inspection.systemPrompt.text.includes("HOOK:"));
+  assert.match(inspection.systemPrompt.text, /Review role/);
+  assert.equal(report.diagnostics.some(({ code, severity }) => code === "ROLE_INSPECTION" && severity === "error"), false);
+  assert.equal(readFileSync(shutdownMarker, "utf8"), "shutdown");
+  assert.equal(doctorExitCode(report), 0);
+  const formatted = formatDoctorReport(report);
+  assert.match(formatted, /## Role inspection/);
+  for (const heading of ["## Environment", "## Trust/resources", "## Agent resource exclusions", "## Active tools", "## Roles", "## Model aliases", "## Reusable functions"]) assert.doesNotMatch(formatted, new RegExp(heading));
+  assert.match(formatted, /Role: `reviewer`/);
+  assert.match(formatted, /- Tools:\n[ ]{2}- `grep`/);
+  assert.match(formatted, /- Effective skills:\n(?:[ ]{2}- .+\n)+/);
+  assert.match(formatted, /- Effective extensions:\n(?:[ ]{2}- .+\n)+/);
+  assert.match(formatted, /- Applied setup hooks:\n[ ]{2}- `adjust`/);
+  assert.match(formatted, /Final system prompt[\s\S]*HOOK:/);
+});
+void test("role-targeted doctor preserves role-not-found diagnostics in focused output", async () => {
+  const paths = fixture();
+  const report = await withHome(paths.root, () => doctor({ ...paths, role: "missing", discoverPi: async () => pi() }));
+  const formatted = formatDoctorReport(report);
+  assert.equal(report.roleInspection, undefined);
+  assert.match(formatted, /## Role inspection/);
+  assert.match(formatted, /Role: `missing`/);
+  assert.match(formatted, /ROLE_NOT_FOUND/);
+  assert.match(formatted, /1 error\(s\), 0 warning\(s\)/);
+  for (const heading of ["## Environment", "## Trust/resources", "## Active tools", "## Roles", "## Model aliases", "## Reusable functions"]) assert.doesNotMatch(formatted, new RegExp(heading));
 });
 
 void test("doctor respects untrusted projects and does not mutate fixtures", async () => {
@@ -252,7 +325,14 @@ void test("doctor reports effective resource exclusions and unmatched selectors"
   assert.deepEqual(report.resourcePolicy.unmatchedSkills, []);
   assert.deepEqual(report.resourcePolicy.unmatchedExtensions, []);
   assert.equal(report.diagnostics.filter(({ code }) => code === "AGENT_RESOURCE_UNMATCHED").length, 0);
-  assert.match(formatDoctorReport(report), /Effective skills: project-skill/);
+  const formatted = formatDoctorReport(report);
+  assert.match(formatted, /Effective skills: project-skill/);
+  assert.match(formatted, /## Pi active extensions/);
+  assert.match(formatted, /## Pi active skills/);
+  assert.match(formatted, /Exposed skills:\n[ ]{2}- `global-skill`/);
+  assert.match(formatted, /Disabled skills:\n[ ]{2}- `project-skill`/);
+  assert.match(formatted, /Exposed extensions:[\s\S]*- `[^`]+interactive\.ts`/);
+  assert.match(formatted, /Disabled extensions:\n[ ]{2}- `[^`]+project\.ts`/);
 });
 void test("doctor attributes unmatched replacement selectors to the project settings field", async () => {
   const paths = fixture();
@@ -276,7 +356,8 @@ void test("doctor reports matched glob exclusions and unmatched exceptions", asy
   assert.deepEqual(report.resourcePolicy.excludedExtensions, [globalExtension]);
   assert.deepEqual(report.resourcePolicy.unmatchedSkills, ["!missing-*"]);
   assert.deepEqual(report.resourcePolicy.unmatchedExtensions, [`!${join(paths.root, "missing.ts")}`]);
-  assert.match(formatDoctorReport(report), /Excluded skills: other-skill/);
+  assert.match(formatDoctorReport(report), /Disabled skills:\n[ ]{2}- `other-skill`/);
+  assert.match(formatDoctorReport(report), /Exposed skills:\n[ ]{2}- `my-project-skill`/);
 });
 void test("doctor excludes workflow_catalog from active capabilities and output", async () => {
   const paths = fixture();
@@ -285,25 +366,32 @@ void test("doctor excludes workflow_catalog from active capabilities and output"
   assert.doesNotMatch(formatDoctorReport(report), /workflow_catalog/);
 });
 void test("package bin and CLI expose doctor and inspector commands", async () => {
-  const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { bin?: Record<string, string> };
+  const pkg = readCliTestPackageMetadata(join(process.cwd(), "package.json"));
   assert.equal(pkg.bin?.piewf, "./dist/src/cli.js");
   const paths = fixture();
   let output = "";
   const exit = await withHome(paths.root, () => runCli(["doctor"], { ...paths, discoverPi: async () => pi({ knownModels: [], availableModels: [] }) }, (text) => { output += text; }));
   assert.equal(exit, 0);
-  for (const heading of ["## Environment", "## Trust/resources", "## Active tools", "## Roles", "## Reusable functions", "## Diagnostics", "## Summary"]) assert.match(output, new RegExp(heading));
+  for (const heading of ["## Environment", "## Trust/resources", "## Pi active tools", "## Pi active extensions", "## Pi active skills", "## Workflow agent resources", "## Roles", "## Reusable functions", "## Diagnostics", "## Summary"]) assert.match(output, new RegExp(heading));
+  assert.doesNotMatch(output, /## Role inspection/);
   let inspected: string | undefined;
   assert.equal(await runCli(["inspect", "session-a"], { inspect: async (sessionId) => { inspected = sessionId; } }), 0);
   assert.equal(inspected, "session-a");
   output = "";
   assert.equal(await runCli([], {}, (text) => { output += text; }), 1);
-  assert.equal(output, "Usage: piewf doctor | inspect [session-id] [--json|--summary] [--failed] | transcript <session-file> | bundle <workflow-name> [--name <command>] [--output <path>] [--force] | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force] [--bundle]\n");
+  assert.equal(output, "Usage: piewf doctor [role] [--role <role>] [--prompt <text>] | inspect [session-id] [--json|--summary] [--failed] | transcript <session-file> | bundle <workflow-name> [--name <command>] [--output <path>] [--force] | run <workflow-name> [workflow arguments] | export <workflow-name> [--name <command>] [--output <path>] [--force] [--bundle]\n");
   const bin = join(paths.root, "bin", "piewf");
   mkdirSync(join(paths.root, "bin"), { recursive: true });
   symlinkSync(join(process.cwd(), "dist", "src", "cli.js"), bin);
   const linkedOutput = execFileSync(bin, ["doctor"], { cwd: paths.cwd, env: { ...process.env, HOME: paths.root }, encoding: "utf8" });
   assert.match(linkedOutput, /^# pi-extensible-workflows doctor/m);
   assert.equal(existsSync(join(paths.root, ".pi", "agent", "auth.json")), false);
+});
+void test("doctor parser accepts role and prompt probes", () => {
+  assert.deepEqual(parseDoctorArgs(["--role", "reviewer", "--prompt=check this"]), { role: "reviewer", prompt: "check this" });
+  assert.deepEqual(parseDoctorArgs(["reviewer"]), { role: "reviewer" });
+  assert.throws(() => parseDoctorArgs(["--role", "reviewer", "other"]), /Unexpected argument/);
+  assert.throws(() => parseDoctorArgs(["--prompt", "check this"]), /--prompt requires --role/);
 });
 void test("CLI workflow arguments cover schema types, defaults, enums, and missing values", () => {
   const schema = { type: "object", properties: { issue: { type: "integer", description: "Issue number" }, label: { type: "string" }, ratio: { type: "number" }, mode: { type: "string", enum: ["fast", "safe"] }, verbose: { type: "boolean", default: false }, format: { type: "string", default: "plain" }, tags: { type: "array", items: { type: "string", enum: ["one", "two"] } }, scores: { type: "array", items: { type: "number" } } }, required: ["issue"], additionalProperties: false };
@@ -316,7 +404,7 @@ void test("CLI workflow arguments cover schema types, defaults, enums, and missi
   assert.throws(() => parseWorkflowCliArgs(schema, ["123", "--tags", "three"]), /Invalid value for enum/);
   assert.throws(() => parseWorkflowCliArgs(schema, ["not-an-integer"]), /Invalid integer/);
   assert.throws(() => parseWorkflowCliArgs(schema, ["1", "--unknown"]), /Unknown option/);
-  const help = formatWorkflowCliHelp({ name: "developIssue", version: "1.0.0", headline: "Test", extensionDescription: "Test", description: "Develop issue", input: schema, output: { type: "string" } });
+  const help = formatWorkflowCliHelp({ name: "developIssue", version: "1.0.0", headline: "Test", description: "Develop issue", input: schema, output: { type: "string" } });
   assert.match(help, /Issue number/);
   assert.match(help, /--tags <string>.*enum="one","two"/);
   assert.ok(help.includes("  --approve".padEnd(28) + "Trust project resources for this launch"));
@@ -355,7 +443,7 @@ void test("exported launchers are executable and delegate unchanged arguments", 
   const indexUrl = pathToFileURL(join(process.cwd(), "../core", "dist", "src", "index.js")).href;
   mkdirSync(fallbackCli, { recursive: true });
   writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: "@piewf/cli", version: "4.0.2" }));
-  writeFileSync(join(fallbackCli, "cli.js"), `import { registerWorkflowExtension } from ${JSON.stringify(indexUrl)};\nimport { runCli } from ${JSON.stringify(pathToFileURL(cliPath).href)};\nregisterWorkflowExtension({ version: "1.0.0", headline: "Real runner", description: "Real runner", functions: { cliEcho: { description: "Echo", input: { type: "object", properties: { issue: { type: "integer" } }, required: ["issue"], additionalProperties: false }, output: { type: "object", properties: { issue: { type: "integer" } }, required: ["issue"], additionalProperties: false }, run: (input) => ({ issue: input.issue }) } } });\nexport { runCli };\n`);
+  writeFileSync(join(fallbackCli, "cli.js"), `import { registerWorkflowExtension } from ${JSON.stringify(indexUrl)};\nimport { runCli } from ${JSON.stringify(pathToFileURL(cliPath).href)};\nregisterWorkflowExtension({ version: "1.0.0", headline: "Real runner", functions: { cliEcho: { description: "Echo", input: { type: "object", properties: { issue: { type: "integer" } }, required: ["issue"], additionalProperties: false }, output: { type: "object", properties: { issue: { type: "integer" } }, required: ["issue"], additionalProperties: false }, run: (input) => ({ issue: input.issue }) } } });\nexport { runCli };\n`);
   const realOutput = execFileSync(destination, ["7"], { cwd: paths.cwd, env: { ...process.env, HOME: paths.root, PI_CODING_AGENT_DIR: paths.agentDir, PI_OFFLINE: "1" }, encoding: "utf8" });
   assert.equal(realOutput, '{"issue":7}\n');
 });
@@ -398,7 +486,7 @@ void test("portable bundle export writes a self-contained payload and external-r
   const destination = join(paths.root, "bundle");
   let output = "";
   assert.equal(await runCli(["bundle", "cliEcho", "--output", destination], { cwd: paths.cwd, agentDir: paths.agentDir, stderr: () => {} }, (text) => { output += text; } ), 0);
-  const manifest = JSON.parse(readFileSync(join(destination, "manifest.json"), "utf8")) as { format: string; version: number; command: string; workflow: { name: string; input: unknown; output: unknown }; runtime: { pi: string; "@piewf/cli": string }; requirements: { commands: string[]; environment: string[] } };
+  const manifest = readCliTestManifest(join(destination, "manifest.json"));
   assert.deepEqual({ format: manifest.format, version: manifest.version, command: manifest.command }, { format: "pi-extensible-workflows-bundle", version: 1, command: "cli-echo" });
   assert.equal(manifest.workflow.name, "cliEcho");
   assert.deepEqual(manifest.requirements, { roles: [], aliases: [], tools: [], commands: [], environment: [] });
@@ -413,7 +501,7 @@ void test("portable bundle export writes a self-contained payload and external-r
   registerCliExtension();
   const selectedDestination = join(paths.root, "selected-bundle");
   assert.equal(await runCli(["bundle", "cliEcho", "--output", selectedDestination, "--role", "reviewer", "--command", "git", "--environment", "REVIEW_TOKEN"], { cwd: paths.cwd, agentDir: paths.agentDir, stderr: () => {} }), 0);
-  const selectedManifest = JSON.parse(readFileSync(join(selectedDestination, "manifest.json"), "utf8")) as { requirements: { roles: string[]; commands: string[]; environment: string[] } };
+  const selectedManifest = readCliTestManifest(join(selectedDestination, "manifest.json"));
   assert.deepEqual(selectedManifest.requirements, { roles: ["reviewer"], aliases: [], tools: [], commands: ["git"], environment: ["REVIEW_TOKEN"] });
   assert.match(readFileSync(join(selectedDestination, "payload", "workflow.mjs"), "utf8"), /roleDirectories/);
   assert.match(readFileSync(join(selectedDestination, "payload", "roles", "reviewer.md"), "utf8"), /Review the result/);
@@ -556,7 +644,7 @@ void test("doctor diagnoses extension role directories with extension provenance
   writeFileSync(join(first, "unique.md"), "Unique role");
   writeFileSync(join(second, "same.md"), "Second role");
   writeFileSync(join(second, "broken.md"), "---\ndescription: [broken\n---\nBroken");
-  registerWorkflowExtension({ version: "1.0.0", headline: "Role package", description: "Role package for doctor", roleDirectories: [missing, empty, first, pathToFileURL(second)] });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Role package", roleDirectories: [missing, empty, first, pathToFileURL(second)] });
   const report = await doctor({ ...paths, discoverPi: async () => pi() });
   const codes = report.diagnostics.map(({ code }) => code);
   assert.ok(codes.includes("ROLE_DIRECTORY"));
@@ -574,17 +662,19 @@ void test("portable bundles load method shorthand functions and selected payload
   const resource = join(root, "resource.txt");
   writeFileSync(resource, "portable resource\n");
   const destination = join(root, "bundle");
-  const workflow = { name: "methodWorkflow", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle method", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
+  const workflow = { name: "methodWorkflow", version: "1.0.0", headline: "Bundle", description: "Bundle method", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
   const manifest = writePortableWorkflowBundle({ destination, command: "method-workflow", workflow, functionSource: "async run(input) { return input.value; }", aliasTargets: { fast: "openai/gpt" }, resources: { static: [resource] }, piVersion: ">=0.80.9 <0.81.0", engineVersion: ">=5.0.0 <6.0.0" });
   assert.match(manifest.runtime.pi, /^>=/);
   assert.deepEqual(manifest.aliasTargets, { fast: "openai/gpt" });
   assert.deepEqual(manifest.payload?.static, ["resource.txt"]);
   assert.equal(readFileSync(join(destination, "payload", "resources", "resource.txt"), "utf8"), "portable resource\n");
-  type BundleFunction = { run: (input: Record<string, unknown>) => unknown };
-  type BundleExtension = { functions?: Record<string, BundleFunction> };
-  let registered: BundleExtension | undefined;
-  const module = await import(`${pathToFileURL(join(destination, "payload", "workflow.mjs")).href}?test=${String(Date.now())}`) as { register: (register: (extension: unknown) => void) => Promise<void> };
-  await module.register((extension: unknown) => { registered = extension as BundleExtension; });
+  let registered: CliTestBundleExtension | undefined;
+  const imported: unknown = await import(`${pathToFileURL(join(destination, "payload", "workflow.mjs")).href}?test=${String(Date.now())}`);
+  if (!isCliTestBundleModule(imported)) throw new Error("Invalid bundle module");
+  await imported.register((extension: unknown) => {
+    if (!isCliTestBundleExtension(extension)) throw new Error("Invalid bundle extension");
+    registered = extension;
+  });
   const method = registered?.functions?.methodWorkflow;
   assert.ok(method);
   assert.equal(await method.run({ value: 7 }), 7);
@@ -598,7 +688,7 @@ void test("portable bundles name dependency packages and entry points by their p
   const entryPoint = join(root, "entry-point.mjs");
   writeFileSync(entryPoint, "export const entryPoint = true;\n");
   const destination = join(root, "bundle");
-  const workflow = { name: "dependencyWorkflow", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle dependencies", input: { type: "object", additionalProperties: false }, output: { type: "boolean" } };
+  const workflow = { name: "dependencyWorkflow", version: "1.0.0", headline: "Bundle", description: "Bundle dependencies", input: { type: "object", additionalProperties: false }, output: { type: "boolean" } };
   const manifest = writePortableWorkflowBundle({ destination, command: "dependency-workflow", workflow, functionSource: "async run() { return true; }", resources: { dependencies: [dependency, entryPoint] }, piVersion: ">=0.80.9 <0.81.0", engineVersion: ">=5.0.0 <6.0.0" });
   assert.deepEqual(manifest.payload?.dependencies, ["@scope/example", "entry-point.mjs"]);
   assert.equal(readFileSync(join(destination, "payload", "node_modules", "@scope", "example", "package.json"), "utf8"), JSON.stringify({ name: "@scope/example" }));
@@ -619,18 +709,18 @@ void test("portable bundle setup resolves an external runtime, launches, and fai
   writeFileSync(piExecutable, "#!/usr/bin/env node\nif (process.argv[2] === \"--version\") console.log(\"0.82.0\");\n", { mode: 0o755 });
   chmodSync(piExecutable, 0o755);
   writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:@piewf/cli"] }));
-  const workflow = { name: "e2e", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle e2e", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
+  const workflow = { name: "e2e", version: "1.0.0", headline: "Bundle", description: "Bundle e2e", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
   const environment = { ...process.env, PATH: `${join(piRoot, "dist")}:${process.env.PATH ?? ""}`, HOME: root, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" };
   const create = (name: string, requirements: Record<string, readonly string[]>, piVersion = ">=0.82.0 <0.83.0", aliasTargets?: Readonly<Record<string, string>>) => { const destination = join(root, name); writePortableWorkflowBundle({ destination, command: name, workflow, functionSource: "async run(input) { return input.value; }", requirements, ...(aliasTargets ? { aliasTargets } : {}), piVersion, engineVersion: ">=5.0.0 <6.0.0" }); return destination; };
-  const runFailure = (bundle: string): string => { try { execFileSync(bundle, ["setup", "--yes"], { env: environment, encoding: "utf8", stdio: "pipe" }); return ""; } catch (error) { return String((error as { stderr?: unknown }).stderr ?? error); } };
-  const launchFailure = (bundle: string): string => { try { execFileSync(bundle, ["7"], { env: environment, encoding: "utf8", stdio: "pipe" }); return ""; } catch (error) { return String((error as { stderr?: unknown }).stderr ?? error); } };
+  const runFailure = (bundle: string): string => { try { execFileSync(bundle, ["setup", "--yes"], { env: environment, encoding: "utf8", stdio: "pipe" }); return ""; } catch (error) { return cliTestErrorOutput(error); } };
+  const launchFailure = (bundle: string): string => { try { execFileSync(bundle, ["7"], { env: environment, encoding: "utf8", stdio: "pipe" }); return ""; } catch (error) { return cliTestErrorOutput(error); } };
   const setupResult = (bundle: string): ReturnType<typeof spawnSync> => spawnSync(join(bundle, basename(bundle)), ["setup", "--yes"], { env: environment, encoding: "utf8" });
   const bundle = create("e2e", { roles: [], aliases: [], tools: [], commands: [], environment: [] });
   execFileSync(join(bundle, "e2e"), ["setup", "--yes"], { env: environment, encoding: "utf8" });
   assert.ok(existsSync(join(bundle, "bundle-state.json")));
   assert.equal(execFileSync(join(bundle, "e2e"), ["7"], { env: environment, encoding: "utf8" }).trim(), "7");
   const statePath = join(bundle, "bundle-state.json");
-  const state = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>;
+  const state = readCliTestBundleState(statePath);
   state.engine = "0.0.0";
   writeFileSync(statePath, JSON.stringify(state));
   assert.match(launchFailure(join(bundle, "e2e")), /Bundle setup is missing or stale/);
@@ -643,7 +733,7 @@ void test("portable bundle setup resolves an external runtime, launches, and fai
   writeFileSync(join(skillSource, "SKILL.md"), "---\nname: selected-skill\ndescription: Selected bundle skill\n---\nSelected skill instructions");
   const skillBundle = join(root, "skill-bundle");
   writePortableWorkflowBundle({ destination: skillBundle, command: "skill-bundle", workflow, functionSource: "async run(input) { return input.value; }", resources: { skills: [skillSource] }, piVersion: ">=0.82.0 <0.83.0", engineVersion: ">=5.0.0 <6.0.0" });
-  const skillManifest = JSON.parse(readFileSync(join(skillBundle, "manifest.json"), "utf8")) as { payload?: { skills?: string[] } };
+  const skillManifest = readCliTestManifest(join(skillBundle, "manifest.json"));
   assert.deepEqual(skillManifest.payload?.skills, ["selected-skill"]);
   execFileSync(join(skillBundle, "skill-bundle"), ["setup", "--yes"], { env: environment, encoding: "utf8" });
   assert.equal(execFileSync(join(skillBundle, "skill-bundle"), ["7"], { env: environment, encoding: "utf8" }).trim(), "7");
@@ -697,15 +787,15 @@ else {
   if (process.env.BUNDLE_INSTALL_MODE === "incompatible") writeFileSync(join(target, "package.json"), JSON.stringify({ name: "@piewf/cli", version: "3.0.0" }));
 }` , { mode: 0o755 });
   chmodSync(piExecutable, 0o755);
-  const workflow = { name: "install", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle install", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
+  const workflow = { name: "install", version: "1.0.0", headline: "Bundle", description: "Bundle install", input: { type: "object", properties: { value: { type: "integer" } }, required: ["value"], additionalProperties: false }, output: { type: "integer" } };
   const environment = { ...process.env, PATH: `${join(piRoot, "dist")}:${process.env.PATH ?? ""}`, HOME: root, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1", BUNDLE_ENGINE_SOURCE: process.cwd(), BUNDLE_CORE_SOURCE: join(process.cwd(), "../core"), BUNDLE_AGENT_SOURCE: join(process.cwd(), "../../node_modules/@earendil-works/pi-coding-agent"), BUNDLE_TYPEBOX_SOURCE: join(process.cwd(), "../../node_modules/typebox"), BUNDLE_PI_AI_SOURCE: join(process.cwd(), "../../node_modules/@earendil-works/pi-ai") };
   const create = (name: string): string => { const destination = join(root, name); writePortableWorkflowBundle({ destination, command: name, workflow, functionSource: "async run(input) { return input.value; }", piVersion: ">=0.82.0 <0.83.0", engineVersion: ">=5.0.0 <6.0.0" }); return destination; };
   const runSetup = (bundle: string, mode: string): ReturnType<typeof spawnSync> => spawnSync(join(bundle, basename(bundle)), ["setup", "--yes"], { env: { ...environment, BUNDLE_INSTALL_MODE: mode }, encoding: "utf8" });
   const installed = create("installed");
   const success = runSetup(installed, "success");
   assert.equal(success.status, 0, String(success.stderr));
-  const installedPackage = JSON.parse(readFileSync(join(agentDir, "npm", "node_modules", "@piewf", "cli", "package.json"), "utf8")) as { version?: string };
-  const packageMetadata = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { version?: string };
+  const installedPackage = readCliTestPackageMetadata(join(agentDir, "npm", "node_modules", "@piewf", "cli", "package.json"));
+  const packageMetadata = readCliTestPackageMetadata(join(process.cwd(), "package.json"));
    assert.equal(installedPackage.version, packageMetadata.version);
   assert.ok(existsSync(join(installed, "bundle-state.json")));
   assert.equal(execFileSync(join(installed, "installed"), ["7"], { env: environment, encoding: "utf8" }).trim(), "7");
@@ -725,19 +815,20 @@ else {
 void test("portable bundles can load a selected workflow extension with its module state", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-bundle-extension-"));
   const extension = join(root, "workflow.mjs");
-  writeFileSync(extension, `import { registerWorkflowExtension } from "pi-extensible-workflows";\nconst suffix = "!";\nexport default function extension() { registerWorkflowExtension({ version: "1.0.0", headline: "Bundled extension", description: "Bundled extension", functions: { extensionSelected: { description: "Selected", input: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }, output: { type: "string" }, run(input) { return input.value + suffix; } } } }); }\n`);
+  writeFileSync(extension, `import { registerWorkflowExtension } from "pi-extensible-workflows";\nconst suffix = "!";\nexport default function extension() { registerWorkflowExtension({ version: "1.0.0", headline: "Bundled extension", functions: { extensionSelected: { description: "Selected", input: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false }, output: { type: "string" }, run(input) { return input.value + suffix; } } } }); }\n`);
   const destination = join(root, "bundle");
-  writePortableWorkflowBundle({ destination, command: "selected", workflow: { name: "selected", version: "1.0.0", headline: "Bundle", extensionDescription: "Bundle", description: "Bundle", input: { type: "object" }, output: { type: "string" } }, functionSource: '() => "workflow"', resources: { extensions: [extension] }, piVersion: ">=0.80.9 <0.81.0", engineVersion: ">=5.0.0 <6.0.0" });
-  type BundleFunction = { run: (input: Record<string, unknown>) => unknown };
-  type BundleExtension = { functions?: Record<string, BundleFunction> };
-  const registrations: BundleExtension[] = [];
-  const globals = globalThis as typeof globalThis & { __pi_bundle_api?: { registerWorkflowExtension: (extension: unknown) => void } };
-  const register = (value: unknown): void => { registrations.push(value as BundleExtension); };
-  globals.__pi_bundle_api = { registerWorkflowExtension: register };
+  writePortableWorkflowBundle({ destination, command: "selected", workflow: { name: "selected", version: "1.0.0", headline: "Bundle", description: "Bundle", input: { type: "object" }, output: { type: "string" } }, functionSource: '() => "workflow"', resources: { extensions: [extension] }, piVersion: ">=0.80.9 <0.81.0", engineVersion: ">=5.0.0 <6.0.0" });
+  const registrations: CliTestBundleExtension[] = [];
+  const register = (value: unknown): void => {
+    if (!isCliTestBundleExtension(value)) throw new Error("Invalid bundle extension");
+    registrations.push(value);
+  };
+  Reflect.set(globalThis, "__pi_bundle_api", { registerWorkflowExtension: register });
   try {
-    const module = await import(`${pathToFileURL(join(destination, "payload", "workflow.mjs")).href}?extension=${String(Date.now())}`) as { register: (register: (extension: unknown) => void) => Promise<void> };
-    await module.register(register);
-  } finally { delete globals.__pi_bundle_api; }
+    const imported: unknown = await import(`${pathToFileURL(join(destination, "payload", "workflow.mjs")).href}?extension=${String(Date.now())}`);
+    if (!isCliTestBundleModule(imported)) throw new Error("Invalid bundle module");
+    await imported.register(register);
+  } finally { Reflect.deleteProperty(globalThis, "__pi_bundle_api"); }
   const selected = registrations.find((extension) => extension.functions?.extensionSelected)?.functions?.extensionSelected;
   const workflow = registrations.find((extension) => extension.functions?.selected)?.functions?.selected;
   assert.ok(selected);

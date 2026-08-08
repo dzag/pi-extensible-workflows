@@ -7,22 +7,32 @@ import { deepFreeze, object, resolveModelReference, validateModelAliases } from 
 import { saveModelAliases, resolveWorkflowSettings, workflowProjectSettingsPath, workflowSettingsPath } from "./validation.js";
 import { openWorkflowArtifact, workflowPromptArtifact, workflowResultArtifact, workflowScriptArtifact, type WorkflowArtifact } from "./workflow-artifacts.js";
 import { agentBreadcrumb, formatCheckpointReview, formatNavigatorRun, formatWorkflowPhaseDashboard, navigatorAttentionSort, navigatorRunLabels, themeWorkflowProgressStyles } from "./host-view.js";
-import { buildWorkflowPhaseModel, buildWorkflowPhaseTree, navigateWorkflowPhaseTree, preserveWorkflowPhaseSelection, preserveWorkflowPhaseTreeSelection, workflowPhaseTreeInitialExpanded } from "./host-phases.js";
+import { buildWorkflowPhaseModel, buildWorkflowPhaseTree, navigateWorkflowPhaseTree, preserveWorkflowPhaseTreeSelection, workflowPhaseTreeInitialExpanded } from "./host-phases.js";
 import { type WorkflowRecoveryContext, type createWorkflowRecovery } from "./host-recovery.js";
+import { failureDiagnosticsFrom, formatWorkflowFailureDelivery, formatWorkflowFailureDeliveryFallback } from "./host-delivery.js";
 import { type WorkflowRunRecord } from "./host-runtime.js";
 import { type AgentAttemptActionContext, type AgentAttemptSummary, type AgentRecord, type JsonValue, type LaunchSnapshot } from "./types.js";
 
 type UiSelect = (title: string, options: string[]) => Promise<string | undefined>;
 type UiInput = (title: string, placeholder?: string) => Promise<string | undefined>;
 type UiSetStatus = (key: string, text?: string) => void;
-export type UiHostCapabilities = { select?: UiSelect; input?: UiInput; setStatus?: UiSetStatus; custom?: ExtensionUIContext["custom"] };
-function asFn(value: unknown): ((...args: never[]) => unknown) | undefined { return typeof value === "function" ? value as (...args: never[]) => unknown : undefined; }
+type UiCustom = ExtensionUIContext["custom"];
+export type UiHostCapabilities = { select?: UiSelect; input?: UiInput; setStatus?: UiSetStatus; custom?: UiCustom };
+function isUiSelect(value: unknown): value is UiSelect { return typeof value === "function"; }
+function isUiInput(value: unknown): value is UiInput { return typeof value === "function"; }
+function isUiSetStatus(value: unknown): value is UiSetStatus { return typeof value === "function"; }
+function isUiCustom(value: unknown): value is UiCustom { return typeof value === "function"; }
+function isCheckpointDecision(value: unknown): value is "Approve" | "Reject" { return value === "Approve" || value === "Reject"; }
 export function uiHostCapabilities(ui: unknown): UiHostCapabilities | undefined {
   if (!object(ui)) return undefined;
-  const select = asFn(ui.select) as UiSelect | undefined;
-  const input = asFn(ui.input) as UiInput | undefined;
-  const setStatus = asFn(ui.setStatus) as UiSetStatus | undefined;
-  const custom = asFn(ui.custom) as ExtensionUIContext["custom"] | undefined;
+  const selectValue = ui.select;
+  const inputValue = ui.input;
+  const setStatusValue = ui.setStatus;
+  const customValue = ui.custom;
+  const select = isUiSelect(selectValue) ? selectValue.bind(ui) : undefined;
+  const input = isUiInput(inputValue) ? inputValue.bind(ui) : undefined;
+  const setStatus = isUiSetStatus(setStatusValue) ? setStatusValue.bind(ui) : undefined;
+  const custom = isUiCustom(customValue) ? customValue.bind(ui) : undefined;
   return { ...(select ? { select } : {}), ...(input ? { input } : {}), ...(setStatus ? { setStatus } : {}), ...(custom ? { custom } : {}) };
 }
 function tuiRows(tui: unknown): number {
@@ -38,9 +48,12 @@ function borderWorkflowOverlay(component: WorkflowOverlayComponent, theme: { fg(
   return { ...component, render(width: number) { const border = theme.fg("border", "─".repeat(Math.max(1, width))); return [border, ...component.render(width), border]; } };
 }
 type KeybindingsHostCapabilities = { getKeys?: (name: string) => readonly string[] };
+type KeybindingGetKeys = NonNullable<KeybindingsHostCapabilities["getKeys"]>;
+function isKeybindingGetKeys(value: unknown): value is KeybindingGetKeys { return typeof value === "function"; }
 function keybindingKeys(keybindings: unknown, name: string): readonly string[] | undefined {
-  const getKeys = object(keybindings) ? asFn(keybindings.getKeys) as NonNullable<KeybindingsHostCapabilities["getKeys"]> | undefined : undefined;
-  return getKeys ? getKeys.call(keybindings, name) : undefined;
+  if (!object(keybindings)) return undefined;
+  const getKeys = keybindings.getKeys;
+  return isKeybindingGetKeys(getKeys) ? getKeys.call(keybindings, name) : undefined;
 }
 type WorkflowKeybindings = { matches(data: string, binding: string): boolean };
 const WORKFLOW_VIM_KEYS: Readonly<Record<string, string>> = { "tui.select.up": "k", "tui.select.down": "j", "tui.editor.cursorLeft": "h", "tui.editor.cursorRight": "l" };
@@ -53,7 +66,7 @@ function workflowKeyLabel(keybindings: unknown, binding: string, fallback: strin
 }
 
 export type WorkflowNavigatorDependencies = {
-  pi: ExtensionAPI;
+  pi: Pick<ExtensionAPI, "registerCommand">;
   home: string | undefined;
   clipboard: (value: string) => Promise<void>;
   extensionAgentDir: string;
@@ -64,6 +77,8 @@ export type WorkflowNavigatorDependencies = {
   answerCheckpoint: (runId: string, name: string, approved: boolean, silent?: boolean) => Promise<boolean>;
   recovery: ReturnType<typeof createWorkflowRecovery>;
   stopWorkflowRun: (runId: string) => Promise<{ runId: string; state: string; stopped: boolean; reason?: "unknown_run" | "already_terminal" }>;
+  moveForegroundToBackground: (runId: string) => Promise<{ runId: string; state: "running"; detached: true }>;
+  isForegroundAttached: (runId: string) => boolean;
   withLiveActivities: (run: PersistedRun) => PersistedRun;
   liveAgentSessions: Map<string, import("./types.js").WorkflowAgentSession>;
   liveAgentPrepared: Map<string, Readonly<import("./types.js").PreparedAgentSession>>;
@@ -71,14 +86,18 @@ export type WorkflowNavigatorDependencies = {
   registry: WorkflowRegistryApi;
   projectTrusted: (context: unknown) => boolean;
   resumeHostContext: (context: unknown) => WorkflowRecoveryContext;
+  resumeSelectedWorkflow: (runId: string, foreground: boolean, context: unknown, budgetPatch?: unknown) => Promise<{ workflowName: string; state: "running" | "completed" | "awaiting_approval"; attached: boolean; value?: JsonValue }>;
 };
-
 export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): void {
-  const { pi, home, clipboard, extensionAgentDir, runs, terminalRunStates, hardTerminalRunStates, ensureSessionLease, answerCheckpoint, recovery, stopWorkflowRun, withLiveActivities, liveAgentSessions, liveAgentPrepared, liveAgentHandoffs, registry, projectTrusted, resumeHostContext } = deps;
+  const { pi, home, clipboard, extensionAgentDir, runs, terminalRunStates, hardTerminalRunStates, ensureSessionLease, answerCheckpoint, recovery, stopWorkflowRun, moveForegroundToBackground, isForegroundAttached, withLiveActivities, liveAgentSessions, liveAgentPrepared, liveAgentHandoffs, registry, projectTrusted, resumeHostContext, resumeSelectedWorkflow } = deps;
   pi.registerCommand("workflow", {
-    description: "Inspect and control workflows for this Pi session",
+    description: "Open the workflow picker; workflow actions are available contextually",
     handler: async (args, ctx) => {
       const command = args.trim();
+      if (command) {
+        ctx.ui.notify("Workflow slash commands do not accept arguments. Open the workflow picker with /workflow; actions are available there or through workflow tools.", "warning");
+        return;
+      }
       await ensureSessionLease(ctx.cwd, ctx.sessionManager.getSessionId());
       const loadStores = async () => {
         const entries = await Promise.all((await listRunIds(ctx.cwd, ctx.sessionManager.getSessionId(), home)).map(async (runId) => {
@@ -94,33 +113,37 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
         return entries.filter((entry): entry is { store: RunStore; loaded: { run: PersistedRun; snapshot: Readonly<LaunchSnapshot> }; resolvedAt: number | undefined } => entry !== undefined);
       };
       let stores = await loadStores();
-      const usage = "Usage: /workflow [model-aliases], or /workflow pause|resume|stop|approve|reject|delete <run-id> [checkpoint-name]. Approve/reject are for checkpoints only; use workflow_respond with a proposalId or the navigator's budget controls for budget decisions. Use workflow_resume for budget patches."
       const setWorkflowStatus = (text: string | undefined) => {
         const setStatus = uiHostCapabilities(ctx.ui)?.setStatus;
         setStatus?.call(ctx.ui, "workflow-stop", text);
       };
-      const runAction = async (actionCommand: string, keepContext: boolean, status: (text: string | undefined) => void = setWorkflowStatus): Promise<"dashboard" | "picker" | "done"> => {
+      const runAction = async (actionCommand: string, status: (text: string | undefined) => void = setWorkflowStatus): Promise<"dashboard" | "picker"> => {
         const [action, runId, ...rest] = actionCommand.split(/\s+/);
         try {
           const run = runId ? runs.get(runId) : undefined;
           const storedEntry = runId ? stores.find(({ store }) => store.runId === runId) : undefined;
           const stored = storedEntry ? { store: storedEntry.store, loaded: await storedEntry.store.load() } : undefined;
+          if (action === "background" && runId) {
+            const result = await moveForegroundToBackground(runId);
+            ctx.ui.notify(`Moved workflow ${result.runId} to background.`, "info");
+            return "dashboard";
+          }
           if ((action === "approve" || action === "reject") && runId && rest.length) {
             const accepted = await answerCheckpoint(runId, rest.join(" "), action === "approve", true);
             ctx.ui.notify(accepted ? `${action === "approve" ? "Approved" : "Rejected"} checkpoint ${rest.join(" ")}.` : "Checkpoint is not awaiting a response.", accepted ? "info" : "warning");
-            return keepContext ? "dashboard" : "done";
+            return "dashboard";
           }
           if ((action === "budget-approve" || action === "budget-reject") && runId && rest[0]) {
             const result = await recovery.answerBudgetDecision(runId, rest[0], action === "budget-approve", true, ctx, undefined, false);
             ctx.ui.notify(result ? `Budget adjustment ${rest[0]} ${result.approved ? "approved" : "rejected"}.` : "Budget proposal is not pending.", result ? "info" : "warning");
-            return keepContext ? "dashboard" : "done";
+            return "dashboard";
           }
           if (action === "delete" && stored) {
-            if (!hardTerminalRunStates.has(stored.loaded.run.state)) { ctx.ui.notify("Stop the workflow before deleting it.", "warning"); return keepContext ? "dashboard" : "done"; }
-            if (!await ctx.ui.confirm("Delete workflow?", `Delete ${stored.loaded.run.workflowName} (${stored.store.runId}) and all owned artifacts? This cannot be undone.`)) return keepContext ? "dashboard" : "done";
-            await stored.store.delete(true); runs.delete(stored.store.runId); terminalRunStates.delete(stored.store.runId); ctx.ui.notify(`Deleted workflow ${stored.store.runId}.`, "info"); return keepContext ? "picker" : "done";
+            if (!hardTerminalRunStates.has(stored.loaded.run.state)) { ctx.ui.notify("Stop the workflow before deleting it.", "warning"); return "dashboard"; }
+            if (!await ctx.ui.confirm("Delete workflow?", `Delete ${stored.loaded.run.workflowName} (${stored.store.runId}) and all owned artifacts? This cannot be undone.`)) return "dashboard";
+            await stored.store.delete(true); runs.delete(stored.store.runId); terminalRunStates.delete(stored.store.runId); ctx.ui.notify(`Deleted workflow ${stored.store.runId}.`, "info"); return "picker";
           }
-          if (action === "pause" && run) { await run.lifecycle.pause(); ctx.ui.notify(`Paused workflow ${run.store.runId}.`, "info"); return keepContext ? "dashboard" : "done"; }
+          if (action === "pause" && run) { await run.lifecycle.pause(); ctx.ui.notify(`Paused workflow ${run.store.runId}.`, "info"); return "dashboard"; }
           if (action === "resume" && run) {
             if (run.lifecycle.state === "budget_exhausted") {
               const patch: unknown = rest.length ? JSON.parse(rest.join(" ")) as unknown : undefined;
@@ -134,28 +157,27 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
               }
               ctx.ui.notify(`Resumed workflow ${run.store.runId}.`, "info");
             }
-            return keepContext ? "dashboard" : "done";
+            return "dashboard";
           }
           if (action === "adjust" && run?.lifecycle.state === "budget_exhausted") {
             const input = await uiHostCapabilities(ctx.ui)?.input?.call(ctx.ui, "Budget patch (JSON)", "{\"tokens\":{\"hard\":null}}" );
-            if (input === undefined) return keepContext ? "dashboard" : "done";
+            if (input === undefined) return "dashboard";
             const result = await recovery.resumeWorkflowRun(run.store.runId, JSON.parse(input), ctx, undefined, undefined, false);
             ctx.ui.notify(result.state === "completed" ? `Workflow ${run.store.runId} completed.` : result.state === "running" ? `Resumed workflow ${run.store.runId}.` : `Budget adjustment for ${run.store.runId} is awaiting approval.`, result.state === "awaiting_approval" ? "warning" : "info");
-            return keepContext ? "dashboard" : "done";
+            return "dashboard";
           }
           if (action === "stop" && run) {
             const workflowName = stored?.loaded.run.workflowName ?? run.metadata.name;
-            if (keepContext && !await ctx.ui.confirm("Stop workflow?", `Stop workflow ${workflowName} (${run.store.runId})? This cannot be undone.`)) return "dashboard";
-            if (keepContext) status(`Stopping workflow ${workflowName}...`);
+            if (!await ctx.ui.confirm("Stop workflow?", `Stop workflow ${workflowName} (${run.store.runId})? This cannot be undone.`)) return "dashboard";
+            status(`Stopping workflow ${workflowName}...`);
             await stopWorkflowRun(run.store.runId);
-            if (keepContext) status(`Workflow ${run.store.runId} stopped.`);
-            ctx.ui.notify(`Stopped workflow ${run.store.runId}.`, "info"); return keepContext ? "dashboard" : "done";
+            status(`Workflow ${run.store.runId} stopped.`);
+            ctx.ui.notify(`Stopped workflow ${run.store.runId}.`, "info"); return "dashboard";
           }
-          if (keepContext && action && runId) { ctx.ui.notify(`Cannot ${action} workflow ${runId}: the run is no longer available.`, "warning"); return "dashboard"; }
-          ctx.ui.notify(usage, "warning");
-          return "done";
+          if (action && runId) ctx.ui.notify(`Cannot ${action} workflow ${runId}: the run is no longer available.`, "warning");
+          else ctx.ui.notify("Workflow action is no longer available.", "warning");
+          return "dashboard";
         } catch (error) {
-          if (!keepContext) throw error;
           const message = error instanceof Error ? error.message : String(error);
           if (action === "stop") status(`Could not stop workflow ${runId ?? ""}: ${message}`);
           ctx.ui.notify(`Cannot ${action ?? "workflow action"}${runId ? ` for ${runId}` : ""}: ${message}`, "warning");
@@ -225,18 +247,13 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
           }
         }
       };
-      if (command === "model-aliases") {
-        if (!ctx.hasUI) { ctx.ui.notify("Model alias management requires UI.", "warning"); return; }
-        await manageAliases();
-        return;
-      }
       if (!command) {
         for (;;) {
           if (!ctx.hasUI) {
-            if (!stores.length) { ctx.ui.notify("No workflow runs in this session.", "info"); return; }
+            if (!stores.length) { ctx.ui.notify("No workflow runs in this session. Mutations are available through workflow tools.", "info"); return; }
             const sorted = navigatorAttentionSort(stores);
             const details = await Promise.all(sorted.map(async ({ store, loaded }) => formatNavigatorRun(loaded, await store.awaitingCheckpoints(), await store.worktrees())));
-            ctx.ui.notify(details.join("\n\n"), "info"); return;
+            ctx.ui.notify(`${details.join("\n\n")}\n\nMutations are available through workflow tools.`, "info"); return;
           }
           const sorted = navigatorAttentionSort(stores);
           const labels = navigatorRunLabels(sorted);
@@ -300,6 +317,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
               actions.set(`Approve budget ${id}`, `budget-approve ${store.runId} ${decision.proposalId}`);
               actions.set(`Reject budget ${id}`, `budget-reject ${store.runId} ${decision.proposalId}`);
             }
+            if (isForegroundAttached(store.runId)) actions.set("Move to background", `background ${store.runId}`);
             if (!terminalStates.has(liveRun.state)) add("Stop", "stop");
             for (const cp of checkpoints) {
               if (ctx.mode === "tui") {
@@ -379,6 +397,31 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
               if (action === "Copy worktree path" && worktree) { await copyArtifact(worktree.path, "worktree path"); continue; }
             }
           };
+          const resumeDashboard = async (dashboard: Awaited<ReturnType<typeof loadDashboard>>, action: string): Promise<void> => {
+            const ui = uiHostCapabilities(ctx.ui);
+            if (!ui?.select) return;
+            const mode = await ui.select(`Resume ${dashboard.run.workflowName}`, ["Foreground", "Background", "Cancel"]);
+            if (!mode || mode === "Cancel") return;
+            let budgetPatch: unknown;
+            if (dashboard.run.state === "budget_exhausted") {
+              if (action === "Adjust budget") {
+                const input = await uiHostCapabilities(ctx.ui)?.input?.call(ctx.ui, "Budget patch (JSON)", "{\"tokens\":{\"hard\":null}}");
+                if (input === undefined) return;
+                try { budgetPatch = JSON.parse(input); } catch (error) { ctx.ui.notify(`Cannot parse budget patch: ${error instanceof Error ? error.message : String(error)}`, "warning"); return; }
+              }
+            }
+            try {
+              const result = await resumeSelectedWorkflow(store.runId, mode === "Foreground", ctx, budgetPatch);
+              if (result.state === "completed" && !result.attached) ctx.ui.notify(`Workflow ${result.workflowName} completed${result.value === undefined ? "." : `: ${JSON.stringify(result.value)}`}`, "info");
+              else if (result.state === "awaiting_approval") ctx.ui.notify(`Budget adjustment for ${result.workflowName} is awaiting approval.`, "warning");
+              else if (result.state === "running") ctx.ui.notify(`Resumed workflow ${result.workflowName} in ${mode.toLowerCase()}.`, "info");
+            } catch (error) {
+              if (error && typeof error === "object" && "workflowResumeAttached" in error && error.workflowResumeAttached === true) return;
+              const diagnostic = failureDiagnosticsFrom(error);
+              const message = diagnostic ? formatWorkflowFailureDelivery(diagnostic) : formatWorkflowFailureDeliveryFallback(dashboard.run.workflowName, store.runId, store.directory, error);
+              ctx.ui.notify(`Cannot resume workflow ${store.runId}: ${message}`, "warning");
+            }
+          };
           for (;;) {
             let view = await loadDashboard();
             const actionChoice = ctx.mode === "tui"
@@ -394,10 +437,9 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                   let selectionNeedsScroll = true;
                   let renderedWidth = 80;
                   let refreshGeneration = 0;
-                  const initialSelection = preserveWorkflowPhaseSelection(view.phaseModel, {});
                   let tree = buildWorkflowPhaseTree(view.phaseModel);
-                  let selectedNodeId = initialSelection.nodeId ?? tree.nodes[0]?.id;
-                  let expandedNodeIds = new Set(initialSelection.expandedNodeIds ?? workflowPhaseTreeInitialExpanded(tree));
+                  let selectedNodeId = tree.nodes[0]?.id;
+                  let expandedNodeIds = new Set(workflowPhaseTreeInitialExpanded(tree));
                   const terminalRows = () => Math.max(1, tuiRows(tui) - WORKFLOW_PANEL_FOOTER_ROWS);
                   const keyLabels: Record<string, string> = { up: "↑", down: "↓", left: "←", right: "→", pageUp: "pgup", pageDown: "pgdn" };
                   const keyLabel = (binding: string, fallback: string) => workflowKeyLabel(keybindings, binding, fallback, keyLabels);
@@ -451,7 +493,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                     stopRequested = true;
                     stopStatus = undefined;
                     setWorkflowStatus(undefined);
-                    void runAction(`stop ${store.runId}`, true, (status) => {
+                    void runAction(`stop ${store.runId}`, (status) => {
                       stopStatus = status;
                       setWorkflowStatus(status);
                       if (!disposed) tui.requestRender();
@@ -478,7 +520,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                       const styles = themeWorkflowProgressStyles(theme);
                       const agent = selectedAgentRecord();
                       const actions = actionMode ? { title: agent ? "Agent actions" : "Run actions", options: actionOptions(), index: actionIndex } : undefined;
-                      const phaseLines = formatWorkflowPhaseDashboard(view.run, view.snapshot, width, { nodeId: selectedNodeId, expandedNodeIds: [...expandedNodeIds], ...(narrow && !detailsMode ? { treeOnly: true } : {}), ...(narrow && detailsMode ? { detailsOnly: true } : {}), ...(actions ? { actions } : {}) }, styles);
+                      const phaseLines = formatWorkflowPhaseDashboard(view.run, view.snapshot, width, { nodeId: selectedNodeId, expandedNodeIds: [...expandedNodeIds], ...(narrow && !detailsMode && !actionMode ? { treeOnly: true } : {}), ...(narrow && (detailsMode || actionMode) ? { detailsOnly: true } : {}), ...(actions ? { actions } : {}) }, styles);
                       const statusLines = stopStatus ? truncateToVisualLines(styles.error(stopStatus), Number.MAX_SAFE_INTEGER, width, 0).visualLines.map((line) => line.trimEnd()) : [];
                       const content = [...statusLines, ...phaseLines];
                       const rows = terminalRows();
@@ -502,7 +544,9 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                         selectionNeedsScroll = false;
                       }
                       dashboardOffset = Math.max(0, Math.min(maxOffset, dashboardOffset));
-                      const hint = truncateToVisualLines(theme.fg("dim", actionMode ? `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} actions · ${keyLabel("tui.select.confirm", "enter")} run · ${keyLabel("tui.editor.cursorLeft", "←")} tree · ${keyLabel("tui.select.cancel", "esc")} tree` : `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} tree · ${keyLabel("tui.editor.cursorLeft", "←")}/${keyLabel("tui.editor.cursorRight", "→")} collapse/expand · ${keyLabel("tui.select.confirm", "enter")} inspect · a actions · ${keyLabel("tui.select.cancel", "esc")} ${narrow && detailsMode ? "tree" : "back"}${content.length > viewport ? ` · ${keyLabel("tui.select.pageUp", "pgup")}/${keyLabel("tui.select.pageDown", "pgdn")} scroll` : ""} · auto-refresh 1s`), Number.MAX_SAFE_INTEGER, width, 1).visualLines[0] ?? "";
+                      const selectedNode = selectedNodeId ? tree.byId.get(selectedNodeId) : undefined;
+                      const enterAction = selectedNode?.kind === "workflow" ? "run actions" : selectedNode?.kind === "agent" ? "agent actions" : selectedNode?.children.length ? "expand/collapse" : narrow ? "inspect" : "focus details";
+                      const hint = truncateToVisualLines(theme.fg("dim", actionMode ? `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} actions · ${keyLabel("tui.select.confirm", "enter")} run · ${keyLabel("tui.editor.cursorLeft", "←")} tree · ${keyLabel("tui.select.cancel", "esc")} tree` : `${keyLabel("tui.select.up", "↑")}/${keyLabel("tui.select.down", "↓")} tree · ${keyLabel("tui.editor.cursorLeft", "←")}/${keyLabel("tui.editor.cursorRight", "→")} collapse/expand · ${keyLabel("tui.select.confirm", "enter")} ${enterAction} · a actions · ${keyLabel("tui.select.cancel", "esc")} ${narrow && detailsMode ? "tree" : "back"}${content.length > viewport ? ` · ${keyLabel("tui.select.pageUp", "pgup")}/${keyLabel("tui.select.pageDown", "pgdn")} scroll` : ""} · auto-refresh 1s`), Number.MAX_SAFE_INTEGER, width, 1).visualLines[0] ?? "";
                       return [...content.slice(dashboardOffset, dashboardOffset + viewport), ...(hintRows ? [hint] : [])];
                     },
                     invalidate() {},
@@ -552,15 +596,14 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                         tui.requestRender();
                         return;
                       }
-                      const current = selectedNodeId ? tree.byId.get(selectedNodeId) : tree.nodes[0];
                       if (workflowKeyMatches(keybindings, data, "tui.select.cancel")) {
                         if (narrow && detailsMode) { detailsMode = false; selectionNeedsScroll = true; } else done("Back");
                       } else if (narrow && detailsMode) {
                         if (workflowKeyMatches(keybindings, data, "tui.select.pageUp")) dashboardOffset = Math.max(0, dashboardOffset - Math.max(1, terminalRows() - 1));
                         else if (workflowKeyMatches(keybindings, data, "tui.select.pageDown")) dashboardOffset += Math.max(1, terminalRows() - 1);
                         else if (workflowKeyMatches(keybindings, data, "tui.select.confirm")) {
-                          if (current?.kind === "agent" && current.agentId) { actionMode = true; actionIndex = 0; }
-                          else if (current?.children.length) { if (expandedNodeIds.has(current.id)) expandedNodeIds.delete(current.id); else expandedNodeIds.add(current.id); }
+                          const node = selectedNodeId ? tree.byId.get(selectedNodeId) : undefined;
+                          if (node?.kind === "agent") { actionMode = true; actionIndex = 0; dashboardOffset = 0; }
                         }
                       } else if (workflowKeyMatches(keybindings, data, "tui.editor.cursorLeft")) {
                         const next = navigateWorkflowPhaseTree(tree, selectedNodeId, expandedNodeIds, "left");
@@ -577,9 +620,22 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                       } else if (workflowKeyMatches(keybindings, data, "tui.select.pageUp")) dashboardOffset = Math.max(0, dashboardOffset - Math.max(1, terminalRows() - 1));
                       else if (workflowKeyMatches(keybindings, data, "tui.select.pageDown")) dashboardOffset += Math.max(1, terminalRows() - 1);
                       else if (workflowKeyMatches(keybindings, data, "tui.select.confirm")) {
-                        if (narrow) detailsMode = true;
-                        else if (current?.kind === "agent" && current.agentId) { actionMode = true; actionIndex = 0; }
-                        else if (current?.children.length) { if (expandedNodeIds.has(current.id)) expandedNodeIds.delete(current.id); else expandedNodeIds.add(current.id); }
+                        const node = selectedNodeId ? tree.byId.get(selectedNodeId) : undefined;
+                        if (node?.kind === "workflow") {
+                          actionMode = true;
+                          actionIndex = 0;
+                          dashboardOffset = 0;
+                        } else if (node?.kind === "agent") {
+                          if (narrow) detailsMode = true;
+                          else {
+                            actionMode = true;
+                            actionIndex = 0;
+                            dashboardOffset = 0;
+                          }
+                        } else if (node?.children.length) {
+                          if (expandedNodeIds.has(node.id)) expandedNodeIds.delete(node.id); else expandedNodeIds.add(node.id);
+                          selectionNeedsScroll = true;
+                        } else if (narrow) detailsMode = true;
                       }
                       tui.requestRender();
                     },
@@ -591,6 +647,7 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
             if (actionChoice === "Agents...") { await selectAgent(view); continue; }
             if (actionChoice.startsWith("__workflow_agent__:")) { await selectAgent(view, actionChoice.slice("__workflow_agent__:".length)); continue; }
             if (actionChoice === "Refresh") continue;
+            if (["Resume", "Resume unchanged", "Adjust budget"].includes(actionChoice)) { await resumeDashboard(view, actionChoice); continue; }
             const copy = view.copies.get(actionChoice);
             if (copy) { await copyArtifact(copy.value, copy.artifact); continue; }
             if (actionChoice.startsWith("Review ")) {
@@ -641,7 +698,10 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
                     else if (workflowKeyMatches(keybindings, data, "tui.select.down")) selectedIndex = (selectedIndex + 1) % options.length;
                     else if (workflowKeyMatches(keybindings, data, "tui.select.pageUp")) move(-layout().contentViewport);
                     else if (workflowKeyMatches(keybindings, data, "tui.select.pageDown")) move(layout().contentViewport);
-                    else if (workflowKeyMatches(keybindings, data, "tui.select.confirm")) done(options[selectedIndex] === "Cancel" ? undefined : options[selectedIndex] as "Approve" | "Reject");
+                    else if (workflowKeyMatches(keybindings, data, "tui.select.confirm")) {
+                      const selected = options[selectedIndex];
+                      done(isCheckpointDecision(selected) ? selected : undefined);
+                    }
                     else if (workflowKeyMatches(keybindings, data, "tui.select.cancel")) done(undefined);
                     tui.requestRender();
                   },
@@ -655,12 +715,11 @@ export function registerWorkflowNavigator(deps: WorkflowNavigatorDependencies): 
             }
             const actionCommand = view.actions.get(actionChoice);
             if (!actionCommand) { ctx.ui.notify(`Cannot select workflow action: ${actionChoice}`, "warning"); continue; }
-            const outcome = await runAction(actionCommand, true);
+            const outcome = await runAction(actionCommand);
             if (outcome === "picker") { stores = await loadStores(); break; }
           }
         }
       }
-      await runAction(command, false);
     },
   });
 }

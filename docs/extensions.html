@@ -13,7 +13,7 @@
       <a class="brand" href="index.html">pi-extensible-workflows</a>
       <nav aria-label="Primary navigation">
         <a href="developers.html">Developers</a>
-        <a href="agents.html">Agents</a>
+        <a href="roles.html">Roles</a>
         <a class="active" href="extensions.html">Extensions</a>
         <a href="https://github.com/vekexasia/pi-extensible-workflows">Repository</a>
       </nav>
@@ -48,7 +48,6 @@
   <span class="tok-function">registerWorkflowExtension</span><span class="tok-punctuation">({</span>
     <span class="tok-property">version</span><span class="tok-punctuation">:</span> <span class="tok-string">"1.0.0"</span><span class="tok-punctuation">,</span>
     <span class="tok-property">headline</span><span class="tok-punctuation">:</span> <span class="tok-string">"Greeting workflow"</span><span class="tok-punctuation">,</span>
-    <span class="tok-property">description</span><span class="tok-punctuation">:</span> <span class="tok-string">"Provides a reusable greeting function."</span><span class="tok-punctuation">,</span>
     <span class="tok-property">functions</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
       <span class="tok-property">greet</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
         <span class="tok-property">description</span><span class="tok-punctuation">:</span> <span class="tok-string">"Return a greeting for one person."</span><span class="tok-punctuation">,</span>
@@ -62,13 +61,12 @@
       </section>
       <section id="registration">
         <h2>Registration contract</h2>
-        <p><code>WorkflowExtension</code> is the only top-level registration object. Its own keys are strict, and at least one of <code>functions</code>, <code>modelAliases</code>, <code>agentSetupHooks</code>, or <code>agentAttemptActions</code> must contain an entry. The accepted fields are:</p>
+        <p><code>WorkflowExtension</code> is the only top-level registration object. Its own keys are strict, and at least one capability such as <code>functions</code>, <code>modelAliases</code>, <code>agentSetupHooks</code>, <code>agentAttemptActions</code>, or <code>roleDirectories</code> must be registered. The accepted fields are:</p>
         <div class="table-wrap"><table>
           <thead><tr><th>Field</th><th>Type</th><th>Contract</th></tr></thead>
           <tbody>
             <tr><td><code>version</code></td><td>string</td><td>Required strict semantic version, such as <code>1.0.0</code>.</td></tr>
             <tr><td><code>headline</code></td><td>string</td><td>Required non-empty short label shown in trusted catalog details.</td></tr>
-            <tr><td><code>description</code></td><td>string</td><td>Required non-empty extension description. Keep it safe for catalog metadata.</td></tr>
             <tr><td><code>functions</code></td><td>record of <code>WorkflowFunction</code></td><td>Optional named reusable functions. Names must be identifier-shaped and globally unique.</td></tr>
             <tr><td><code>modelAliases</code></td><td>record of <code>WorkflowModelAlias</code></td><td>Optional named dynamic model resolvers. Alias names are case-sensitive and must match <code>[A-Za-z][A-Za-z0-9_-]*</code>; names are unique across extensions.</td></tr>
             <tr><td><code>agentSetupHooks</code></td><td>record of <code>AgentSetupHook</code></td><td>Optional trusted hooks. Hook names must be identifiers and unique across extensions.</td></tr>
@@ -98,7 +96,7 @@
           <thead><tr><th>Member</th><th>Behavior</th></tr></thead>
           <tbody>
             <tr><td><code>run</code></td><td>Read-only <code>WorkflowRunContext</code> for this launch.</td></tr>
-            <tr><td><code>agent(prompt, options?)</code></td><td>Launches an agent and returns its bare JSON value. Options include <code>label</code>, <code>model</code>, <code>thinking</code>, <code>tools</code>, <code>role</code>, <code>outputSchema</code>, <code>retries</code>, <code>timeoutMs</code>, and JSON-compatible extension options. A role cannot be combined with model, thinking, or tools.</td></tr>
+            <tr><td><code>agent(prompt, options?)</code></td><td>Launches an agent and returns its bare JSON value. Options include <code>label</code>, <code>model</code>, <code>thinking</code>, <code>tools</code>, <code>role</code>, <code>outputSchema</code>, <code>retries</code>, <code>timeoutMs</code>, and JSON-compatible extension options. <code>role</code> may be a name string or an object with a required <code>name</code> plus frontmatter overrides. Omitted fields inherit from the role file, <code>null</code> unsets them, and explicit values replace them. Top-level model, thinking, and tools remain incompatible with any role form.</td></tr>
             <tr><td><code>shell(command, options?)</code></td><td>Runs a host command and returns <code>{ exitCode, stdout, stderr }</code>. Options are <code>timeoutMs</code> and string-valued <code>env</code>.</td></tr>
             <tr><td><code>prompt(template, values)</code></td><td>Interpolates a plain object of JSON values into a prompt. Await agent results before passing them here.</td></tr>
             <tr><td><code>parallel(name, tasks)</code></td><td>Runs stable keyed tasks concurrently and returns an object of bare values.</td></tr>
@@ -106,7 +104,7 @@
             <tr><td><code>withWorktree(name, options?, callback)</code></td><td>Creates or reuses one deterministic named worktree scope. The optional options object accepts <code>path</code> to choose the checkout location. The callback receives a frozen <code>{ path, branch }</code> reference.</td></tr>
             <tr><td><code>checkpoint(input)</code></td><td>Waits for a decision described by <code>{ name, prompt, context }</code> and returns a boolean. The prompt and context have the same size limits as the workflow primitive.</td></tr>
             <tr><td><code>phase(name)</code></td><td>Records a progress phase. It returns no workflow value.</td></tr>
-            <tr><td><code>log(message)</code></td><td>Adds a bounded TUI-only transcript entry.</td></tr>
+            <tr><td><code>log(message)</code></td><td>Renders attached foreground logs in the live workflow item and appends background or detached logs as bounded TUI-only transcript entries, capped at 4 KB.</td></tr>
             <tr><td><code>invoke(name, input)</code></td><td>Calls another registered function by unqualified name, with input and output schema validation. Use this for composition instead of importing an implementation.</td></tr>
           </tbody>
         </table></div>
@@ -130,7 +128,6 @@
 <span class="tok-keyword">const</span> reviewExtension<span class="tok-punctuation">:</span> WorkflowExtension <span class="tok-punctuation">=</span> <span class="tok-punctuation">{</span>
   <span class="tok-property">version</span><span class="tok-punctuation">:</span> <span class="tok-string">"1.0.0"</span><span class="tok-punctuation">,</span>
   <span class="tok-property">headline</span><span class="tok-punctuation">:</span> <span class="tok-string">"Task review"</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">description</span><span class="tok-punctuation">:</span> <span class="tok-string">"Runs one reusable review task."</span><span class="tok-punctuation">,</span>
   <span class="tok-property">functions</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
     <span class="tok-property">reviewTask</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
       <span class="tok-property">description</span><span class="tok-punctuation">:</span> <span class="tok-string">"Ask an agent to review a task and return its report."</span><span class="tok-punctuation">,</span>
@@ -157,7 +154,6 @@
 <span class="tok-keyword">const</span> compositionExtension<span class="tok-punctuation">:</span> WorkflowExtension <span class="tok-punctuation">=</span> <span class="tok-punctuation">{</span>
   <span class="tok-property">version</span><span class="tok-punctuation">:</span> <span class="tok-string">"1.0.0"</span><span class="tok-punctuation">,</span>
   <span class="tok-property">headline</span><span class="tok-punctuation">:</span> <span class="tok-string">"Composed review"</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">description</span><span class="tok-punctuation">:</span> <span class="tok-string">"Composes two reusable functions."</span><span class="tok-punctuation">,</span>
   <span class="tok-property">functions</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
     <span class="tok-property">securityReview</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
       <span class="tok-property">description</span><span class="tok-punctuation">:</span> <span class="tok-string">"Return a review label for one path."</span><span class="tok-punctuation">,</span>
@@ -187,7 +183,6 @@
   <span class="tok-function">registerWorkflowExtension</span><span class="tok-punctuation">({</span>
     <span class="tok-property">version</span><span class="tok-punctuation">:</span> <span class="tok-string">"1.0.0"</span><span class="tok-punctuation">,</span>
     <span class="tok-property">headline</span><span class="tok-punctuation">:</span> <span class="tok-string">"Model policy"</span><span class="tok-punctuation">,</span>
-    <span class="tok-property">description</span><span class="tok-punctuation">:</span> <span class="tok-string">"Selects an available review model"</span><span class="tok-punctuation">,</span>
     <span class="tok-property">modelAliases</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
       reviewer<span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
         <span class="tok-keyword">async</span> <span class="tok-function">resolve</span><span class="tok-punctuation">({</span> availableModels <span class="tok-punctuation">}</span><span class="tok-punctuation">)</span> <span class="tok-punctuation">{</span>
@@ -227,7 +222,6 @@
 <span class="tok-keyword">const</span> advisorExtension<span class="tok-punctuation">:</span> WorkflowExtension <span class="tok-punctuation">=</span> <span class="tok-punctuation">{</span>
   <span class="tok-property">version</span><span class="tok-punctuation">:</span> <span class="tok-string">"1.0.0"</span><span class="tok-punctuation">,</span>
   <span class="tok-property">headline</span><span class="tok-punctuation">:</span> <span class="tok-string">"Scoped advisor"</span><span class="tok-punctuation">,</span>
-  <span class="tok-property">description</span><span class="tok-punctuation">:</span> <span class="tok-string">"Adds an advisor note only to opted-in agents."</span><span class="tok-punctuation">,</span>
   <span class="tok-property">agentSetupHooks</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
     <span class="tok-property">advisor</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
       <span class="tok-property">priority</span><span class="tok-punctuation">:</span> <span class="tok-number">10</span><span class="tok-punctuation">,</span>
@@ -311,12 +305,12 @@
           <li>Assume a function can replay. Prefer verification and bounded side effects; make external mutations idempotent when possible.</li>
           <li>Keep setup hooks minimal and explicit. Treat them as a trusted policy override, and check opt-in options before mutating an agent.</li>
           <li>Use <code>context.invoke()</code> for registered-function composition instead of importing another registered implementation.</li>
-          <li>Document only shipped author APIs. Keep role-file format and lifecycle-event details on the developer page, and link to those canonical references instead of copying their contracts.</li>
+          <li>Document only shipped author APIs. Keep role-file format and lifecycle-event details on their canonical pages, and link to those references instead of copying their contracts.</li>
         </ul>
       </section>
       <section class="callout">
         <h2>Related references</h2>
-        <p>Use the <a href="developers.html#extensions">developer-page compatibility section</a> for the short extension overview, <a href="developers.html#lifecycle-events">lifecycle events</a> for event payloads, and the <a href="agents.html">agent guide</a> for workflow invocation and recovery.</p>
+        <p>Use the <a href="developers.html#extensions">developer-page compatibility section</a> for the short extension overview, <a href="developers.html#lifecycle-events">lifecycle events</a>, the <a href="roles.html">roles guide</a> for role files and call customization, and the <a href="https://github.com/vekexasia/pi-extensible-workflows/blob/main/packages/core/skills/pi-extensible-workflows/SKILL.md">bundled workflow skill</a> for workflow authoring and recovery.</p>
       </section>
       <p class="back-link"><a href="index.html">&lt; Back to documentation home</a></p>
     </article>

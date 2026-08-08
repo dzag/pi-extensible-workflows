@@ -3,7 +3,55 @@
 
 ### Added
 
-- `withWorktree(name, { path }, callback)` accepts an optional options object that chooses where the scope's worktree is created. The path may be absolute or relative to the workflow launch cwd, must resolve outside the repository working tree, and must not already exist as a non-empty directory. Omitting it keeps the previous run-directory location, and the chosen location is persisted and validated across replay, resume, and retry.
+- `withWorktree(name, { path, commit }, callback)` accepts an optional options object. `path` chooses where the scope's worktree is created; it may be absolute or relative to the workflow launch cwd, must not contain the repository working tree, and must not already exist as a non-empty directory. In-repo locations such as `<repo>/.worktree/<branch>` are allowed. `commit` opts into per-agent worktree snapshot commits; without it the worktree simply stays dirty between agents. Omitting the options object keeps the previous run-directory location and non-committing behavior. The chosen location is persisted and validated across replay, resume, and retry.
+
+## [5.2.0] - 2026-08-06
+
+### Reliability
+
+- Completed local Pi session lifecycle ownership: extension startup/shutdown is balanced for direct and workflow consumers, and Herdr handoff sessions report resume context.
+
+## [5.1.1] - 2026-07-31
+
+### Fixes
+
+- Clarified workflow phase state glyphs while keeping detailed agent activity in the dashboard details.
+
+### Verification
+
+- `npm run check` passes.
+
+## [5.1.0] - 2026-07-31
+
+### New capabilities
+
+- Added role-targeted `piewf doctor --role` inspection of effective agent resources and prepared prompts without provider execution ([#181](https://github.com/vekexasia/pi-extensible-workflows/issues/181)).
+- Added `/workflow` as the sole workflow slash-command with contextual run, agent, lifecycle, budget, and checkpoint actions; Enter opens the applicable action picker and `a`/`A` remains available as a legacy shortcut ([#185](https://github.com/vekexasia/pi-extensible-workflows/issues/185), [#188](https://github.com/vekexasia/pi-extensible-workflows/issues/188)).
+- Added an interactive startup picker to resume one or all interrupted workflows.
+- Added `/workflow background` behavior to move an attached foreground workflow to background delivery without restarting it ([#182](https://github.com/vekexasia/pi-extensible-workflows/issues/182)).
+- Added role `contextFiles` policies to scope context visible to workflow agents ([#179](https://github.com/vekexasia/pi-extensible-workflows/issues/179)).
+- Added per-call role override objects with inheritance, unsetting, and explicit replacement semantics.
+- Added long-running shell progress reporting and inline foreground log rendering while preserving background transcript delivery ([#180](https://github.com/vekexasia/pi-extensible-workflows/issues/180), [#187](https://github.com/vekexasia/pi-extensible-workflows/issues/187)).
+
+### Fixes
+
+- Exported CLI launchers now prefer the configured Pi package installation before resolving a development-workspace package, preserving registered workflow functions when launched from the repository.
+
+### CLI and diagnostics
+
+- Clarified `piewf doctor` output by separating Pi-active tools/resources from workflow-agent resources after `disabledAgentResources`.
+
+### TypeScript API
+
+- Added typed workflow schemas and orchestration results, plus public local Pi/session inspection APIs.
+
+### Herdr
+
+- Kept handed-off and completed workflow sessions inspectable, including correct continuation behavior for already-completed sessions.
+
+### Verification
+
+- `npm run check` passes.
 
 ## [5.0.0] - 2026-07-29
 

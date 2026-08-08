@@ -4,11 +4,11 @@ import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, re
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Value } from "typebox/value";
+import { Compile } from "typebox/compile";
 import { getAgentDir, parseFrontmatter, SessionManager } from "@earendil-works/pi-coding-agent";
 import { CAPTURE_ERROR_PREFIX, CAPTURE_IDENTITY, resolveWorkflowSkillPath } from "./eval-capture-extension.js";
 export { resolveWorkflowSkillPath } from "./eval-capture-extension.js";
-import { ERROR_CODES, inspectWorkflowScript, isObject, loadAgentDefinitions, runWorkflow, WORKFLOW_CALL_KINDS, WorkflowError, type AgentIdentity, type JsonSchema, type JsonValue, type StaticWorkflowCall, type StaticWorkflowExecution, type WorkflowErrorCode } from "./index.js";
+import { ERROR_CODES, inspectWorkflowScript, isObject, loadAgentDefinitions, roleNameOf, runWorkflow, WORKFLOW_CALL_KINDS, WorkflowError, type AgentIdentity, type JsonSchema, type JsonValue, type StaticWorkflowCall, type StaticWorkflowExecution, type WorkflowErrorCode } from "./index.js";
 
 export type SignificantAction = { kind: "tool"; name: string } | { kind: "text" } | { kind: "thinking" };
 export type SequenceExpectation = readonly string[] | { equals?: readonly string[]; startsWith?: readonly string[] };
@@ -110,9 +110,10 @@ function evalRequired(value: Record<string, unknown>, key: string, source: strin
 function evalString(value: unknown, source: string, path: string, nonEmpty = false): string { if (typeof value !== "string" || nonEmpty && !value.trim()) evalValidationError(source, path, nonEmpty ? "must be a non-empty string" : "must be a string"); return value; }
 function evalNumber(value: unknown, source: string, path: string, integer = false, positive = false): number { if (typeof value !== "number" || !Number.isFinite(value) || integer && !Number.isInteger(value) || positive && value <= 0) evalValidationError(source, path, positive ? "must be a positive number" : integer ? "must be a non-negative integer" : "must be a finite number"); return value; }
 function evalNonNegativeInteger(value: unknown, source: string, path: string): number { const result = evalNumber(value, source, path, true); if (result < 0) evalValidationError(source, path, "must be a non-negative integer"); return result; }
-function evalStringArray(value: unknown, source: string, path: string): void { if (!Array.isArray(value)) evalValidationError(source, path, "must be an array of strings"); for (const [index, item] of value.entries()) evalString(item, source, `${path}[${String(index)}]`); }
-function evalEnum(value: unknown, values: readonly string[], source: string, path: string): string { const result = evalString(value, source, path); if (!values.includes(result)) evalValidationError(source, path, `must be one of ${values.join(", ")}`); return result; }
-function evalEnumArray(value: unknown, values: readonly string[], source: string, path: string): void { evalStringArray(value, source, path); for (const [index, item] of (value as string[]).entries()) evalEnum(item, values, source, `${path}[${String(index)}]`); }
+function evalStringArray(value: unknown, source: string, path: string): string[] { if (!Array.isArray(value)) evalValidationError(source, path, "must be an array of strings"); const result: string[] = []; for (const [index, item] of value.entries()) result.push(evalString(item, source, `${path}[${String(index)}]`)); return result; }
+function isEnumMember<T extends string>(value: string, values: readonly T[]): value is T { return values.some((candidate) => candidate === value); }
+function evalEnum<T extends string>(value: unknown, values: readonly T[], source: string, path: string): T { const result = evalString(value, source, path); if (!isEnumMember(result, values)) evalValidationError(source, path, `must be one of ${values.join(", ")}`); return result; }
+function evalEnumArray<T extends string>(value: unknown, values: readonly T[], source: string, path: string): T[] { return evalStringArray(value, source, path).map((item, index) => evalEnum(item, values, source, `${path}[${String(index)}]`)); }
 function evalJson(value: unknown, seen = new Set<object>()): value is JsonValue { if (value === null || typeof value === "string" || typeof value === "boolean") return true; if (typeof value === "number") return Number.isFinite(value); if (!Array.isArray(value) && !isObject(value)) return false; if (seen.has(value)) return false; seen.add(value); const valid = Array.isArray(value) ? value.every((item) => evalJson(item, seen)) : Object.getPrototypeOf(value) === Object.prototype && Object.values(value).every((item) => evalJson(item, seen)); seen.delete(value); return valid; }
 function evalJsonValue(value: unknown, source: string, path: string): void { if (!evalJson(value)) evalValidationError(source, path, "must be a JSON-compatible value"); }
 function evalStringMap(value: unknown, source: string, path: string, values: readonly string[]): void { const object = evalObject(value, source, path); for (const [key, item] of Object.entries(object)) evalEnum(item, values, source, evalField(path, key)); }
@@ -122,32 +123,35 @@ function evalOutputShape(value: unknown, source: string, path: string): void { c
 function evalAgentSelector(value: unknown, source: string, path: string): void { const object = evalObject(value, source, path); evalKeys(object, ["role", "model", "promptIncludes", "execution"], source, path); for (const key of ["role", "model", "promptIncludes"]) if (Object.prototype.hasOwnProperty.call(object, key)) evalString(object[key], source, evalField(path, key)); if (Object.prototype.hasOwnProperty.call(object, "execution")) evalEnum(object.execution, ["parallel", "sequential"], source, evalField(path, "execution")); }
 function evalAgentPolicy(value: unknown, source: string, path: string): void { const object = evalObject(value, source, path); evalKeys(object, ["callIndex", "role", "model", "forbidOptions", "tools"], source, path); evalNonNegativeInteger(evalRequired(object, "callIndex", source, path), source, evalField(path, "callIndex")); for (const key of ["role", "model"]) if (Object.prototype.hasOwnProperty.call(object, key)) evalString(object[key], source, evalField(path, key)); if (Object.prototype.hasOwnProperty.call(object, "forbidOptions")) evalEnumArray(object.forbidOptions, AGENT_OPTION_NAMES, source, evalField(path, "forbidOptions")); if (Object.prototype.hasOwnProperty.call(object, "tools")) { const tools = evalObject(object.tools, source, evalField(path, "tools")); evalKeys(tools, ["mode", "values"], source, evalField(path, "tools")); evalEnum(tools.mode, ["omitted", "empty", "exact"], source, evalField(evalField(path, "tools"), "mode")); if (Object.prototype.hasOwnProperty.call(tools, "values")) evalStringArray(tools.values, source, evalField(evalField(path, "tools"), "values")); } }
 function evalExpectations(value: unknown, source: string, path: string): EvalExpectations { const object = evalObject(value, source, path); evalKeys(object, expectationKeys, source, path); if (Object.prototype.hasOwnProperty.call(object, "firstSignificantAction")) { const action = evalObject(object.firstSignificantAction, source, evalField(path, "firstSignificantAction")); evalKeys(action, ["kind", "name"], source, evalField(path, "firstSignificantAction")); const kind = evalEnum(action.kind, ["tool", "text", "thinking"], source, evalField(evalField(path, "firstSignificantAction"), "kind")); if (kind === "tool") evalString(evalRequired(action, "name", source, evalField(path, "firstSignificantAction")), source, evalField(evalField(path, "firstSignificantAction"), "name"), true); else if (Object.prototype.hasOwnProperty.call(action, "name")) evalValidationError(source, evalField(evalField(path, "firstSignificantAction"), "name"), "is only valid for kind tool"); } if (Object.prototype.hasOwnProperty.call(object, "firstTool")) evalString(object.firstTool, source, evalField(path, "firstTool"), true); for (const key of ["firstBatchToolSequence", "parentToolSequence"]) if (Object.prototype.hasOwnProperty.call(object, key)) evalSequence(object[key], source, evalField(path, key)); if (Object.prototype.hasOwnProperty.call(object, "workflowCallCount")) { const count = object.workflowCallCount; if (typeof count === "number") evalNonNegativeInteger(count, source, evalField(path, "workflowCallCount")); else { const range = evalObject(count, source, evalField(path, "workflowCallCount")); evalKeys(range, ["min", "max"], source, evalField(path, "workflowCallCount")); if (!Object.keys(range).length) evalValidationError(source, evalField(path, "workflowCallCount"), "must contain min or max"); for (const key of ["min", "max"]) if (Object.prototype.hasOwnProperty.call(range, key)) evalNonNegativeInteger(range[key], source, evalField(evalField(path, "workflowCallCount"), key)); if (typeof range.min === "number" && typeof range.max === "number" && range.min > range.max) evalValidationError(source, evalField(path, "workflowCallCount"), "min cannot exceed max"); } } for (const key of ["requiredOperations", "forbiddenOperations"]) if (Object.prototype.hasOwnProperty.call(object, key)) evalEnumArray(object[key], WORKFLOW_CALL_KINDS, source, evalField(path, key)); for (const key of ["requiredRoles"]) if (Object.prototype.hasOwnProperty.call(object, key)) evalStringArray(object[key], source, evalField(path, key)); if (Object.prototype.hasOwnProperty.call(object, "minimumAgentCalls")) evalNonNegativeInteger(object.minimumAgentCalls, source, evalField(path, "minimumAgentCalls")); if (Object.prototype.hasOwnProperty.call(object, "requireOutputSchema")) { if (typeof object.requireOutputSchema !== "boolean") evalOutputShape(object.requireOutputSchema, source, evalField(path, "requireOutputSchema")); } if (Object.prototype.hasOwnProperty.call(object, "expectedResults")) { if (!Array.isArray(object.expectedResults)) evalValidationError(source, evalField(path, "expectedResults"), "must be an array"); for (const [index, item] of object.expectedResults.entries()) { const expected = evalObject(item, source, `${path}.expectedResults[${String(index)}]`); evalKeys(expected, ["workflowIndex", "equals", "match"], source, `${path}.expectedResults[${String(index)}]`); if (Object.prototype.hasOwnProperty.call(expected, "workflowIndex")) evalNonNegativeInteger(expected.workflowIndex, source, `${path}.expectedResults[${String(index)}].workflowIndex`); if (Object.prototype.hasOwnProperty.call(expected, "equals")) evalJsonValue(expected.equals, source, `${path}.expectedResults[${String(index)}].equals`); if (Object.prototype.hasOwnProperty.call(expected, "match")) evalJsonShape(expected.match, source, `${path}.expectedResults[${String(index)}].match`); if (!Object.prototype.hasOwnProperty.call(expected, "equals") && !Object.prototype.hasOwnProperty.call(expected, "match")) evalValidationError(source, `${path}.expectedResults[${String(index)}]`, "must contain equals or match"); } } if (Object.prototype.hasOwnProperty.call(object, "agentPolicies")) { if (!Array.isArray(object.agentPolicies)) evalValidationError(source, evalField(path, "agentPolicies"), "must be an array"); for (const [index, item] of object.agentPolicies.entries()) evalAgentPolicy(item, source, `${path}.agentPolicies[${String(index)}]`); } for (const key of ["requiredAgentOrder"]) if (Object.prototype.hasOwnProperty.call(object, key)) { if (!Array.isArray(object[key])) evalValidationError(source, evalField(path, key), "must be an array"); for (const [index, item] of object[key].entries()) evalAgentSelector(item, source, `${path}.${key}[${String(index)}]`); } if (Object.prototype.hasOwnProperty.call(object, "requiredAgentStructures")) { if (!Array.isArray(object.requiredAgentStructures)) evalValidationError(source, evalField(path, "requiredAgentStructures"), "must be an array"); for (const [index, item] of object.requiredAgentStructures.entries()) { const structure = evalObject(item, source, `${path}.requiredAgentStructures[${String(index)}]`); evalKeys(structure, ["execution", "operation", "agents"], source, `${path}.requiredAgentStructures[${String(index)}]`); evalEnum(evalRequired(structure, "execution", source, `${path}.requiredAgentStructures[${String(index)}]`), ["parallel", "sequential"], source, `${path}.requiredAgentStructures[${String(index)}].execution`); if (Object.prototype.hasOwnProperty.call(structure, "operation")) evalEnum(structure.operation, ["parallel", "pipeline"], source, `${path}.requiredAgentStructures[${String(index)}].operation`); const agents = evalRequired(structure, "agents", source, `${path}.requiredAgentStructures[${String(index)}]`); if (!Array.isArray(agents)) evalValidationError(source, `${path}.requiredAgentStructures[${String(index)}].agents`, "must be a non-empty array"); if (!agents.length) evalValidationError(source, `${path}.requiredAgentStructures[${String(index)}].agents`, "must be a non-empty array"); for (const [agentIndex, agent] of agents.entries()) evalAgentSelector(agent, source, `${path}.requiredAgentStructures[${String(index)}].agents[${String(agentIndex)}]`); } } if (Object.prototype.hasOwnProperty.call(object, "requiredDataFlow")) { if (!Array.isArray(object.requiredDataFlow)) evalValidationError(source, evalField(path, "requiredDataFlow"), "must be an array"); for (const [index, item] of object.requiredDataFlow.entries()) { const flow = evalObject(item, source, `${path}.requiredDataFlow[${String(index)}]`); evalKeys(flow, ["binding", "toAgentIndex"], source, `${path}.requiredDataFlow[${String(index)}]`); evalString(evalRequired(flow, "binding", source, `${path}.requiredDataFlow[${String(index)}]`), source, `${path}.requiredDataFlow[${String(index)}].binding`, true); evalNonNegativeInteger(evalRequired(flow, "toAgentIndex", source, `${path}.requiredDataFlow[${String(index)}]`), source, `${path}.requiredDataFlow[${String(index)}].toAgentIndex`); } } return object; }
-function evalCase(value: unknown, source: string): WorkflowEvalCase { const object = evalObject(value, source, "<case>"); evalKeys(object, caseKeys, source, ""); evalString(evalRequired(object, "id", source, ""), source, "id", true); evalString(evalRequired(object, "prompt", source, ""), source, "prompt", true); if (Object.prototype.hasOwnProperty.call(object, "timeoutMs")) evalNumber(object.timeoutMs, source, "timeoutMs", true, true); evalNumber(evalRequired(object, "maxCost", source, ""), source, "maxCost", false, true); evalExpectations(evalRequired(object, "expectations", source, ""), source, "expectations"); if (Object.prototype.hasOwnProperty.call(object, "expectedWorkflowCalls")) evalNonNegativeInteger(object.expectedWorkflowCalls, source, "expectedWorkflowCalls"); if (Object.prototype.hasOwnProperty.call(object, "semanticCriteria")) { if (!Array.isArray(object.semanticCriteria)) evalValidationError(source, "semanticCriteria", "must be an array"); const ids = new Set<string>(); for (const [index, item] of object.semanticCriteria.entries()) { const criterion = evalObject(item, source, `semanticCriteria[${String(index)}]`); evalKeys(criterion, ["id", "description"], source, `semanticCriteria[${String(index)}]`); const id = evalString(evalRequired(criterion, "id", source, `semanticCriteria[${String(index)}]`), source, `semanticCriteria[${String(index)}].id`, true); evalString(evalRequired(criterion, "description", source, `semanticCriteria[${String(index)}]`), source, `semanticCriteria[${String(index)}].description`, true); if (ids.has(id)) evalValidationError(source, `semanticCriteria[${String(index)}].id`, `duplicate criterion id ${JSON.stringify(id)}`); ids.add(id); } } return object as unknown as WorkflowEvalCase; }
+function evalCase(value: unknown, source: string): WorkflowEvalCase { const object = evalObject(value, source, "<case>"); evalKeys(object, caseKeys, source, ""); const id = evalString(evalRequired(object, "id", source, ""), source, "id", true); const prompt = evalString(evalRequired(object, "prompt", source, ""), source, "prompt", true); const timeoutMs = Object.prototype.hasOwnProperty.call(object, "timeoutMs") ? evalNumber(object.timeoutMs, source, "timeoutMs", true, true) : undefined; const maxCost = evalNumber(evalRequired(object, "maxCost", source, ""), source, "maxCost", false, true); const expectations = evalExpectations(evalRequired(object, "expectations", source, ""), source, "expectations"); const expectedWorkflowCalls = Object.prototype.hasOwnProperty.call(object, "expectedWorkflowCalls") ? evalNonNegativeInteger(object.expectedWorkflowCalls, source, "expectedWorkflowCalls") : undefined; let semanticCriteria: SemanticCriterion[] | undefined; if (Object.prototype.hasOwnProperty.call(object, "semanticCriteria")) { if (!Array.isArray(object.semanticCriteria)) evalValidationError(source, "semanticCriteria", "must be an array"); const ids = new Set<string>(); semanticCriteria = []; for (const [index, item] of object.semanticCriteria.entries()) { const criterion = evalObject(item, source, `semanticCriteria[${String(index)}]`); evalKeys(criterion, ["id", "description"], source, `semanticCriteria[${String(index)}]`); const id = evalString(evalRequired(criterion, "id", source, `semanticCriteria[${String(index)}]`), source, `semanticCriteria[${String(index)}].id`, true); const description = evalString(evalRequired(criterion, "description", source, `semanticCriteria[${String(index)}]`), source, `semanticCriteria[${String(index)}].description`, true); if (ids.has(id)) evalValidationError(source, `semanticCriteria[${String(index)}].id`, `duplicate criterion id ${JSON.stringify(id)}`); ids.add(id); semanticCriteria.push({ id, description }); } } return { id, prompt, ...(timeoutMs === undefined ? {} : { timeoutMs }), maxCost, expectations, ...(expectedWorkflowCalls === undefined ? {} : { expectedWorkflowCalls }), ...(semanticCriteria === undefined ? {} : { semanticCriteria }) }; }
 function evalYaml(content: string, source: string): unknown { try { const parsed = parseFrontmatter(`---\n${content.replace(/\r\n?/g, "\n")}\n---\n`); if (parsed.body.trim()) evalValidationError(source, "<document>", "must contain one YAML document"); return parsed.frontmatter; } catch (error) { if (error instanceof Error && error.message.startsWith("YAML ")) throw error; evalValidationError(source, "<document>", `malformed YAML: ${error instanceof Error ? error.message : String(error)}`); } }
-function evalCasesDirectory(): string { const moduleDirectory = dirname(fileURLToPath(import.meta.url)); const candidates = [join(moduleDirectory, "../evals/cases"), join(moduleDirectory, "../../evals/cases")]; const found = candidates.find((candidate) => existsSync(candidate)); if (!found) evalValidationError(candidates[0] as string, "<document>", "cases directory not found"); return found; }
+function evalCasesDirectory(): string { const moduleDirectory = dirname(fileURLToPath(import.meta.url)); const candidates: readonly [string, string] = [join(moduleDirectory, "../evals/cases"), join(moduleDirectory, "../../evals/cases")]; const found = candidates.find((candidate) => existsSync(candidate)); if (!found) evalValidationError(candidates[0], "<document>", "cases directory not found"); return found; }
 export function validateWorkflowEvalCases(values: readonly unknown[], source = "cases"): readonly WorkflowEvalCase[] { if (!Array.isArray(values)) evalValidationError(source, "<document>", "must be an array"); const cases = values.map((value, index) => evalCase(value, `${source}[${String(index)}]`)); const seen = new Map<string, string>(); for (const [index, candidate] of cases.entries()) { const path = `${source}[${String(index)}]`; const first = seen.get(candidate.id); if (first) evalValidationError(source, `${path}.id`, `duplicate id ${JSON.stringify(candidate.id)} (first declared at ${first})`); seen.set(candidate.id, `${path}.id`); } return cases; }
 export function loadWorkflowEvalCases(directory = evalCasesDirectory()): readonly WorkflowEvalCase[] { let entries: Array<{ name: string; isFile(): boolean }>; try { entries = readdirSync(directory, { withFileTypes: true, encoding: "utf8" }); } catch (error) { evalValidationError(directory, "<document>", `cannot read cases directory: ${error instanceof Error ? error.message : String(error)}`); } const files = entries.filter((entry) => entry.isFile() && entry.name.endsWith(".yaml")).map((entry) => entry.name).sort((left, right) => left < right ? -1 : left > right ? 1 : 0); if (!files.length) evalValidationError(directory, "<document>", "no .yaml case files found"); const cases: WorkflowEvalCase[] = []; const seen = new Map<string, string>(); for (const file of files) { const source = join(directory, file); const candidate = evalCase(evalYaml(readFileSync(source, "utf8"), source), source); const first = seen.get(candidate.id); if (first) evalValidationError(source, "id", `duplicate id ${JSON.stringify(candidate.id)} (first declared at ${first} field id)`); seen.set(candidate.id, source); cases.push(candidate); } return Object.freeze(cases); }
 export const INITIAL_WORKFLOW_EVAL_CASES: readonly WorkflowEvalCase[] = loadWorkflowEvalCases();
 
 
 function isJson(value: unknown): value is JsonValue { if (value === null || typeof value === "string" || typeof value === "boolean") return true; if (typeof value === "number") return Number.isFinite(value); if (Array.isArray(value)) return value.every(isJson); return isObject(value) && Object.values(value).every(isJson); }
-function asJsonObject(value: unknown): Readonly<Record<string, JsonValue>> | undefined { return isObject(value) && Object.values(value).every(isJson) ? value as Readonly<Record<string, JsonValue>> : undefined; }
+function isJsonObject(value: unknown): value is Record<string, JsonValue> { return isObject(value) && Object.values(value).every(isJson); }
+function asJsonObject(value: unknown): Readonly<Record<string, JsonValue>> | undefined { return isJsonObject(value) ? value : undefined; }
 function jsonType(value: JsonValue): JsonResultType { if (value === null) return "null"; if (Array.isArray(value)) return "array"; if (typeof value === "number") return Number.isInteger(value) ? "integer" : "number"; if (typeof value === "object") return "object"; if (typeof value === "string") return "string"; if (typeof value === "boolean") return "boolean"; return "null"; }
 function jsonTypeMatches(value: JsonValue, expected: JsonResultType): boolean { const actual = jsonType(value); return actual === expected || expected === "number" && actual === "integer"; }
-function equalJson(left: JsonValue, right: JsonValue): boolean { if (left === right) return true; if (Array.isArray(left) && Array.isArray(right)) return left.length === right.length && left.every((value, index) => equalJson(value, right[index] as JsonValue)); if (isObject(left) && isObject(right)) { const leftKeys = Object.keys(left); const rightKeys = Object.keys(right); return leftKeys.length === rightKeys.length && leftKeys.every((key) => Object.prototype.hasOwnProperty.call(right, key) && equalJson(left[key] as JsonValue, right[key] as JsonValue)); } return false; }
+function jsonProperty(value: Readonly<Record<string, JsonValue>>, key: string): JsonValue | undefined { if (!Object.prototype.hasOwnProperty.call(value, key)) return undefined; return value[key]; }
+function jsonIndex(value: readonly JsonValue[], index: number): JsonValue | undefined { return value[index]; }
+function equalJson(left: JsonValue, right: JsonValue): boolean { if (left === right) return true; if (Array.isArray(left) && Array.isArray(right)) return left.length === right.length && left.every((value, index) => { const rightValue = jsonIndex(right, index); return rightValue !== undefined && equalJson(value, rightValue); }); if (isJsonObject(left) && isJsonObject(right)) { const leftKeys = Object.keys(left); const rightKeys = Object.keys(right); return leftKeys.length === rightKeys.length && leftKeys.every((key) => { const leftValue = jsonProperty(left, key); const rightValue = jsonProperty(right, key); return leftValue !== undefined && rightValue !== undefined && equalJson(leftValue, rightValue); }); } return false; }
 type SequenceShape = { equals?: readonly string[]; startsWith?: readonly string[] };
 function isSequenceShape(value: SequenceExpectation): value is SequenceShape { return !Array.isArray(value); }
-function sequenceMatches(actual: readonly string[], expected: SequenceExpectation): boolean { if (!isSequenceShape(expected)) return equalJson(actual as JsonValue, expected as JsonValue); if (expected.equals !== undefined && !sequenceMatches(actual, expected.equals)) return false; return expected.startsWith === undefined || expected.startsWith.every((name: string, index: number) => actual[index] === name); }
+function sequenceMatches(actual: readonly string[], expected: SequenceExpectation): boolean { if (!isSequenceShape(expected)) return actual.length === expected.length && actual.every((value, index) => value === expected[index]); if (expected.equals !== undefined && !sequenceMatches(actual, expected.equals)) return false; return expected.startsWith === undefined || expected.startsWith.every((name: string, index: number) => actual[index] === name); }
 function countFor(value: JsonValue): number | undefined { if (Array.isArray(value)) return value.length; if (isObject(value)) return Object.keys(value).length; return undefined; }
 export function matchesJsonResult(shape: JsonResultShape, value: JsonValue): boolean {
   if (shape.equals !== undefined && !equalJson(shape.equals, value)) return false;
   if (shape.type !== undefined && !jsonTypeMatches(value, shape.type)) return false;
   if (shape.nonEmpty && (value === "" || value === null || Array.isArray(value) && value.length === 0 || isObject(value) && Object.keys(value).length === 0)) return false;
-  const objectValue = isObject(value) ? value : undefined;
+  const objectValue = isJsonObject(value) ? value : undefined;
   if (shape.requiredKeys && (!objectValue || shape.requiredKeys.some((key) => !Object.prototype.hasOwnProperty.call(objectValue, key)))) return false;
   if (shape.forbiddenProperties && objectValue && shape.forbiddenProperties.some((key) => Object.prototype.hasOwnProperty.call(objectValue, key))) return false;
-  if (shape.propertyTypes && (!objectValue || Object.entries(shape.propertyTypes).some(([key, type]) => !Object.prototype.hasOwnProperty.call(objectValue, key) || !jsonTypeMatches(objectValue[key] as JsonValue, type)))) return false;
-  if (shape.properties && (!objectValue || Object.entries(shape.properties).some(([key, nested]) => !Object.prototype.hasOwnProperty.call(objectValue, key) || !matchesJsonResult(nested, objectValue[key] as JsonValue)))) return false;
+  if (shape.propertyTypes && (!objectValue || Object.entries(shape.propertyTypes).some(([key, type]) => { const property = jsonProperty(objectValue, key); return property === undefined || !jsonTypeMatches(property, type); }))) return false;
+  if (shape.properties && (!objectValue || Object.entries(shape.properties).some(([key, nested]) => { const property = jsonProperty(objectValue, key); return property === undefined || !matchesJsonResult(nested, property); }))) return false;
   const count = countFor(value);
   if (shape.count !== undefined && count !== shape.count) return false;
   if (shape.minCount !== undefined && (count === undefined || count < shape.minCount)) return false;
@@ -252,7 +256,7 @@ export function extractCapturedWorkflows(oracle: ParentOracle): CapturedWorkflow
 
 function validationErrorCode(text: string): WorkflowErrorCode | undefined {
   const prefixed = text.match(new RegExp(`${CAPTURE_ERROR_PREFIX}([A-Z_]+):`))?.[1];
-  if (prefixed && ERROR_CODES.includes(prefixed as WorkflowErrorCode)) return prefixed as WorkflowErrorCode;
+  if (prefixed && isEnumMember(prefixed, ERROR_CODES)) return prefixed;
   return ERROR_CODES.find((code) => text.includes(code));
 }
 
@@ -311,7 +315,7 @@ export function replayExpectationErrors(calls: readonly CapturedWorkflowCall[], 
   for (const policy of expectations.agentPolicies ?? []) {
     const call = agentCalls[policy.callIndex];
     if (!call) { errors.push(`agent policy ${String(policy.callIndex)} had no matching call`); continue; }
-    if (policy.role !== undefined && call.options.role !== policy.role) errors.push(`agent ${String(policy.callIndex)} role was ${JSON.stringify(call.options.role)}`);
+    if (policy.role !== undefined && roleNameOf(call.options.role) !== policy.role) errors.push(`agent ${String(policy.callIndex)} role was ${JSON.stringify(call.options.role)}`);
     if (policy.model !== undefined && call.options.model !== policy.model) errors.push(`agent ${String(policy.callIndex)} model was ${JSON.stringify(call.options.model)}`);
     for (const option of policy.forbidOptions ?? []) if (Object.prototype.hasOwnProperty.call(call.options, option)) errors.push(`agent ${String(policy.callIndex)} unexpectedly specified ${option}`);
     if (policy.tools) {
@@ -445,16 +449,25 @@ export function staticExpectationResults(calls: readonly CapturedWorkflowCall[],
 function combinations(values: readonly number[], count: number, start = 0, prefix: readonly number[] = []): number[][] {
   if (prefix.length === count) return [[...prefix]];
   const output: number[][] = [];
-  for (let index = start; index <= values.length - (count - prefix.length); index += 1) output.push(...combinations(values, count, index + 1, [...prefix, values[index] as number]));
+  for (let index = start; index <= values.length - (count - prefix.length); index += 1) {
+    const [value] = values.slice(index, index + 1);
+    if (value === undefined) continue;
+    output.push(...combinations(values, count, index + 1, [...prefix, value]));
+  }
   return output;
 }
 
+function capturedCallAt(calls: readonly CapturedWorkflowCall[], index: number): CapturedWorkflowCall {
+  const [call] = calls.slice(index, index + 1);
+  if (call === undefined) throw new Error(`Captured workflow call ${String(index)} is unavailable.`);
+  return call;
+}
 export function selectStaticCandidate(calls: readonly CapturedWorkflowCall[], validations: readonly ProductionValidationReport[], expectations: EvalExpectations, requiredCount = 1): { callIndices: readonly number[]; reports: readonly StaticCandidateReport[] } {
   if (requiredCount === 0) return { callIndices: [], reports: [] };
   const validIndices = validations.filter(({ valid }) => valid).map(({ callIndex }) => callIndex);
   const reports: StaticCandidateReport[] = [];
   for (const callIndices of combinations(validIndices, requiredCount)) {
-    const criteria = staticExpectationResults(callIndices.map((index) => calls[index] as CapturedWorkflowCall), expectations);
+    const criteria = staticExpectationResults(callIndices.map((index) => capturedCallAt(calls, index)), expectations);
     const report = { callIndices, criteria, passed: criteria.every(({ pass }) => pass) };
     reports.push(report);
     if (report.passed) return { callIndices, reports };
@@ -481,7 +494,8 @@ function exampleForSchema(schema: JsonSchema): JsonValue {
   return "fake";
 }
 
-export function matchesJsonSchema(schema: JsonSchema, value: JsonValue): boolean { return Value.Check(schema as never, value); }
+type JsonSchemaValidator = ReturnType<typeof Compile>;
+export function matchesJsonSchema(schema: JsonSchemaValidator, value: JsonValue): boolean { return schema.Check(value); }
 
 export async function replayWorkflowScript(script: string, args: JsonValue = null, signal?: AbortSignal): Promise<{ result: JsonValue; trace: ReplayTrace }> {
   assertEvalScriptSafe(script);
@@ -491,7 +505,7 @@ export async function replayWorkflowScript(script: string, args: JsonValue = nul
   let active = 0;
   let maxConcurrentAgents = 0;
   const execution = runWorkflow(script, args, {
-    agent: async (prompt, options, agentSignal, identity) => {
+    agent: async (prompt, options, _agentSignal, identity) => {
       if (typeof options.retries === "number" && options.retries > 0) throw new WorkflowError("INVALID_METADATA", "Evaluation retries are disabled");
       agentCalls.push({ prompt, options: structuredClone(options), identity });
       active += 1; maxConcurrentAgents = Math.max(maxConcurrentAgents, active);
@@ -500,7 +514,7 @@ export async function replayWorkflowScript(script: string, args: JsonValue = nul
         const outputSchema = options.outputSchema;
         if (isObject(outputSchema)) {
           const value = exampleForSchema(outputSchema);
-          if (!matchesJsonSchema(outputSchema, value)) throw new WorkflowError("RESULT_INVALID", "Fake agent result does not match outputSchema");
+          if (!matchesJsonSchema(Compile(outputSchema), value)) throw new WorkflowError("RESULT_INVALID", "Fake agent result does not match outputSchema");
           return value;
         }
         return `fake:${prompt}`;
@@ -615,7 +629,7 @@ function semanticJudgePrompt(evalCase: WorkflowEvalCase, calls: readonly Capture
   const roles = loadAgentDefinitions(cwd, join(home, ".pi", "agent"));
   const usedRoles = new Set(calls.flatMap(({ script }) => { try { return script ? inspectWorkflowScript(script).flatMap((call) => call.kind === "agent" && call.role ? [call.role] : []) : []; } catch { return []; } }));
   const roleText = [...usedRoles].map((role) => `${role}: ${roles[role]?.description ?? "no description"}`).join("\n") || "none";
-  const docs = "agent(prompt, options) delegates; shell(command, options) runs a deterministic host command and returns exitCode/stdout/stderr; parallel(name, tasks) runs independent tasks concurrently; pipeline(name, items, stages) applies ordered stages; prompt(template, data) carries values into prompts. A role owns model/thinking/tools policy.";
+  const docs = "agent(prompt, options) delegates; shell(command, options) runs a deterministic host command and returns exitCode/stdout/stderr; parallel(name, tasks) runs independent tasks concurrently; pipeline(name, items, stages) applies ordered stages; prompt(template, data) carries values into prompts. A role owns model/thinking/tools policy, and role: { name, ...frontmatter } overrides those fields for a single call without changing the role body.";
   return `Judge whether the captured workflow design satisfies each criterion. Do not execute it. Return only JSON: {"criteria":[{"id":"criterion id","pass":true,"evidence":"specific script evidence"}]}.\n\nOriginal request:\n${evalCase.prompt}\n\nCriteria:\n${JSON.stringify(evalCase.semanticCriteria ?? [])}\n\nDSL:\n${docs}\n\nRelevant roles:\n${roleText}\n\nCaptured workflow call(s):\n${calls.map((call, index) => `--- ${String(index)} ---\nArguments:\n${JSON.stringify(call.arguments)}\nScript:\n${call.script ?? "<missing>"}`).join("\n")}`;
 }
 
@@ -740,7 +754,7 @@ export async function captureEvalCase(input: CaptureCaseInput): Promise<EvalCase
     const selection = selectStaticCandidate(workflows, validation.reports, input.case.expectations, requiredCount);
     const parentUsageThroughCandidate = usageThroughCandidate(oracle, workflows, selection.callIndices);
     const parentAccounting = parentUsageThroughCandidate ?? oracle.usage;
-    const unsafeTool = oracle.parentToolSequence.find((tool) => !SAFE_PARENT_EVAL_TOOLS.includes(tool as (typeof SAFE_PARENT_EVAL_TOOLS)[number]));
+    const unsafeTool = oracle.parentToolSequence.find((tool) => !isEnumMember(tool, SAFE_PARENT_EVAL_TOOLS));
     const errors = [...evalExpectationErrors(oracle, input.case.expectations), ...recoverySelectionErrors(input.case, oracle), ...validation.errors, ...(unsafeTool ? [`parent tool is outside the safe eval allowlist: ${unsafeTool}`] : [])];
     if (requiredCount > 0 && selection.callIndices.length === 0) errors.push("Catastrophic validity failure: no production-valid workflow candidate satisfied static expectations.");
     let judge: SemanticJudgeReport | undefined;
@@ -749,7 +763,7 @@ export async function captureEvalCase(input: CaptureCaseInput): Promise<EvalCase
       const criteria = input.case.semanticCriteria ?? semantic("The workflow design is semantically appropriate for the original request.");
       const judgeCase = { ...input.case, semanticCriteria: criteria };
       reportProgress(`${input.case.id}: semantic judge starting`);
-      judgeProcess = await runSemanticJudge({ ...input, case: judgeCase }, selection.callIndices.map((index) => workflows[index] as CapturedWorkflowCall), cwd, home, sessionDir, Math.max(0, input.maxCost - parentAccounting.cost));
+      judgeProcess = await runSemanticJudge({ ...input, case: judgeCase }, selection.callIndices.map((index) => capturedCallAt(workflows, index)), cwd, home, sessionDir, Math.max(0, input.maxCost - parentAccounting.cost));
       reportProgress(`${input.case.id}: semantic judge finished`);
       diagnostics.push(judgeProcess.stderr, judgeProcess.error ? `Judge process error: ${judgeProcess.error}` : "");
       if (judgeProcess.exitCode !== 0 || judgeProcess.error) errors.push("Semantic judge process failed.");
@@ -791,8 +805,8 @@ export async function captureEvalCase(input: CaptureCaseInput): Promise<EvalCase
 }
 
 export interface IsolatedProcessOptions { childPath: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; onStderr?: (chunk: string) => void }
-export interface IsolatedProcessResult<T> { value?: T; timedOut: boolean; exitCode: number | null; processGroupTerminated: boolean; stderr: string; error?: string }
-export async function runIsolatedProcess<T>(payload: unknown, options: IsolatedProcessOptions): Promise<IsolatedProcessResult<T>> {
+export interface IsolatedProcessResult { value?: unknown; timedOut: boolean; exitCode: number | null; processGroupTerminated: boolean; stderr: string; error?: string }
+export async function runIsolatedProcess(payload: unknown, options: IsolatedProcessOptions): Promise<IsolatedProcessResult> {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-workflow-eval-case-"))); const inputPath = join(root, "input.json"); const outputPath = join(root, "output.json");
   try {
     writeFileSync(inputPath, `${JSON.stringify({ payload, outputPath })}\n`, { mode: 0o600 });
@@ -807,7 +821,7 @@ export async function runIsolatedProcess<T>(payload: unknown, options: IsolatedP
     if (killPromise) processGroupTerminated ||= await killPromise;
     if (!existsSync(outputPath)) return { timedOut, exitCode, processGroupTerminated, stderr, ...(processError ? { error: processError } : {}) };
     try {
-      const value = JSON.parse(readFileSync(outputPath, "utf8")) as T;
+      const value: unknown = JSON.parse(readFileSync(outputPath, "utf8"));
       return { value, timedOut, exitCode, processGroupTerminated, stderr, ...(processError ? { error: processError } : {}) };
     } catch (error) {
       return { timedOut, exitCode, processGroupTerminated, stderr, error: `Invalid child JSON: ${error instanceof Error ? error.message : String(error)}` };
@@ -817,10 +831,114 @@ export async function runIsolatedProcess<T>(payload: unknown, options: IsolatedP
   }
 }
 
+function decodeChildArray<T>(value: unknown, decoder: (value: unknown) => T | undefined): T[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const decoded: T[] = [];
+  for (const entry of value) {
+    const result = decoder(entry);
+    if (result === undefined) return undefined;
+    decoded.push(result);
+  }
+  return decoded;
+}
+function decodeChildString(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }
+function decodeChildNumber(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) ? value : undefined; }
+function decodeChildInteger(value: unknown): number | undefined { const result = decodeChildNumber(value); return result !== undefined && Number.isInteger(result) ? result : undefined; }
+function decodeChildBoolean(value: unknown): boolean | undefined { return typeof value === "boolean" ? value : undefined; }
+function decodeChildStringArray(value: unknown): string[] | undefined { return decodeChildArray(value, decodeChildString); }
+function decodeChildNumberArray(value: unknown): number[] | undefined { return decodeChildArray(value, decodeChildNumber); }
+function decodeChildJson(value: unknown): JsonValue | undefined { return isJson(value) ? value : undefined; }
+function isEvalCaseStatus(value: unknown): value is EvalCaseResult["status"] { return value === "passed" || value === "failed" || value === "timed_out" || value === "budget_exceeded" || value === "skipped"; }
+function isWorkflowErrorCode(value: unknown): value is WorkflowErrorCode { return ERROR_CODES.some((candidate) => candidate === value); }
+function decodeChildUsage(value: unknown): ParentUsage | undefined {
+  if (!isObject(value)) return undefined;
+  const input = decodeChildNumber(value.input); const output = decodeChildNumber(value.output); const cacheRead = decodeChildNumber(value.cacheRead); const cacheWrite = decodeChildNumber(value.cacheWrite); const totalTokens = decodeChildNumber(value.totalTokens); const cost = decodeChildNumber(value.cost);
+  const models = decodeChildArray(value.models, (entry) => { if (!isObject(entry)) return undefined; const model = decodeChildString(entry.model); const modelCost = decodeChildNumber(entry.cost); return model === undefined || modelCost === undefined ? undefined : { model, cost: modelCost }; });
+  if (input === undefined || output === undefined || cacheRead === undefined || cacheWrite === undefined || totalTokens === undefined || cost === undefined || models === undefined) return undefined;
+  return { input, output, cacheRead, cacheWrite, totalTokens, cost, models };
+}
+function decodeChildAssistantBatch(value: unknown): ParentAssistantBatch | undefined {
+  if (!isObject(value)) return undefined;
+  const index = decodeChildInteger(value.index); const parts = decodeChildArray(value.parts, decodeChildJson); const tools = decodeChildStringArray(value.tools);
+  const usage = value.usage === undefined ? undefined : decodeChildUsage(value.usage);
+  if (index === undefined || parts === undefined || tools === undefined || value.usage !== undefined && usage === undefined) return undefined;
+  return { index, parts, tools, ...(usage === undefined ? {} : { usage }) };
+}
+function decodeChildToolResult(value: unknown): ParentToolResult | undefined {
+  if (!isObject(value)) return undefined;
+  const toolCallId = value.toolCallId; const details = value.details; const isError = value.isError; const text = value.text;
+  if (toolCallId !== undefined && typeof toolCallId !== "string" || details !== undefined && !isJson(details) || isError !== undefined && typeof isError !== "boolean" || text !== undefined && typeof text !== "string") return undefined;
+  return { ...(toolCallId === undefined ? {} : { toolCallId }), ...(details === undefined ? {} : { details }), ...(isError === undefined ? {} : { isError }), ...(text === undefined ? {} : { text }) };
+}
+function decodeChildSignificantAction(value: unknown): SignificantAction | undefined {
+  if (!isObject(value) || (value.kind !== "tool" && value.kind !== "text" && value.kind !== "thinking")) return undefined;
+  if (value.kind === "tool") return typeof value.name === "string" ? { kind: "tool", name: value.name } : undefined;
+  return value.name === undefined ? { kind: value.kind } : undefined;
+}
+function decodeChildOracle(value: unknown): ParentOracle | undefined {
+  if (!isObject(value)) return undefined;
+  const assistantBatches = decodeChildArray(value.assistantBatches, decodeChildAssistantBatch); const workflowToolResults = decodeChildArray(value.workflowToolResults, decodeChildToolResult); const skillReads = decodeChildStringArray(value.skillReads); const firstBatchToolSequence = decodeChildStringArray(value.firstBatchToolSequence); const toolsBeforeFirstWorkflow = decodeChildStringArray(value.toolsBeforeFirstWorkflow); const firstWorkflowBatchToolSequence = decodeChildStringArray(value.firstWorkflowBatchToolSequence); const parentToolSequence = decodeChildStringArray(value.parentToolSequence); const workflowCallCount = decodeChildInteger(value.workflowCallCount); const usage = decodeChildUsage(value.usage);
+  const firstSignificantAction = value.firstSignificantAction === undefined ? undefined : decodeChildSignificantAction(value.firstSignificantAction); const firstTool = value.firstTool;
+  if (assistantBatches === undefined || workflowToolResults === undefined || skillReads === undefined || firstBatchToolSequence === undefined || toolsBeforeFirstWorkflow === undefined || firstWorkflowBatchToolSequence === undefined || parentToolSequence === undefined || workflowCallCount === undefined || usage === undefined || value.firstSignificantAction !== undefined && firstSignificantAction === undefined || firstTool !== undefined && typeof firstTool !== "string") return undefined;
+  return { assistantBatches, workflowToolResults, skillReads, ...(firstSignificantAction === undefined ? {} : { firstSignificantAction }), ...(firstTool === undefined ? {} : { firstTool }), firstBatchToolSequence, toolsBeforeFirstWorkflow, firstWorkflowBatchToolSequence, parentToolSequence, workflowCallCount, usage };
+}
+function decodeChildWorkflow(value: unknown): CapturedWorkflowCall | undefined {
+  if (!isObject(value)) return undefined;
+  const batch = decodeChildInteger(value.batch); const args = decodeChildJson(value.arguments); const toolCallId = value.toolCallId; const script = value.script;
+  if (batch === undefined || args === undefined || toolCallId !== undefined && typeof toolCallId !== "string" || script !== undefined && typeof script !== "string") return undefined;
+  return { batch, ...(toolCallId === undefined ? {} : { toolCallId }), arguments: args, ...(script === undefined ? {} : { script }) };
+}
+function decodeChildValidation(value: unknown): ProductionValidationReport | undefined {
+  if (!isObject(value)) return undefined;
+  const callIndex = decodeChildInteger(value.callIndex); const valid = decodeChildBoolean(value.valid); const errorCode = value.errorCode; const message = value.message;
+  if (callIndex === undefined || valid === undefined || errorCode !== undefined && !isWorkflowErrorCode(errorCode) || message !== undefined && typeof message !== "string") return undefined;
+  return { callIndex, valid, ...(errorCode === undefined ? {} : { errorCode }), ...(message === undefined ? {} : { message }) };
+}
+function decodeChildCriterion(value: unknown): CriterionResult | undefined {
+  if (!isObject(value)) return undefined;
+  const id = decodeChildString(value.id); const pass = decodeChildBoolean(value.pass); const evidence = decodeChildString(value.evidence);
+  return id === undefined || pass === undefined || evidence === undefined ? undefined : { id, pass, evidence };
+}
+function decodeChildStaticCandidate(value: unknown): StaticCandidateReport | undefined {
+  if (!isObject(value)) return undefined;
+  const callIndices = decodeChildNumberArray(value.callIndices); const criteria = decodeChildArray(value.criteria, decodeChildCriterion); const passed = decodeChildBoolean(value.passed);
+  return callIndices === undefined || criteria === undefined || passed === undefined ? undefined : { callIndices, criteria, passed };
+}
+function decodeChildSemanticJudge(value: unknown): SemanticJudgeReport | undefined {
+  if (!isObject(value)) return undefined;
+  const criteria = decodeChildArray(value.criteria, decodeChildCriterion); const usage = decodeChildUsage(value.usage); const raw = decodeChildString(value.raw);
+  return criteria === undefined || usage === undefined || raw === undefined ? undefined : { criteria, usage, raw };
+}
+function decodeChildMetrics(value: unknown): EvalMetrics | undefined {
+  if (!isObject(value)) return undefined;
+  const parentUsageThroughCandidate = value.parentUsageThroughCandidate === null ? null : decodeChildUsage(value.parentUsageThroughCandidate); const parentOutputTokensThroughCandidate = value.parentOutputTokensThroughCandidate === null ? null : decodeChildNumber(value.parentOutputTokensThroughCandidate); const nonWorkflowToolSequenceBeforeCandidate = decodeChildStringArray(value.nonWorkflowToolSequenceBeforeCandidate); const nonWorkflowToolCallCountBeforeCandidate = decodeChildInteger(value.nonWorkflowToolCallCountBeforeCandidate); const workflowCallCountBeforeCandidate = decodeChildInteger(value.workflowCallCountBeforeCandidate); const invalidWorkflowCallCount = decodeChildInteger(value.invalidWorkflowCallCount); const productionValidationErrorCodes = decodeChildStringArray(value.productionValidationErrorCodes); const candidateCallIndices = decodeChildNumberArray(value.candidateCallIndices); const staticCandidates = decodeChildArray(value.staticCandidates, decodeChildStaticCandidate); const semanticCriteria = decodeChildArray(value.semanticCriteria, decodeChildCriterion); const anyValidCandidate = decodeChildBoolean(value.anyValidCandidate); const requiredWorkflowCallCount = decodeChildInteger(value.requiredWorkflowCallCount); const surplusWorkflowCallCount = decodeChildInteger(value.surplusWorkflowCallCount);
+  if (parentUsageThroughCandidate === undefined && value.parentUsageThroughCandidate !== null || parentOutputTokensThroughCandidate === undefined && value.parentOutputTokensThroughCandidate !== null || nonWorkflowToolSequenceBeforeCandidate === undefined || nonWorkflowToolCallCountBeforeCandidate === undefined || workflowCallCountBeforeCandidate === undefined || invalidWorkflowCallCount === undefined || productionValidationErrorCodes === undefined || candidateCallIndices === undefined || staticCandidates === undefined || semanticCriteria === undefined || anyValidCandidate === undefined || requiredWorkflowCallCount === undefined || surplusWorkflowCallCount === undefined) return undefined;
+  if (parentUsageThroughCandidate === undefined || parentOutputTokensThroughCandidate === undefined) return undefined;
+  return { parentUsageThroughCandidate, parentOutputTokensThroughCandidate, nonWorkflowToolSequenceBeforeCandidate, nonWorkflowToolCallCountBeforeCandidate, workflowCallCountBeforeCandidate, invalidWorkflowCallCount, productionValidationErrorCodes, candidateCallIndices, staticCandidates, semanticCriteria, anyValidCandidate, requiredWorkflowCallCount, surplusWorkflowCallCount };
+}
+function decodeChildCleanup(value: unknown): EvalCaseResult["cleanup"] | undefined {
+  if (!isObject(value)) return undefined;
+  const processExited = decodeChildBoolean(value.processExited); const processGroupTerminated = decodeChildBoolean(value.processGroupTerminated); const tempRootRemoved = decodeChildBoolean(value.tempRootRemoved); const captureIdentityVerified = decodeChildBoolean(value.captureIdentityVerified); const realWorkflowAgentsLaunched = value.realWorkflowAgentsLaunched === null ? null : decodeChildNumber(value.realWorkflowAgentsLaunched);
+  if (processExited === undefined || processGroupTerminated === undefined || tempRootRemoved === undefined || captureIdentityVerified === undefined || realWorkflowAgentsLaunched === undefined && value.realWorkflowAgentsLaunched !== null) return undefined;
+  if (realWorkflowAgentsLaunched === undefined) return undefined;
+  return { processExited, processGroupTerminated, tempRootRemoved, captureIdentityVerified, realWorkflowAgentsLaunched };
+}
+function decodeEvalCaseResult(value: unknown): EvalCaseResult | undefined {
+  if (!isObject(value)) return undefined;
+  const id = decodeChildString(value.id); const status = value.status; const limits = value.limits; const workflows = decodeChildArray(value.workflows, decodeChildWorkflow); const productionValidation = decodeChildArray(value.productionValidation, decodeChildValidation); const semanticJudge = value.semanticJudge === undefined ? undefined : decodeChildSemanticJudge(value.semanticJudge); const metrics = decodeChildMetrics(value.metrics); const accounting = decodeChildUsage(value.accounting); const accountingTrustworthy = decodeChildBoolean(value.accountingTrustworthy); const diagnostics = decodeChildStringArray(value.diagnostics); const errors = decodeChildStringArray(value.errors); const cleanup = decodeChildCleanup(value.cleanup);
+  if (id === undefined || !isEvalCaseStatus(status) || !isObject(limits) || workflows === undefined || productionValidation === undefined || value.semanticJudge !== undefined && semanticJudge === undefined || metrics === undefined || accounting === undefined || accountingTrustworthy === undefined || diagnostics === undefined || errors === undefined || cleanup === undefined) return undefined;
+  const maxCost = decodeChildNumber(limits.maxCost); const timeoutMs = limits.timeoutMs; const decodedTimeoutMs = timeoutMs === undefined ? undefined : decodeChildNumber(timeoutMs);
+  if (maxCost === undefined || timeoutMs !== undefined && decodedTimeoutMs === undefined) return undefined;
+  const oracle = value.oracle === undefined ? undefined : decodeChildOracle(value.oracle);
+  if (value.oracle !== undefined && oracle === undefined) return undefined;
+  return { id, status, limits: { ...(decodedTimeoutMs === undefined ? {} : { timeoutMs: decodedTimeoutMs }), maxCost }, ...(oracle === undefined ? {} : { oracle }), workflows, productionValidation, ...(semanticJudge === undefined ? {} : { semanticJudge }), metrics, accounting, accountingTrustworthy, diagnostics, errors, cleanup };
+}
 export interface WorkflowEvalRunOptions { cases?: readonly WorkflowEvalCase[]; caseIds?: readonly string[]; model?: string; provider?: string; thinking?: string; piCommand?: string; timeoutMs?: number; spendCeiling?: number; artifactsDir?: string; onProgress?: (message: string) => void }
 
 function materializeCase(candidate: WorkflowEvalCase, model: string): WorkflowEvalCase {
-  return JSON.parse(JSON.stringify(candidate).replaceAll(EVAL_MODEL_TOKEN, model)) as WorkflowEvalCase;
+  const [materialized] = validateWorkflowEvalCases([JSON.parse(JSON.stringify(candidate).replaceAll(EVAL_MODEL_TOKEN, model))], "materialized case");
+  if (materialized === undefined) throw new Error("Failed to materialize workflow eval case.");
+  return materialized;
 }
 export interface WorkflowEvalRunResult { artifactDir: string; cases: readonly EvalCaseResult[]; spent: number; skipped: readonly string[] }
 
@@ -847,12 +965,13 @@ export async function runWorkflowEvals(options: WorkflowEvalRunOptions = {}): Pr
     const input: CaptureCaseInput = { case: { ...candidate, ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }) }, model, ...(options.provider ? { provider: options.provider } : {}), ...(options.thinking ? { thinking: options.thinking } : {}), ...(options.piCommand ? { piCommand: options.piCommand } : {}), maxCost: Math.min(candidate.maxCost, remaining) };
     const started = Date.now();
     options.onProgress?.(`[eval] ${candidate.id}: starting, budget $${input.maxCost.toFixed(2)}, timeout ${input.case.timeoutMs === undefined ? "off" : `${String(input.case.timeoutMs)}ms`}`);
-    const isolated = await runIsolatedProcess<EvalCaseResult>(input, { childPath: fileURLToPath(new URL("./workflow-evals-child.js", import.meta.url)), ...(input.case.timeoutMs === undefined ? {} : { timeoutMs: input.case.timeoutMs * 2 + CASE_PROCESS_GRACE_MS }), env: { PI_WORKFLOW_EVAL_SOURCE_AGENT_DIR: sourceAgentDir, PI_WORKFLOW_EVAL_SOURCE_PROJECT_DIR: process.cwd(), PI_WORKFLOW_EVAL_PROGRESS: options.onProgress ? "1" : "0" }, ...(options.onProgress ? { onStderr: (chunk: string) => { for (const line of chunk.trimEnd().split("\n")) if (line) options.onProgress?.(line); } } : {}) });
+    const isolated = await runIsolatedProcess(input, { childPath: fileURLToPath(new URL("./workflow-evals-child.js", import.meta.url)), ...(input.case.timeoutMs === undefined ? {} : { timeoutMs: input.case.timeoutMs * 2 + CASE_PROCESS_GRACE_MS }), env: { PI_WORKFLOW_EVAL_SOURCE_AGENT_DIR: sourceAgentDir, PI_WORKFLOW_EVAL_SOURCE_PROJECT_DIR: process.cwd(), PI_WORKFLOW_EVAL_PROGRESS: options.onProgress ? "1" : "0" }, ...(options.onProgress ? { onStderr: (chunk: string) => { for (const line of chunk.trimEnd().split("\n")) if (line) options.onProgress?.(line); } } : {}) });
+    const childResult = decodeEvalCaseResult(isolated.value);
     const childStderr = isolated.stderr.split("\n").filter((line) => !line.startsWith("[eval] ")).join("\n").trim();
     const diagnostics = [childStderr, isolated.error ? `Case process error: ${isolated.error}` : ""].filter(Boolean);
-    const trustworthy = Boolean(isolated.value) && !isolated.timedOut && isolated.exitCode === 0 && !isolated.error && Boolean(isolated.value?.accountingTrustworthy);
-    const untrustedStatus: EvalCaseResult["status"] = isolated.timedOut ? "timed_out" : isolated.value?.status === "timed_out" || isolated.value?.status === "budget_exceeded" ? isolated.value.status : "failed";
-    const base = isolated.value ?? resultFromFailure(input, untrustedStatus, [isolated.timedOut ? "Case process timed out." : isolated.error ? isolated.error : "Case process returned no artifact.", ...diagnostics], isolated.exitCode !== null, isolated.processGroupTerminated, diagnostics, input.maxCost);
+    const trustworthy = Boolean(childResult) && !isolated.timedOut && isolated.exitCode === 0 && !isolated.error && Boolean(childResult?.accountingTrustworthy);
+    const untrustedStatus: EvalCaseResult["status"] = isolated.timedOut ? "timed_out" : childResult?.status === "timed_out" || childResult?.status === "budget_exceeded" ? childResult.status : "failed";
+    const base = childResult ?? resultFromFailure(input, untrustedStatus, [isolated.timedOut ? "Case process timed out." : isolated.error ? isolated.error : "Case process returned no artifact.", ...diagnostics], isolated.exitCode !== null, isolated.processGroupTerminated, diagnostics, input.maxCost);
     const result: EvalCaseResult = { ...base, ...(trustworthy ? {} : { status: untrustedStatus, accounting: { ...base.accounting, cost: input.maxCost }, accountingTrustworthy: false }), diagnostics: [...base.diagnostics, ...diagnostics] };
     spent += result.accounting.cost;
     options.onProgress?.(`[eval] ${candidate.id}: ${result.status} after ${((Date.now() - started) / 1000).toFixed(1)}s, $${result.accounting.cost.toFixed(4)}, ${String(result.accounting.totalTokens)} tokens`);

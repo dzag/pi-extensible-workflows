@@ -22,7 +22,7 @@ return await agent(
 );
 ```
 
-Await `parallel(...)` or `pipeline(...)` results before interpolation. Runs are backgrounded by default; set the tool-call `foreground: true` when the caller must wait for the final value.
+Await `parallel(...)` or `pipeline(...)` results before interpolation. Runs are backgrounded by default; set the tool-call `foreground: true` when the caller must wait for the final value. Use `/workflow` to open the picker and select a run for contextual actions such as moving an attached foreground workflow to the background.
 
 ## Runtime and safety rules
 
@@ -134,7 +134,7 @@ Registered extension functions receive `withWorktree` in context and can compose
 ## Rules
 
 - Use `log(messageString)` for brief operator status.
-- A role owns execution policy: with `role`, do not set `model`, `thinking`, or `tools`; only task options such as `outputSchema`, retries, timeout, or a `withWorktree` scope may accompany it.
+- A role can be a name string or an object with a required `name` and frontmatter overrides. Omitted fields inherit from the role file, `null` unsets them, and explicit values replace them. Keep top-level `model`, `thinking`, and `tools` out of calls with a role; put overrides inside the role object.
 - Use `parallel()` for independent tasks with different flows and `pipeline()` when every keyed item follows the same ordered stages; do not duplicate identical chains in `parallel()`. Signatures are `parallel(operationName, tasksRecord)` and `pipeline(operationName, itemsRecord, stagesRecord)`; keys are stable task, item, and stage names.
 - Preserve item metadata in workflow code between pipeline stages instead of making agents echo it through `outputSchema`.
 - Use a JavaScript loop for repeated work; each direct `agent(...)` call gets deterministic call-site and occurrence identity.

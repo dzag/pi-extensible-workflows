@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { isObject } from "./utils.js";
 
 export type HerdrPaneAction = "live";
 export type HerdrAgentState = "idle" | "working" | "blocked" | "unknown";
@@ -25,7 +26,7 @@ export function herdrAvailable(env: NodeJS.ProcessEnv = process.env): boolean { 
 
 function shellQuote(value: string): string { return `'${value.replace(/'/g, `'\\''`)}'`; }
 function json(value: string): unknown { return JSON.parse(value) as unknown; }
-function record(value: unknown): Record<string, unknown> | undefined { return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
+function record(value: unknown): Record<string, unknown> | undefined { return isObject(value) ? value : undefined; }
 function paneLayout(value: unknown, targetPane: string): { width: number; height: number } {
   const root = record(value);
   const result = record(root?.result);
@@ -117,16 +118,20 @@ function hasPiProcess(value: unknown, originatingEntrypoint?: string): boolean {
     const name = process?.name;
     const argv = process?.argv;
     const commandLine = process?.cmdline;
-    if (originatingEntrypoint) return Array.isArray(argv) && argv.some((value) => value === originatingEntrypoint) || typeof commandLine === "string" && commandLine.includes(originatingEntrypoint);
+    if (originatingEntrypoint) {
+      if (Array.isArray(argv) && argv.some((value) => value === originatingEntrypoint) || typeof commandLine === "string" && commandLine.includes(originatingEntrypoint)) return true;
+      return name === "pi" || Array.isArray(argv) && argv[0] === "pi";
+    }
     return name === "pi" || Array.isArray(argv) && argv[0] === "pi" || typeof commandLine === "string" && commandLine.includes("/bin/pi");
   });
 }
+function isHerdrStatus(value: unknown): value is HerdrAgentStatus { return value === "idle" || value === "working" || value === "blocked" || value === "unknown" || value === "done"; }
 function herdrAgentStatus(value: unknown): HerdrPaneStatus | undefined {
   const result = record(record(value)?.result);
   const agent = record(result?.agent);
   const rawState = agent?.agent_status;
   if (typeof rawState !== "string") return undefined;
-  const state: HerdrAgentStatus = ["idle", "working", "blocked", "done"].includes(rawState) ? rawState as HerdrAgentStatus : "unknown";
+  const state: HerdrAgentStatus = isHerdrStatus(rawState) ? rawState : "unknown";
   return { state };
 }
 export async function waitForHerdrPane(paneId: string, runner: HerdrCommandRunner = herdrCommandRunner, options: { signal?: AbortSignal; intervalMs?: number; startupTimeoutMs?: number; originatingEntrypoint?: string; onStatus?: (state: HerdrAgentStatus) => void | Promise<void> } = {}): Promise<"closed" | "exited" | "idle" | "aborted"> {

@@ -27,7 +27,8 @@ test("the repository keeps the public package in the core workspace", () => {
     "./utils": "./dist/src/utils.js",
     "./budget": "./dist/src/budget.js",
     "./validation": "./dist/src/validation.js",
-    "./registry": "./dist/src/registry.js"
+    "./registry": "./dist/src/registry.js",
+    "./runtime": "./dist/src/runtime/index.js"
   });
   assert.equal(core.bin, undefined);
   assert.equal(cli.name, "@piewf/cli");

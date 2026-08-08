@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { validateBudget } from "pi-extensible-workflows";
 import { RUN_STATES, type RunState } from "pi-extensible-workflows";
-import { jsonValue, validateModelAliases } from "pi-extensible-workflows";
+import { isNodeError, jsonValue, validateModelAliases } from "pi-extensible-workflows";
 import { validateSchema } from "pi-extensible-workflows";
 import { acquireSessionLease, hasLiveSessionLease, projectSessionsDirectory, RunStore, type PersistedRun, type SessionLease } from "pi-extensible-workflows/persistence";
 
@@ -29,27 +29,59 @@ type StoredRun = { sessionId: string; runId: string; store: RunStore; run: Persi
 type SessionScan = { sessionId: string; path: string; runs: readonly StoredRun[]; liveLease: boolean };
 type SessionPlan = { candidates: readonly StoredRun[]; skipped: readonly CleanupRunResult[] };
 
+type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+type AgentState = "queued" | "running" | "waiting_for_child" | "paused" | "retrying" | "completed" | "failed" | "cancelled";
+type SchedulerState = "queued" | "running" | "waiting_for_child" | "paused" | "retrying" | "completed" | "failed" | "cancelled";
+type ToolCallState = "running" | "completed" | "failed";
+type ActivityKind = "reasoning" | "tool" | "text";
+type ValidatedModel = { provider: string; model: string; thinking?: ThinkingLevel | undefined };
+type ValidatedAccounting = { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
+type ValidatedResourceExclusions = { skills?: string[] | undefined; extensions?: string[] | undefined };
+type ValidatedRole = string | { name: string; model?: string | null | undefined; description?: string | null | undefined; thinking?: ThinkingLevel | null | undefined; tools?: string[] | null | undefined; overrideSystemPrompt?: boolean | null | undefined; contextFiles?: string[] | null | undefined; disabledAgentResources?: ValidatedResourceExclusions | null | undefined };
+type ValidatedScheduledOptions = { label: string; cwd: string; tools: string[] };
+type ValidatedSessionReference = { transport: string; sessionId: string; locator?: unknown };
+type ValidatedAgentSetup = { hookNames: string[]; model: ValidatedModel; tools: string[]; cwd: string };
+type ValidatedAgent = { id: string; name: string; path: string; state: AgentState; parentId?: string | undefined };
+type ValidatedUsage = { tokens: number; costUsd: number; durationMs: number; agentLaunches: number };
+type ValidatedRunRecord = { id: string; workflowName: string; cwd: string; sessionId: string; state: RunState; agents: ValidatedAgent[]; agentSessions: ValidatedSessionReference[] };
+type ValidatedOwnershipRecord = { id: string; label: string; state: SchedulerState; parentId?: string | undefined; prompt?: string | undefined; options: ValidatedScheduledOptions };
 function object(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function isList(value: unknown): value is unknown[] { return Array.isArray(value); }
+function isThinking(value: unknown): value is ThinkingLevel { return ["off", "minimal", "low", "medium", "high", "xhigh", "max"].some((candidate) => candidate === value); }
+function isRunState(value: unknown): value is RunState { return RUN_STATES.some((candidate) => candidate === value); }
+function isAgentState(value: unknown): value is AgentState { return typeof value === "string" && AGENT_STATES.has(value); }
+function isSchedulerState(value: unknown): value is SchedulerState { return typeof value === "string" && SCHEDULER_STATES.has(value); }
+function isToolCallState(value: unknown): value is ToolCallState { return ["running", "completed", "failed"].some((candidate) => candidate === value); }
+function isActivityKind(value: unknown): value is ActivityKind { return ["reasoning", "tool", "text"].some((candidate) => candidate === value); }
 function textError(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function positiveDays(value: number): number { if (!Number.isSafeInteger(value) || value < 1 || !Number.isFinite(value * DAY_MS)) throw new Error("older-than-days must be a positive integer"); return value; }
 function runItem(entry: StoredRun, action: CleanupRunResult["action"], reason?: string): CleanupRunResult { return { sessionId: entry.sessionId, runId: entry.runId, action, state: entry.run.state, stateMtimeMs: entry.stateMtimeMs, path: entry.store.directory, ...(reason ? { reason } : {}) }; }
 function sameNames(left: readonly string[], right: readonly string[]): boolean { return left.length === right.length && left.every((value, index) => value === right[index]); }
 async function jsonFile(path: string): Promise<unknown> { return JSON.parse(await readFile(path, "utf8")) as unknown; }
 async function requiredFile(path: string): Promise<void> { const info = await lstat(path); if (!info.isFile()) throw new Error(`Required artifact is not a regular file: ${path}`); }
-function stringList(value: unknown, label: string, nonEmpty = false): void { if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || (nonEmpty && !item))) throw new Error(`${label} is invalid`); }
-function optionalString(value: unknown, label: string): void { if (value !== undefined && typeof value !== "string") throw new Error(`${label} is invalid`); }
-function nonNegativeInteger(value: unknown, label: string): void { if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error(`${label} is invalid`); }
-function positiveInteger(value: unknown, label: string): void { if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error(`${label} is invalid`); }
-function finiteNumber(value: unknown, label: string): void { if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error(`${label} is invalid`); }
-function model(value: unknown, label: string): void { if (!object(value) || typeof value.provider !== "string" || !value.provider || typeof value.model !== "string" || !value.model || (value.thinking !== undefined && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(value.thinking as string))) throw new Error(`${label} is invalid`); }
-function accounting(value: unknown, label: string): void { if (!object(value)) throw new Error(`${label} is invalid`); for (const key of ["input", "output", "cacheRead", "cacheWrite", "cost"]) finiteNumber(value[key], `${label}.${key}`); }
-function resourceExclusions(value: unknown, label: string): void { if (value === undefined) return; if (!object(value)) throw new Error(`${label} is invalid`); if (value.skills !== undefined) stringList(value.skills, `${label}.skills`); if (value.extensions !== undefined) stringList(value.extensions, `${label}.extensions`); }
-function agentDefinition(value: unknown, label: string): void { if (!object(value)) throw new Error(`${label} is invalid`); optionalString(value.prompt, `${label}.prompt`); optionalString(value.description, `${label}.description`); optionalString(value.model, `${label}.model`); if (value.thinking !== undefined && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(value.thinking as string)) throw new Error(`${label}.thinking is invalid`); if (value.tools !== undefined) stringList(value.tools, `${label}.tools`); resourceExclusions(value.disabledAgentResources, `${label}.disabledAgentResources`); }
-function validateScheduledOptions(value: unknown, label: string): void { if (!object(value) || typeof value.label !== "string" || !value.label || typeof value.cwd !== "string" || !value.cwd) throw new Error(`${label} is invalid`); optionalString(value.requestedLabel, `${label}.requestedLabel`); optionalString(value.parentBreadcrumb, `${label}.parentBreadcrumb`); stringList(value.tools, `${label}.tools`); optionalString(value.worktreeOwner, `${label}.worktreeOwner`); optionalString(value.model, `${label}.model`); if (value.thinking !== undefined && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(value.thinking as string)) throw new Error(`${label}.thinking is invalid`); optionalString(value.role, `${label}.role`); if (value.schema !== undefined) validateSchema(value.schema, `${label}.schema`); if (value.retries !== undefined) nonNegativeInteger(value.retries, `${label}.retries`); if (value.timeoutMs !== undefined && value.timeoutMs !== null) positiveInteger(value.timeoutMs, `${label}.timeoutMs`); if (value.agentOptions !== undefined && (!object(value.agentOptions) || !jsonValue(value.agentOptions))) throw new Error(`${label}.agentOptions is invalid`); if (value.agentIdentity !== undefined) { if (!object(value.agentIdentity) || !Array.isArray(value.agentIdentity.structuralPath) || value.agentIdentity.structuralPath.some((part) => typeof part !== "string") || typeof value.agentIdentity.callSite !== "string") throw new Error(`${label}.agentIdentity is invalid`); positiveInteger(value.agentIdentity.occurrence, `${label}.agentIdentity.occurrence`); optionalString(value.agentIdentity.parentBreadcrumb, `${label}.agentIdentity.parentBreadcrumb`); optionalString(value.agentIdentity.worktreeOwner, `${label}.agentIdentity.worktreeOwner`); } }
-function validateSessionReference(value: unknown, label: string): void {
-  if (!object(value) || typeof value.transport !== "string" || !value.transport || typeof value.sessionId !== "string" || !value.sessionId || (value.locator !== undefined && !jsonValue(value.locator))) throw new Error(`${label} is invalid`);
+function stringList(value: unknown, label: string, nonEmpty = false): asserts value is string[] { if (!isList(value) || value.some((item) => typeof item !== "string" || (nonEmpty && !item))) throw new Error(`${label} is invalid`); }
+function optionalString(value: unknown, label: string): asserts value is string | undefined { if (value !== undefined && typeof value !== "string") throw new Error(`${label} is invalid`); }
+function nonNegativeInteger(value: unknown, label: string): asserts value is number { if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error(`${label} is invalid`); }
+function positiveInteger(value: unknown, label: string): asserts value is number { if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) throw new Error(`${label} is invalid`); }
+function finiteNumber(value: unknown, label: string): asserts value is number { if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error(`${label} is invalid`); }
+function model(value: unknown, label: string): asserts value is ValidatedModel { if (!object(value) || typeof value.provider !== "string" || !value.provider || typeof value.model !== "string" || !value.model || (value.thinking !== undefined && !isThinking(value.thinking))) throw new Error(`${label} is invalid`); }
+function accounting(value: unknown, label: string): asserts value is ValidatedAccounting { if (!object(value)) throw new Error(`${label} is invalid`); for (const key of ["input", "output", "cacheRead", "cacheWrite", "cost"]) finiteNumber(value[key], `${label}.${key}`); }
+function resourceExclusions(value: unknown, label: string): asserts value is ValidatedResourceExclusions | undefined { if (value === undefined) return; if (!object(value)) throw new Error(`${label} is invalid`); if (value.skills !== undefined) stringList(value.skills, `${label}.skills`); if (value.extensions !== undefined) stringList(value.extensions, `${label}.extensions`); }
+function agentDefinition(value: unknown, label: string): asserts value is Record<string, unknown> { if (!object(value)) throw new Error(`${label} is invalid`); optionalString(value.prompt, `${label}.prompt`); optionalString(value.description, `${label}.description`); optionalString(value.model, `${label}.model`); if (value.thinking !== undefined && !isThinking(value.thinking)) throw new Error(`${label}.thinking is invalid`); if (value.tools !== undefined) stringList(value.tools, `${label}.tools`); resourceExclusions(value.disabledAgentResources, `${label}.disabledAgentResources`); }
+function optionalRole(value: unknown, label: string): asserts value is ValidatedRole | undefined {
+  if (value === undefined) return;
+  if (typeof value === "string") { if (!value.trim()) throw new Error(`${label} is invalid`); return; }
+  if (!object(value) || typeof value.name !== "string" || !value.name.trim()) throw new Error(`${label} is invalid`);
+  for (const key of ["model", "description"]) if (value[key] !== undefined && value[key] !== null && typeof value[key] !== "string") throw new Error(`${label}.${key} is invalid`);
+  if (value.thinking !== undefined && value.thinking !== null && !isThinking(value.thinking)) throw new Error(`${label}.thinking is invalid`);
+  if (value.tools !== undefined && value.tools !== null) stringList(value.tools, `${label}.tools`);
+  if (value.overrideSystemPrompt !== undefined && value.overrideSystemPrompt !== null && typeof value.overrideSystemPrompt !== "boolean") throw new Error(`${label}.overrideSystemPrompt is invalid`);
+  if (value.contextFiles !== undefined && value.contextFiles !== null) stringList(value.contextFiles, `${label}.contextFiles`);
+  if (value.disabledAgentResources !== undefined && value.disabledAgentResources !== null) resourceExclusions(value.disabledAgentResources, `${label}.disabledAgentResources`);
 }
-function validateAgentSetup(value: unknown, label: string): void {
+function validateScheduledOptions(value: unknown, label: string): asserts value is ValidatedScheduledOptions { if (!object(value) || typeof value.label !== "string" || !value.label || typeof value.cwd !== "string" || !value.cwd) throw new Error(`${label} is invalid`); optionalString(value.requestedLabel, `${label}.requestedLabel`); optionalString(value.parentBreadcrumb, `${label}.parentBreadcrumb`); stringList(value.tools, `${label}.tools`); optionalString(value.worktreeOwner, `${label}.worktreeOwner`); optionalString(value.model, `${label}.model`); if (value.thinking !== undefined && !isThinking(value.thinking)) throw new Error(`${label}.thinking is invalid`); optionalRole(value.role, `${label}.role`); if (value.schema !== undefined) validateSchema(value.schema, `${label}.schema`); if (value.retries !== undefined) nonNegativeInteger(value.retries, `${label}.retries`); if (value.timeoutMs !== undefined && value.timeoutMs !== null) positiveInteger(value.timeoutMs, `${label}.timeoutMs`); if (value.agentOptions !== undefined && (!object(value.agentOptions) || !jsonValue(value.agentOptions))) throw new Error(`${label}.agentOptions is invalid`); if (value.agentIdentity !== undefined) { if (!object(value.agentIdentity) || !isList(value.agentIdentity.structuralPath) || value.agentIdentity.structuralPath.some((part) => typeof part !== "string") || typeof value.agentIdentity.callSite !== "string") throw new Error(`${label}.agentIdentity is invalid`); positiveInteger(value.agentIdentity.occurrence, `${label}.agentIdentity.occurrence`); optionalString(value.agentIdentity.parentBreadcrumb, `${label}.agentIdentity.parentBreadcrumb`); optionalString(value.agentIdentity.worktreeOwner, `${label}.agentIdentity.worktreeOwner`); } }
+function validateSessionReference(value: unknown, label: string): asserts value is ValidatedSessionReference { if (!object(value) || typeof value.transport !== "string" || !value.transport || typeof value.sessionId !== "string" || !value.sessionId || (value.locator !== undefined && !jsonValue(value.locator))) throw new Error(`${label} is invalid`); }
+function validateAgentSetup(value: unknown, label: string): asserts value is ValidatedAgentSetup {
   if (!object(value)) throw new Error(`${label} is invalid`);
   stringList(value.hookNames, `${label}.hookNames`);
   model(value.model, `${label}.model`);
@@ -57,78 +89,85 @@ function validateAgentSetup(value: unknown, label: string): void {
   if (typeof value.cwd !== "string" || !value.cwd) throw new Error(`${label}.cwd is invalid`);
   resourceExclusions(value.disabledAgentResources, `${label}.disabledAgentResources`);
 }
-function validateAgent(value: unknown, label: string): void {
-  if (!object(value) || typeof value.id !== "string" || !value.id || typeof value.name !== "string" || !value.name || typeof value.path !== "string" || !value.path || typeof value.state !== "string" || !AGENT_STATES.has(value.state)) throw new Error(`${label} is invalid`);
+function validateAgent(value: unknown, label: string): asserts value is ValidatedAgent {
+  if (!object(value) || typeof value.id !== "string" || !value.id || typeof value.name !== "string" || !value.name || typeof value.path !== "string" || !value.path || !isAgentState(value.state)) throw new Error(`${label} is invalid`);
   optionalString(value.systemPrompt, `${label}.systemPrompt`); optionalString(value.prompt, `${label}.prompt`); optionalString(value.label, `${label}.label`); optionalString(value.parentId, `${label}.parentId`);
   if (value.structuralPath !== undefined) stringList(value.structuralPath, `${label}.structuralPath`); optionalString(value.parentBreadcrumb, `${label}.parentBreadcrumb`); optionalString(value.worktreeOwner, `${label}.worktreeOwner`); optionalString(value.role, `${label}.role`); optionalString(value.requestedModel, `${label}.requestedModel`);
   model(value.model, `${label}.model`); stringList(value.tools, `${label}.tools`); nonNegativeInteger(value.attempts, `${label}.attempts`);
   if (value.attemptDetails !== undefined) {
-    if (!Array.isArray(value.attemptDetails)) throw new Error(`${label}.attemptDetails is invalid`);
+    if (!isList(value.attemptDetails)) throw new Error(`${label}.attemptDetails is invalid`);
     for (const [index, attempt] of value.attemptDetails.entries()) {
       const at = `${label}.attemptDetails[${String(index)}]`;
       if (!object(attempt) || !Number.isSafeInteger(attempt.attempt) || Number(attempt.attempt) < 1 || typeof attempt.transport !== "string" || !attempt.transport || Object.hasOwn(attempt, "sessionId") || Object.hasOwn(attempt, "sessionFile")) throw new Error(`${at} is invalid`);
       validateAgentSetup(attempt.setup, `${at}.setup`);
-      if (attempt.session !== undefined) { validateSessionReference(attempt.session, `${at}.session`); if ((attempt.session as Record<string, unknown>).transport !== attempt.transport) throw new Error(`${at}.session transport does not match attempt transport`); }
+      if (attempt.session !== undefined) { const session = attempt.session; validateSessionReference(session, `${at}.session`); if (session.transport !== attempt.transport) throw new Error(`${at}.session transport does not match attempt transport`); }
       accounting(attempt.accounting, `${at}.accounting`);
       if (attempt.error !== undefined && (!object(attempt.error) || typeof attempt.error.code !== "string" || typeof attempt.error.message !== "string")) throw new Error(`${at}.error is invalid`);
     }
   }
   if (value.accounting !== undefined) accounting(value.accounting, `${label}.accounting`);
-  if (value.toolCalls !== undefined) { if (!Array.isArray(value.toolCalls)) throw new Error(`${label}.toolCalls is invalid`); for (const [index, call] of value.toolCalls.entries()) if (!object(call) || typeof call.id !== "string" || !call.id || typeof call.name !== "string" || !call.name || !["running", "completed", "failed"].includes(call.state as string)) throw new Error(`${label}.toolCalls[${String(index)}] is invalid`); }
-  if (value.activity !== undefined) { if (!object(value.activity) || !["reasoning", "tool", "text"].includes(value.activity.kind as string) || typeof value.activity.text !== "string") throw new Error(`${label}.activity is invalid`); }
+  if (value.toolCalls !== undefined) { if (!isList(value.toolCalls)) throw new Error(`${label}.toolCalls is invalid`); for (const [index, call] of value.toolCalls.entries()) if (!object(call) || typeof call.id !== "string" || !call.id || typeof call.name !== "string" || !call.name || !isToolCallState(call.state)) throw new Error(`${label}.toolCalls[${String(index)}] is invalid`); }
+  if (value.activity !== undefined) { if (!object(value.activity) || !isActivityKind(value.activity.kind) || typeof value.activity.text !== "string") throw new Error(`${label}.activity is invalid`); }
   if (value.lastEventAt !== undefined) finiteNumber(value.lastEventAt, `${label}.lastEventAt`);
 }
-function validateUsage(value: unknown, label: string): void { if (!object(value)) throw new Error(`${label} is invalid`); for (const key of ["tokens", "costUsd", "durationMs", "agentLaunches"]) finiteNumber(value[key], `${label}.${key}`); }
-function validateBudgetEvents(value: unknown): void { if (value === undefined) return; if (!Array.isArray(value)) throw new Error("Persisted budget events are invalid"); for (const [index, event] of value.entries()) { const label = `budgetEvents[${String(index)}]`; if (!object(event) || typeof event.type !== "string" || !BUDGET_EVENT_TYPES.has(event.type) || !Number.isSafeInteger(event.budgetVersion) || Number(event.budgetVersion) < 1 || !Array.isArray(event.dimensions) || event.dimensions.some((dimension) => typeof dimension !== "string" || !BUDGET_DIMENSIONS.has(dimension)) || typeof event.at !== "number" || !Number.isFinite(event.at) || event.limits === undefined) throw new Error(`${label} is invalid`); validateUsage(event.usage, `${label}.usage`); validateBudget(event.limits); } }
-function validateRunRecord(run: PersistedRun): void {
-  const value = run as unknown;
-  if (!object(value) || typeof value.id !== "string" || !value.id || typeof value.workflowName !== "string" || !value.workflowName || typeof value.cwd !== "string" || !value.cwd || typeof value.sessionId !== "string" || !value.sessionId || !RUN_STATES.includes(value.state as RunState) || !Array.isArray(value.agents) || !Array.isArray(value.agentSessions) || Object.hasOwn(value, "nativeSessions")) throw new Error("Persisted run state is invalid");
-  const agents = value.agents as Record<string, unknown>[];
-  agents.forEach((agent, index) => { validateAgent(agent, `agents[${String(index)}]`); });
+function validateUsage(value: unknown, label: string): asserts value is ValidatedUsage { if (!object(value)) throw new Error(`${label} is invalid`); for (const key of ["tokens", "costUsd", "durationMs", "agentLaunches"]) finiteNumber(value[key], `${label}.${key}`); }
+function validateBudgetEvents(value: unknown): void { if (value === undefined) return; if (!isList(value)) throw new Error("Persisted budget events are invalid"); for (const [index, event] of value.entries()) { const label = `budgetEvents[${String(index)}]`; if (!object(event) || typeof event.type !== "string" || !BUDGET_EVENT_TYPES.has(event.type) || !Number.isSafeInteger(event.budgetVersion) || Number(event.budgetVersion) < 1 || !isList(event.dimensions) || event.dimensions.some((dimension) => typeof dimension !== "string" || !BUDGET_DIMENSIONS.has(dimension)) || typeof event.at !== "number" || !Number.isFinite(event.at) || event.limits === undefined) throw new Error(`${label} is invalid`); validateUsage(event.usage, `${label}.usage`); validateBudget(event.limits); } }
+function validateRunRecord(value: unknown): asserts value is ValidatedRunRecord {
+  if (!object(value) || typeof value.id !== "string" || !value.id || typeof value.workflowName !== "string" || !value.workflowName || typeof value.cwd !== "string" || !value.cwd || typeof value.sessionId !== "string" || !value.sessionId || !isRunState(value.state) || !isList(value.agents) || !isList(value.agentSessions) || Object.hasOwn(value, "nativeSessions")) throw new Error("Persisted run state is invalid");
+  const agents = value.agents.map((agent, index) => { validateAgent(agent, `agents[${String(index)}]`); return agent; });
   const agentIds = new Set<string>();
   for (const agent of agents) {
-    const id = agent.id as string;
+    const id = agent.id;
     if (agentIds.has(id)) throw new Error(`Duplicate persisted agent ${id}`);
     agentIds.add(id);
   }
   for (const agent of agents) {
     const parentId = agent.parentId;
-    if (parentId !== undefined && (typeof parentId !== "string" || !agentIds.has(parentId))) throw new Error("Persisted agent has a missing parent");
+    if (parentId !== undefined && !agentIds.has(parentId)) throw new Error("Persisted agent has a missing parent");
     const seen = new Set<string>();
-    let parent = typeof parentId === "string" ? parentId : undefined;
+    let parent = parentId;
     while (parent) {
       if (seen.has(parent)) throw new Error("Persisted agent parent cycle");
       seen.add(parent);
       const parentAgent = agents.find((candidate) => candidate.id === parent);
-      parent = typeof parentAgent?.parentId === "string" ? parentAgent.parentId : undefined;
+      parent = parentAgent?.parentId;
     }
   }
-  const sessions = value.agentSessions as unknown[];
-  for (const [index, session] of sessions.entries()) validateSessionReference(session, `agentSessions[${String(index)}]`);
+  for (const [index, session] of value.agentSessions.entries()) validateSessionReference(session, `agentSessions[${String(index)}]`);
   optionalString(value.parentRunId, "Persisted parent run");
   optionalString(value.failedAt, "Persisted failed path");
-  if (value.retry !== undefined) {
-    if (!object(value.retry) || typeof value.retry.sourceRunId !== "string" || !value.retry.sourceRunId || typeof value.retry.lineageRootRunId !== "string" || !value.retry.lineageRootRunId) throw new Error("Persisted retry provenance is invalid");
-    const sourceRunId = value.retry.sourceRunId;
-    stringList(value.retry.completedPaths, "Persisted retry completed paths");
-    stringList(value.retry.incompletePaths, "Persisted retry incomplete paths");
-    stringList(value.retry.namedWorktrees, "Persisted retry named worktrees");
+  const retry = value.retry;
+  if (retry !== undefined) {
+    if (!object(retry) || typeof retry.sourceRunId !== "string" || !retry.sourceRunId || typeof retry.lineageRootRunId !== "string" || !retry.lineageRootRunId) throw new Error("Persisted retry provenance is invalid");
+    const sourceRunId = retry.sourceRunId;
+    stringList(retry.completedPaths, "Persisted retry completed paths");
+    stringList(retry.incompletePaths, "Persisted retry incomplete paths");
+    stringList(retry.namedWorktrees, "Persisted retry named worktrees");
     if (value.parentRunId !== sourceRunId) throw new Error("Persisted retry parent does not match its source");
   }
   optionalString(value.phase, "Persisted phase");
   if (value.phaseHistory !== undefined) {
-    if (!Array.isArray(value.phaseHistory)) throw new Error("Persisted phase history is invalid");
+    if (!isList(value.phaseHistory)) throw new Error("Persisted phase history is invalid");
     for (const phase of value.phaseHistory) { if (!object(phase) || typeof phase.phase !== "string" || !phase.phase) throw new Error("Persisted phase history is invalid"); nonNegativeInteger(phase.afterAgent, "Persisted phase history afterAgent"); }
+  }
+  if (value.phaseHistoryIndex !== undefined) nonNegativeInteger(value.phaseHistoryIndex, "Persisted phase history index");
+  if (value.activeShellsByPhase !== undefined) {
+    if (!isList(value.activeShellsByPhase)) throw new Error("Persisted phase shell activity is invalid");
+    for (const activity of value.activeShellsByPhase) {
+      if (!object(activity) || !Number.isSafeInteger(activity.phaseIndex) || Number(activity.phaseIndex) < -1) throw new Error("Persisted phase shell activity is invalid");
+      positiveInteger(activity.active, "Persisted phase shell activity count");
+      finiteNumber(activity.startedAt, "Persisted phase shell activity start");
+    }
   }
   if (value.error !== undefined && (!object(value.error) || typeof value.error.code !== "string" || typeof value.error.message !== "string")) throw new Error("Persisted run error is invalid");
   validateBudget(value.budget);
   if (value.budgetVersion !== undefined) positiveInteger(value.budgetVersion, "Persisted budget version");
   if (value.usage !== undefined) validateUsage(value.usage, "Persisted usage");
   validateBudgetEvents(value.budgetEvents);
-  if (value.events !== undefined) { if (!Array.isArray(value.events)) throw new Error("Persisted run events are invalid"); for (const event of value.events) if (!object(event) || typeof event.type !== "string" || typeof event.message !== "string") throw new Error("Persisted run event is invalid"); }
+  if (value.events !== undefined) { if (!isList(value.events)) throw new Error("Persisted run events are invalid"); for (const event of value.events) if (!object(event) || typeof event.type !== "string" || typeof event.message !== "string") throw new Error("Persisted run event is invalid"); }
 }
 function validateSnapshot(snapshot: unknown): void {
-  if (!object(snapshot) || typeof snapshot.script !== "string" || !snapshot.script || !jsonValue(snapshot.args) || !object(snapshot.metadata) || typeof snapshot.metadata.name !== "string" || !snapshot.metadata.name || (snapshot.metadata.description !== undefined && typeof snapshot.metadata.description !== "string") || !object(snapshot.settings) || !Number.isSafeInteger(snapshot.settings.concurrency) || Number(snapshot.settings.concurrency) < 1 || Number(snapshot.settings.concurrency) > 16 || !Array.isArray(snapshot.models) || snapshot.models.some((modelName) => typeof modelName !== "string") || !Array.isArray(snapshot.tools) || snapshot.tools.some((tool) => typeof tool !== "string") || !Array.isArray(snapshot.agentTypes) || snapshot.agentTypes.some((agentType) => typeof agentType !== "string") || !Array.isArray(snapshot.schemas)) throw new Error("Persisted launch snapshot is invalid");
+  if (!object(snapshot) || typeof snapshot.script !== "string" || !snapshot.script || !jsonValue(snapshot.args) || !object(snapshot.metadata) || typeof snapshot.metadata.name !== "string" || !snapshot.metadata.name || (snapshot.metadata.description !== undefined && typeof snapshot.metadata.description !== "string") || !object(snapshot.settings) || !Number.isSafeInteger(snapshot.settings.concurrency) || Number(snapshot.settings.concurrency) < 1 || Number(snapshot.settings.concurrency) > 16 || !isList(snapshot.models) || snapshot.models.some((modelName) => typeof modelName !== "string") || !isList(snapshot.tools) || snapshot.tools.some((tool) => typeof tool !== "string") || !isList(snapshot.agentTypes) || snapshot.agentTypes.some((agentType) => typeof agentType !== "string") || !isList(snapshot.schemas)) throw new Error("Persisted launch snapshot is invalid");
   if (snapshot.identityVersion !== undefined) positiveInteger(snapshot.identityVersion, "Persisted snapshot identity version");
   optionalString(snapshot.settingsPath, "Persisted snapshot settings path");
   if (snapshot.settingsSources !== undefined) { if (!object(snapshot.settingsSources) || typeof snapshot.settingsSources.concurrency !== "string" || typeof snapshot.settingsSources.modelAliases !== "string" || typeof snapshot.settingsSources.disabledAgentResources !== "string") throw new Error("Persisted snapshot settings sources are invalid"); }
@@ -145,7 +184,7 @@ function validateJournal(value: unknown): void { if (!object(value) || !object(v
 async function validateSystemPrompts(store: RunStore): Promise<void> {
   const value = await jsonFile(store.systemPromptPath());
   if (object(value) && value.version === 2) { await store.systemPrompts(); return; }
-  if (!object(value) || value.version !== 1 || !Array.isArray(value.entries)) throw new Error("Persisted system prompts are invalid");
+  if (!object(value) || value.version !== 1 || !isList(value.entries)) throw new Error("Persisted system prompts are invalid");
   for (const [index, entry] of value.entries.entries()) {
     const label = `system-prompts.entries[${String(index)}]`;
     if (!object(entry) || typeof entry.sessionId !== "string" || !entry.sessionId || !Number.isSafeInteger(entry.attempt) || Number(entry.attempt) < 1 || !Number.isSafeInteger(entry.turn) || Number(entry.turn) < 1 || typeof entry.prompt !== "string" || typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256) || createHash("sha256").update(entry.prompt).digest("hex") !== entry.sha256) throw new Error(`${label} is invalid`);
@@ -159,28 +198,31 @@ async function validateRunDirectory(store: RunStore): Promise<void> {
     if (!entry.isFile() || entry.isSymbolicLink()) throw new Error(`Run artifact is not a regular file: ${join(store.directory, entry.name)}`);
   }
 }
+function validateOwnershipRecord(value: unknown, label: string, ownershipIds: ReadonlySet<string>): asserts value is ValidatedOwnershipRecord {
+  if (!object(value) || typeof value.id !== "string" || !value.id || ownershipIds.has(value.id) || typeof value.label !== "string" || !value.label || !isSchedulerState(value.state)) throw new Error(`${label} is invalid`);
+  optionalString(value.parentId, `${label}.parentId`);
+  optionalString(value.prompt, `${label}.prompt`);
+  validateScheduledOptions(value.options, `${label}.options`);
+}
 async function validateRunArtifacts(store: RunStore, workflowScript: string, state: RunState): Promise<readonly { sourceRunId: string }[]> {
   await validateRunDirectory(store);
   for (const name of REQUIRED_RUN_FILES) await requiredFile(join(store.directory, name));
   if (await readFile(join(store.directory, "workflow.js"), "utf8") !== workflowScript) throw new Error("Persisted workflow source does not match its launch snapshot");
   await validateSystemPrompts(store);
-  const result = await jsonFile(join(store.directory, "result.json")).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
+  const result = await jsonFile(join(store.directory, "result.json")).catch((error: unknown) => { if (isNodeError(error, "ENOENT")) return undefined; throw error; });
   if (result === undefined && state === "completed") throw new Error("Completed run result is missing");
   if (result !== undefined && !jsonValue(result)) throw new Error("Persisted workflow result is invalid");
   validateJournal(await jsonFile(join(store.directory, "journal.json")));
   const rawOwnership = await jsonFile(join(store.directory, "ownership.json"));
-  if (!Array.isArray(rawOwnership)) throw new Error("Persisted ownership records are invalid");
-  const ownership = rawOwnership as unknown[];
+  if (!isList(rawOwnership)) throw new Error("Persisted ownership records are invalid");
   const ownershipIds = new Set<string>();
-  for (const [index, record] of ownership.entries()) {
+  const ownership = rawOwnership.map((record, index) => {
     const label = `ownership[${String(index)}]`;
-    if (!object(record) || typeof record.id !== "string" || !record.id || ownershipIds.has(record.id) || typeof record.label !== "string" || !record.label || typeof record.state !== "string" || !SCHEDULER_STATES.has(record.state)) throw new Error(`${label} is invalid`);
+    validateOwnershipRecord(record, label, ownershipIds);
     ownershipIds.add(record.id);
-    optionalString(record.parentId, `${label}.parentId`);
-    optionalString(record.prompt, `${label}.prompt`);
-    validateScheduledOptions(record.options, `${label}.options`);
-  }
-  for (const record of ownership) if (object(record) && record.parentId !== undefined && (typeof record.parentId !== "string" || !ownershipIds.has(record.parentId))) throw new Error("Persisted ownership parent is missing");
+    return record;
+  });
+  for (const record of ownership) if (record.parentId !== undefined && !ownershipIds.has(record.parentId)) throw new Error("Persisted ownership parent is missing");
   await store.validateDeletionWorktrees();
   const borrowed = await store.borrowedWorktrees();
   await store.validateBorrowedWorktrees();
@@ -280,7 +322,7 @@ function planSession(scan: SessionScan, cutoffMs: number): SessionPlan {
   return { candidates: scan.runs.filter(({ runId }) => oldTerminal.has(runId) && !protectedRuns.has(runId)), skipped };
 }
 
-function deletionOrder(scan: SessionScan, candidates: readonly StoredRun[]): readonly StoredRun[] {
+function deletionOrder(_scan: SessionScan, candidates: readonly StoredRun[]): readonly StoredRun[] {
   const candidateIds = new Set(candidates.map(({ runId }) => runId));
   const remaining = new Set(candidateIds);
   const ordered: StoredRun[] = [];
@@ -295,7 +337,7 @@ function deletionOrder(scan: SessionScan, candidates: readonly StoredRun[]): rea
 async function storedSessionIds(cwd: string, home: string): Promise<readonly string[]> {
   const path = projectSessionsDirectory(cwd, home);
   let entries: readonly import("node:fs").Dirent[];
-  try { entries = await sessionEntries(path); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+  try { entries = await sessionEntries(path); } catch (error) { if (isNodeError(error, "ENOENT")) return []; throw error; }
   if (entries.some((entry) => entry.isSymbolicLink())) throw new Error(`Project session inventory contains a symbolic link: ${path}`);
   const invalid = entries.find((entry) => !entry.isDirectory());
   if (invalid) throw new Error(`Project session inventory contains an unrecognized entry: ${join(path, invalid.name)}`);

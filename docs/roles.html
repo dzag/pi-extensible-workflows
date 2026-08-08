@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Role files and per-call role customization for pi-extensible-workflows.">
+  <title>Roles | pi-extensible-workflows</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="index.html">pi-extensible-workflows</a>
+      <nav aria-label="Primary navigation">
+        <a href="developers.html">Developers</a>
+        <a class="active" href="roles.html">Roles</a>
+        <a href="extensions.html">Extensions</a>
+        <a href="https://github.com/vekexasia/pi-extensible-workflows">Repository</a>
+      </nav>
+    </div>
+  </header>
+  <main class="container docs-layout">
+    <aside class="toc" aria-label="On this page">
+      <p class="toc-title">Roles</p>
+      <a href="#overview">Overview</a>
+      <a href="#files">Role files</a>
+      <a href="#frontmatter">Frontmatter</a>
+      <a href="#calls">Customize calls</a>
+      <a href="#context">Context and resources</a>
+      <a href="#doctor">Inspect a role</a>
+    </aside>
+    <article class="prose">
+      <p class="eyebrow">Role author path</p>
+      <h1>Define and customize agent roles</h1>
+      <p class="lead">Roles package a reusable agent policy: model, thinking level, tools, prompt instructions, context-file scope, and resource exclusions. Use a role file for the stable defaults, then use a role object when one call needs a deliberate exception.</p>
+      <section id="overview">
+        <h2>Overview</h2>
+        <p>A workflow agent can use a role name or a role object. A string applies the role file unchanged. An object must contain <code>name</code> and can override role frontmatter for that call. The role name and role body always come from the named file.</p>
+        <pre><code class="language-javascript"><span class="tok-keyword">const</span> plan <span class="tok-punctuation">=</span> <span class="tok-keyword">await</span> <span class="tok-function">agent</span><span class="tok-punctuation">(</span><span class="tok-string">"Plan the implementation"</span><span class="tok-punctuation">,</span> <span class="tok-punctuation">{</span>
+  <span class="tok-property">role</span><span class="tok-punctuation">:</span> <span class="tok-string">"planner"</span>
+<span class="tok-punctuation">}</span><span class="tok-punctuation">);</span>
+
+<span class="tok-keyword">const</span> fastReview <span class="tok-punctuation">=</span> <span class="tok-keyword">await</span> <span class="tok-function">agent</span><span class="tok-punctuation">(</span><span class="tok-string">"Review this change"</span><span class="tok-punctuation">,</span> <span class="tok-punctuation">{</span>
+  <span class="tok-property">role</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span> <span class="tok-property">name</span><span class="tok-punctuation">:</span> <span class="tok-string">"reviewer"</span><span class="tok-punctuation">,</span> <span class="tok-property">model</span><span class="tok-punctuation">:</span> <span class="tok-string">"cheap-model"</span><span class="tok-punctuation">,</span> <span class="tok-property">tools</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">[]</span> <span class="tok-punctuation">}</span>
+<span class="tok-punctuation">}</span><span class="tok-punctuation">);</span></code></pre>
+        <p>Top-level <code>model</code>, <code>thinking</code>, and <code>tools</code> cannot be combined with either role form. Put per-call changes inside the role object.</p>
+      </section>
+      <section id="files">
+        <h2>Role files</h2>
+        <p>Global roles live under <code>&lt;agentDir&gt;/pi-extensible-workflows/roles/&lt;name&gt;.md</code>, normally <code>~/.pi/agent/pi-extensible-workflows/roles/&lt;name&gt;.md</code>. Set <code>PI_CODING_AGENT_DIR</code> to change the agent directory.</p>
+        <p>Trusted project roles live under <code>&lt;cwd&gt;/.pi/pi-extensible-workflows/roles/&lt;name&gt;.md</code>. A trusted extension can provide packaged defaults with <code>roleDirectories</code>, using an absolute path or a <code>file:</code> URL. Global and trusted project roles override extension roles with the same name; duplicate names across extension directories are rejected.</p>
+        <pre><code class="language-markdown"><span class="tok-punctuation">---</span>
+<span class="tok-property">description</span><span class="tok-punctuation">:</span> Reviews code for correctness
+<span class="tok-property">model</span><span class="tok-punctuation">:</span> anthropic/claude-fable-5
+<span class="tok-property">thinking</span><span class="tok-punctuation">:</span> high
+<span class="tok-property">tools</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">[</span>read<span class="tok-punctuation">,</span> grep<span class="tok-punctuation">]</span>
+<span class="tok-punctuation">---</span>
+Focus on correctness and regressions.</code></pre>
+        <p>The body is prompt guidance. It is appended to the native Pi system prompt unless <code>overrideSystemPrompt: true</code> is set. Role files are trusted configuration and can affect model, tools, resources, and the system prompt.</p>
+      </section>
+      <section id="frontmatter">
+        <h2>Frontmatter fields</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Field</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>description</code></td><td>Role description shown in role discovery and Pi guidance.</td></tr>
+            <tr><td><code>model</code></td><td>Configured alias or concrete <code>provider/model[:thinking]</code>.</td></tr>
+            <tr><td><code>thinking</code></td><td>Default thinking level for the role.</td></tr>
+            <tr><td><code>tools</code></td><td>Allow-list of Pi tools available to the role.</td></tr>
+            <tr><td><code>overrideSystemPrompt</code></td><td>When true, use the role body instead of appending it to the native system prompt.</td></tr>
+            <tr><td><code>contextFiles</code></td><td>Choose which Pi context-file scopes reach the role: <code>global</code>, <code>cwd</code>, and <code>project</code>.</td></tr>
+            <tr><td><code>disabledAgentResources</code></td><td>Role-specific <code>skills</code> and <code>extensions</code> exclusions.</td></tr>
+          </tbody>
+        </table></div>
+      </section>
+      <section id="calls">
+        <h2>Customize calls</h2>
+        <p>Role-object keys use three-way merge semantics:</p>
+        <ul>
+          <li>Omit a key to inherit the role-file value.</li>
+          <li>Use <code>null</code> to unset an inherited value.</li>
+          <li>Use an explicit value to replace it, including <code>[]</code> and <code>false</code>.</li>
+        </ul>
+        <pre><code class="language-javascript"><span class="tok-keyword">await</span> <span class="tok-function">agent</span><span class="tok-punctuation">(</span><span class="tok-string">"Inspect the API"</span><span class="tok-punctuation">,</span> <span class="tok-punctuation">{</span>
+  <span class="tok-property">role</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">{</span>
+    <span class="tok-property">name</span><span class="tok-punctuation">:</span> <span class="tok-string">"reviewer"</span><span class="tok-punctuation">,</span>
+    <span class="tok-property">model</span><span class="tok-punctuation">:</span> <span class="tok-string">"cheap-model"</span><span class="tok-punctuation">,</span>
+    <span class="tok-property">thinking</span><span class="tok-punctuation">:</span> <span class="tok-keyword">null</span><span class="tok-punctuation">,</span>
+    <span class="tok-property">tools</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">[]</span>
+  <span class="tok-punctuation">}</span>
+<span class="tok-punctuation">}</span><span class="tok-punctuation">);</span></code></pre>
+        <p>Per-call overrides can set <code>model</code>, <code>thinking</code>, <code>tools</code>, <code>description</code>, <code>overrideSystemPrompt</code>, <code>contextFiles</code>, and <code>disabledAgentResources</code>. They never change the role name or body. Other agent options such as <code>label</code>, <code>outputSchema</code>, <code>retries</code>, <code>timeoutMs</code>, and <code>withWorktree</code> remain top-level call options.</p>
+      </section>
+      <section id="context">
+        <h2>Context and resources</h2>
+        <p><code>contextFiles</code> controls Pi context discovery for that role. <code>global</code> selects the Pi agent-directory file, <code>cwd</code> selects the exact working-directory file, and <code>project</code> selects discovered project and ancestor files excluding those two. Omit the field for normal discovery or use <code>[]</code> to load none. Scopes can be combined.</p>
+        <pre><code class="language-yaml"><span class="tok-punctuation">---</span>
+<span class="tok-property">contextFiles</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">[</span>global<span class="tok-punctuation">,</span> project<span class="tok-punctuation">]</span>
+<span class="tok-property">disabledAgentResources</span><span class="tok-punctuation">:</span>
+  <span class="tok-property">skills</span><span class="tok-punctuation">:</span> <span class="tok-punctuation">[</span>interactive-skill<span class="tok-punctuation">]</span>
+<span class="tok-punctuation">---</span></code></pre>
+        <p>Resource exclusions affect only agents using the role. They merge with global and trusted-project policy. Use <code>piewf doctor --role &lt;name&gt;</code> to inspect the effective model, tools, skills, extensions, exclusions, setup hooks, and prepared system prompt without contacting a provider.</p>
+      </section>
+      <section id="doctor">
+        <h2>Inspect a role</h2>
+        <pre><code class="language-shell"><span class="tok-command">npx</span> piewf doctor --role reviewer
+<span class="tok-command">npx</span> piewf doctor --role reviewer --prompt <span class="tok-string">"Review the current change"</span></code></pre>
+        <p>The role inspection is read-only. It resolves the active role and reports its effective resources and prepared prompt. The optional probe prompt is useful when prompt hooks depend on the agent request.</p>
+        <p>See <a href="developers.html#tool-api">workflow tool usage</a>, <a href="developers.html#settings">settings</a> for model aliases and global exclusions, and <a href="extensions.html#resources">extension resources</a> for packaged role directories.</p>
+      </section>
+      <p class="back-link"><a href="index.html">&lt; Back to documentation home</a></p>
+    </article>
+  </main>
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <span>pi-extensible-workflows</span>
+      <a href="https://github.com/vekexasia/pi-extensible-workflows">GitHub repository</a>
+    </div>
+  </footer>
+</body>
+</html>

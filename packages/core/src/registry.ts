@@ -1,8 +1,8 @@
 import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Value } from "typebox/value";
-import type { AgentAttemptAction, JsonValue, RegisteredAgentSetupHook, WorkflowCatalog, WorkflowCatalogContext, WorkflowCatalogError, WorkflowCatalogFunction, WorkflowCatalogIndex, WorkflowCatalogModelAlias, WorkflowExtension, WorkflowFunction, WorkflowFunctionContext, WorkflowJournal, WorkflowModelAlias, WorkflowModelAliasResolverContext, WorkflowRoleDirectoryRegistration } from "./types.js";
-import { deepFreeze, fail, jsonValue, object } from "./utils.js";
+import type { AgentAttemptAction, JsonSchema, JsonValue, RegisteredAgentSetupHook, WorkflowCatalog, WorkflowCatalogContext, WorkflowCatalogError, WorkflowCatalogFunction, WorkflowCatalogIndex, WorkflowCatalogModelAlias, WorkflowExtension, WorkflowFunction, WorkflowFunctionContext, WorkflowJournal, WorkflowModelAlias, WorkflowModelAliasResolverContext, WorkflowRoleDirectoryRegistration } from "./types.js";
+import { deepFreeze, errorCode, fail, jsonValue, object } from "./utils.js";
 import { loadSettings, resolveWorkflowSettings, validateSchema } from "./validation.js";
 
 const RESERVED_GLOBALS = new Set(["agent", "shell", "prompt", "checkpoint", "parallel", "pipeline", "phase", "withWorktree", "log", "args", "Promise", "JSON", "Math", "Date", "eval", "Function", "WebAssembly", "process", "require", "module", "exports", "console", "fetch", "XMLHttpRequest", "WebSocket", "performance", "crypto", "setTimeout", "setInterval", "setImmediate", "queueMicrotask", "Intl", "SharedArrayBuffer", "Atomics", "globalThis", "global", "undefined", "NaN", "Infinity", "extensions", "workflow_catalog"]);
@@ -24,13 +24,17 @@ function normalizeRoleDirectory(value: unknown): string {
   }
   fail("INVALID_METADATA", "Workflow role directories require file URLs or absolute filesystem paths");
 }
+function catalogSchema(schema: unknown, at: string): JsonSchema {
+  validateSchema(schema, at);
+  return structuredClone(schema);
+}
 export class WorkflowRegistry {
   readonly #extensions = new Set<Readonly<WorkflowExtension>>();
   readonly #globals = new Map<string, string>();
   readonly #hooks = new Map<string, RegisteredAgentSetupHook>();
   readonly #agentAttemptActions = new Map<string, AgentAttemptAction>();
   readonly #roleDirectories = new Map<string, WorkflowRoleDirectoryRegistration>();
-  readonly #modelAliases = new Map<string, { name: string; version: string; headline: string; extensionDescription: string; resolve: WorkflowModelAlias["resolve"] }>();
+  readonly #modelAliases = new Map<string, { name: string; version: string; headline: string; resolve: WorkflowModelAlias["resolve"] }>();
   #frozen = false;
 
   get frozen(): boolean { return this.#frozen; }
@@ -39,7 +43,7 @@ export class WorkflowRegistry {
   register(extension: WorkflowExtension): void {
     if (this.#frozen) fail("REGISTRY_FROZEN", "Workflow extension registration is closed after session_start");
     if (object(extension) && Object.prototype.hasOwnProperty.call(extension, "workflows")) fail("INVALID_METADATA", "Separate registered workflow definitions were removed; register a function with input and output schemas instead");
-    if (!object(extension) || Object.keys(extension).some((key) => !["version", "headline", "description", "functions", "modelAliases", "agentSetupHooks", "agentAttemptActions", "roleDirectories"].includes(key)) || typeof extension.version !== "string" || !SEMVER.test(extension.version) || typeof extension.headline !== "string" || !extension.headline.trim() || typeof extension.description !== "string" || !extension.description.trim()) fail("INVALID_METADATA", "Workflow extensions require a semantic version, headline, and description");
+    if (!object(extension) || Object.keys(extension).some((key) => !["version", "headline", "description", "functions", "modelAliases", "agentSetupHooks", "agentAttemptActions", "roleDirectories"].includes(key)) || typeof extension.version !== "string" || !SEMVER.test(extension.version) || typeof extension.headline !== "string" || !extension.headline.trim()) fail("INVALID_METADATA", "Workflow extensions require a semantic version and non-empty headline");
     const functions = extension.functions ?? {};
     const modelAliases = extension.modelAliases ?? {};
     const agentSetupHooks = extension.agentSetupHooks ?? {};
@@ -76,9 +80,9 @@ export class WorkflowRegistry {
     }
     const stored = deepFreeze({ ...extension, functions, modelAliases, agentSetupHooks, agentAttemptActions, ...(roleDirectories.length ? { roleDirectories } : {}) });
     this.#extensions.add(stored);
-    for (const directory of roleDirectories) if (!this.#roleDirectories.has(directory)) this.#roleDirectories.set(directory, deepFreeze({ path: directory, extension: { version: extension.version, headline: extension.headline, description: extension.description } }));
+    for (const directory of roleDirectories) if (!this.#roleDirectories.has(directory)) this.#roleDirectories.set(directory, deepFreeze({ path: directory, extension: { version: extension.version, headline: extension.headline } }));
     for (const name of names) this.#globals.set(name, name);
-    for (const [name, alias] of Object.entries(modelAliases)) this.#modelAliases.set(name, { name, version: extension.version, headline: extension.headline, extensionDescription: extension.description, resolve: alias.resolve });
+    for (const [name, alias] of Object.entries(modelAliases)) this.#modelAliases.set(name, { name, version: extension.version, headline: extension.headline, resolve: alias.resolve });
     for (const [name, hook] of Object.entries(agentSetupHooks)) this.#hooks.set(name, { name, priority: hook.priority ?? 10, setup: hook.setup });
     for (const [name, action] of Object.entries(agentAttemptActions)) this.#agentAttemptActions.set(name, action);
   }
@@ -97,7 +101,7 @@ export class WorkflowRegistry {
   catalog(context?: WorkflowCatalogContext): WorkflowCatalog {
     const functions: WorkflowCatalogFunction[] = [];
     for (const extension of this.#extensions) {
-      for (const [name, fn] of Object.entries(extension.functions ?? {})) functions.push({ name, version: extension.version, headline: extension.headline, extensionDescription: extension.description, description: fn.description, input: structuredClone(fn.input), output: structuredClone(fn.output) });
+      for (const [name, fn] of Object.entries(extension.functions ?? {})) functions.push({ name, version: extension.version, headline: extension.headline, description: fn.description, input: catalogSchema(fn.input, `${name} input`), output: catalogSchema(fn.output, `${name} output`) });
     }
     let aliases: Readonly<Record<string, string>> | undefined;
     let settings: WorkflowCatalog["settings"];
@@ -108,7 +112,7 @@ export class WorkflowRegistry {
       if (resolved) { source = resolved.projectTrusted && resolved.sources.modelAliases === resolved.projectSettingsPath ? "trusted project settings" : "global settings"; settings = { concurrency: resolved.effective.concurrency, modelAliases: resolved.effective.modelAliases ?? {}, disabledAgentResources: resolved.effective.disabledAgentResources ?? { skills: [], extensions: [] }, globalSettingsPath: resolved.globalSettingsPath, projectSettingsPath: resolved.projectSettingsPath, projectTrusted: resolved.projectTrusted, sources: resolved.sources }; }
     } catch { aliases = undefined; }
     const staticEntries: WorkflowCatalogModelAlias[] = Object.keys(aliases ?? {}).map((name) => ({ name, kind: "static", provenance: source }));
-    const dynamicEntries: WorkflowCatalogModelAlias[] = [...this.#modelAliases.values()].map(({ name, version, headline, extensionDescription }) => ({ name, kind: "dynamic", provenance: `extension: ${headline}`, version, headline, extensionDescription }));
+    const dynamicEntries: WorkflowCatalogModelAlias[] = [...this.#modelAliases.values()].map(({ name, version, headline }) => ({ name, kind: "dynamic", provenance: `extension: ${headline}`, version, headline }));
     const modelAliasEntries = [...staticEntries, ...dynamicEntries].sort((left, right) => left.name.localeCompare(right.name) || left.kind.localeCompare(right.kind) || left.provenance.localeCompare(right.provenance));
     const sort = (left: { name: string }, right: { name: string }) => left.name.localeCompare(right.name);
     const catalog: WorkflowCatalog = { functions: functions.sort(sort), ...(modelAliasEntries.length ? { modelAliasEntries } : {}) };
@@ -164,7 +168,7 @@ export class WorkflowRegistry {
   roleDirectoryRegistrations(): readonly WorkflowRoleDirectoryRegistration[] {
     return [...this.#roleDirectories.values()];
   }
-  modelAliases(): readonly { name: string; version: string; headline: string; extensionDescription: string; resolve: WorkflowModelAlias["resolve"] }[] { return [...this.#modelAliases.values()].sort((left, right) => left.name.localeCompare(right.name)); }
+  modelAliases(): readonly { name: string; version: string; headline: string; resolve: WorkflowModelAlias["resolve"] }[] { return [...this.#modelAliases.values()].sort((left, right) => left.name.localeCompare(right.name)); }
   async resolveModelAliases(context: Readonly<WorkflowModelAliasResolverContext>, shadowed: ReadonlySet<string> = new Set()): Promise<Readonly<Record<string, string>>> {
     const resolved: Record<string, string> = {};
     const isAborted = (): boolean => context.signal.aborted;
@@ -174,7 +178,7 @@ export class WorkflowRegistry {
       let target: unknown;
       try { target = await alias.resolve(Object.freeze({ cwd: context.cwd, projectTrusted: context.projectTrusted, rootModel: Object.freeze({ ...context.rootModel }), knownModels: new Set(context.knownModels), availableModels: new Set(context.availableModels), signal: context.signal })); }
       catch (error) {
-        if (isAborted() || error instanceof Error && error.name === "AbortError" || typeof error === "object" && error !== null && !Array.isArray(error) && (error as { code?: unknown }).code === "CANCELLED") fail("CANCELLED", `Model alias resolver cancelled: ${alias.name} (${alias.headline})`);
+        if (isAborted() || error instanceof Error && error.name === "AbortError" || errorCode(error) === "CANCELLED") fail("CANCELLED", `Model alias resolver cancelled: ${alias.name} (${alias.headline})`);
         fail("CONFIG_ERROR", `Model alias resolver failed for ${alias.name} (${alias.headline}): ${error instanceof Error ? error.message : String(error)}`);
       }
       if (isAborted()) fail("CANCELLED", `Model alias resolver cancelled: ${alias.name} (${alias.headline})`);
@@ -185,7 +189,7 @@ export class WorkflowRegistry {
   }
 }
 export type WorkflowRegistryApi = Pick<WorkflowRegistry, "frozen" | "freeze" | "register" | "function" | "functions" | "catalog" | "catalogIndex" | "catalogDetail" | "globals" | "invokeFunction" | "modelAliases" | "resolveModelAliases" | "agentSetupHooks" | "agentAttemptActions" | "roleDirectories" | "roleDirectoryRegistrations">;
-interface WorkflowRegistryHost { api: WorkflowRegistryApi }
+interface WorkflowRegistryHost { api: WorkflowRegistryApi; activeHosts: number }
 const WORKFLOW_REGISTRY_KEY = Symbol.for("pi-extensible-workflows.workflow-registry");
 const globalRegistry = globalThis as typeof globalThis & Record<symbol, WorkflowRegistryHost | undefined>;
 function createWorkflowRegistryApi(registry: WorkflowRegistry): WorkflowRegistryApi {
@@ -209,13 +213,28 @@ function createWorkflowRegistryApi(registry: WorkflowRegistry): WorkflowRegistry
   };
 }
 function workflowRegistryHost(): WorkflowRegistryHost {
-  return globalRegistry[WORKFLOW_REGISTRY_KEY] ??= { api: createWorkflowRegistryApi(new WorkflowRegistry()) };
+  return globalRegistry[WORKFLOW_REGISTRY_KEY] ??= { api: createWorkflowRegistryApi(new WorkflowRegistry()), activeHosts: 0 };
 }
 export function resetWorkflowRegistry(): void {
   workflowRegistryHost().api = createWorkflowRegistryApi(new WorkflowRegistry());
 }
+export function resetWorkflowRegistryIfIdle(): void {
+  if (workflowRegistryHost().activeHosts === 0) resetWorkflowRegistry();
+}
 export function beginWorkflowExtensionLoading(): void {
-  if (workflowRegistryHost().api.frozen) resetWorkflowRegistry();
+  const host = workflowRegistryHost();
+  if (host.api.frozen && host.activeHosts === 0) resetWorkflowRegistry();
+}
+export function retainWorkflowRegistry(): () => void {
+  const host = workflowRegistryHost();
+  host.activeHosts += 1;
+  let retained = true;
+  return () => {
+    if (!retained) return;
+    retained = false;
+    host.activeHosts -= 1;
+    if (host.activeHosts === 0) resetWorkflowRegistry();
+  };
 }
 export function loadingRegistry(): WorkflowRegistryApi { return workflowRegistryHost().api; }
 beginWorkflowExtensionLoading();

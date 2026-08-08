@@ -29,6 +29,7 @@ export function createLiveSessionHandoff(): LiveSessionHandoff {
     resolveTakeover?.();
     resolveTakeover = undefined;
   };
+  const isReleased = (): boolean => state === "completed";
 
   return {
     get state() { return state; },
@@ -39,11 +40,13 @@ export function createLiveSessionHandoff(): LiveSessionHandoff {
     },
     async request(launch: () => Promise<void>): Promise<void> {
       if (request) return request;
+      if (isReleased()) return;
       state = "handoff-pending";
       takeover = new Promise<void>((resolve) => { resolveTakeover = resolve; });
       resume = new Promise<void>((resolve) => { resolveResume = resolve; });
       request = (async () => {
         await waitForBoundary();
+        if (isReleased()) return;
         state = "herdr-running";
         try {
           await launch();
@@ -63,8 +66,12 @@ export function createLiveSessionHandoff(): LiveSessionHandoff {
     takeover() { if (state === "herdr-running" && !takenOver) finishTakeover(); },
     waitForResume() { return resume ?? Promise.resolve(); },
     release() {
+      state = "completed";
+      finishBoundary();
       resolveTakeover?.();
+      resolveTakeover = undefined;
       resolveResume?.();
+      resolveResume = undefined;
     },
   };
 }

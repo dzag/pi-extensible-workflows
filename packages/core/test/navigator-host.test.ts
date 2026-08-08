@@ -4,7 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import workflowExtension, { createLaunchSnapshot, DEFAULT_SETTINGS, formatNavigatorDashboard, formatNavigatorRun, registerWorkflowExtension, RunStore, openWorkflowArtifact } from "../src/index.js";
+import { executeCommand, testExtensionApi } from "./support.js";
+import workflowExtension, { createLaunchSnapshot, DEFAULT_SETTINGS, formatNavigatorDashboard, formatNavigatorRun, registerWorkflowExtension, RunStore, openWorkflowArtifact, WorkflowError } from "../src/index.js";
 import { testTransport, type TestPiSession } from "./test-transport.js";
 
 type OwnershipNodes = Parameters<RunStore["saveOwnership"]>[0];
@@ -17,6 +18,17 @@ RunStore.prototype.saveOwnership = async function (nodes: OwnershipNodes) {
   if (failedOwnership.has(this.directory)) throw new Error("scheduler cleanup failed");
   await nativeSaveOwnership.call(this, nodes);
 };
+void test("workflow slash subcommands are rejected with picker guidance", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-workflow-slash-"));
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
+  const notices: string[] = [];
+  workflowExtension(testExtensionApi({ registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, registerTool() {}, on() {}, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] }), home);
+  const command = commands[0]?.handler;
+  assert.ok(command);
+  await executeCommand(command, "resume run-id", { ui: { notify(message: string) { notices.push(message); } } });
+  assert.match(notices[0] ?? "", /\/workflow/);
+  assert.match(notices[0] ?? "", /do not accept arguments/);
+});
 void test("session-scoped navigator shows metadata and confirms terminal deletion", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-navigator-"));
   const cwd = join(home, "project");
@@ -36,21 +48,20 @@ void test("session-scoped navigator shows metadata and confirms terminal deletio
   assert.match(rendered, /Agent sessions: 1/);
   assert.doesNotMatch(rendered, /worktree\/named|branch=|native-a: \/pi\/native-a|\/worktree/);
 
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
   const prompts: string[] = [];
   const selections: string[][] = [];
-  let deleteConfirmed = false;
   const copied: string[] = [];
-  const pi = { registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["read", "workflow"] };
-  workflowExtension(pi as never, home, async (value) => { copied.push(value); });
+  const pi = { registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["read", "workflow"] };
+  workflowExtension(testExtensionApi(pi), home, async (value) => { copied.push(value); });
   const actionRuns: Array<{ attempt: number; sessionId: string | undefined; live: boolean }> = [];
   const workingMessages: Array<string | undefined> = [];
-  registerWorkflowExtension({ version: "1.0.0", headline: "Navigator actions", description: "Navigator action test", agentAttemptActions: { inspectLatest: { label: "Inspect latest attempt", visible: (context) => context.attempt.attempt === 2, run: (context) => { actionRuns.push({ attempt: context.attempt.attempt, sessionId: context.session?.sessionId, live: context.liveSession !== undefined }); context.ui.setWorkingMessage?.("navigator working"); } } } });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Navigator actions", agentAttemptActions: { inspectLatest: { label: "Inspect latest attempt", visible: (context) => context.attempt.attempt === 2, run: (context) => { actionRuns.push({ attempt: context.attempt.attempt, sessionId: context.session?.sessionId, live: context.liveSession !== undefined }); context.ui.setWorkingMessage?.("navigator working"); } } } });
   let selectCall = 0;
-  const ctx = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "session-a" }, ui: { notify() {}, setWorkingMessage(message?: string) { workingMessages.push(message); }, select: async (prompt: string, options: string[]) => { prompts.push(prompt); selections.push(options); selectCall += 1; if (selectCall === 1) return options.find((option) => option.includes("completed")); if (selectCall === 2) return "Agents..."; if (selectCall === 3) return options.find((option) => option.includes("#1")); if (selectCall === 4) return "Inspect latest attempt"; if (selectCall === 5) return "Back"; return prompt === "Workflows\n" ? "Close" : "Back"; }, confirm: async () => deleteConfirmed } };
+  const ctx = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "session-a" }, ui: { notify() {}, setWorkingMessage(message?: string) { workingMessages.push(message); }, select: async (prompt: string, options: string[]) => { prompts.push(prompt); selections.push(options); selectCall += 1; if (selectCall === 1) return options.find((option) => option.includes("completed")); if (selectCall === 2) return "Agents..."; if (selectCall === 3) return options.find((option) => option.includes("#1")); if (selectCall === 4) return "Inspect latest attempt"; if (selectCall === 5) return "Back"; return prompt === "Workflows\n" ? "Close" : "Back"; }, confirm: async () => false } };
   const command = commands[0]?.handler;
   assert.ok(command);
-  await command("", ctx as never);
+  await executeCommand(command, "", ctx);
   assert.ok(selections.length >= 2);
   const runList = selections[0]?.join("\n") ?? "";
   assert.match(runList, /nav/);
@@ -64,10 +75,7 @@ void test("session-scoped navigator shows metadata and confirms terminal deletio
   assert.deepEqual(actionRuns, [{ attempt: 2, sessionId: "native-a", live: false }]);
   assert.deepEqual(workingMessages, ["navigator working"]);
   assert.doesNotMatch(`${prompts.join("\n")}\n${selections.flat().join("\n")}`, /other/);
-  await command("delete run-a", ctx as never);
-  assert.equal(existsSync(store.directory), true);
-  deleteConfirmed = true;
-  await command("delete run-a", ctx as never);
+  await store.delete(true);
   assert.equal(existsSync(store.directory), false);
 });
 void test("latest-attempt actions receive the active session and lose it after completion reload", async () => {
@@ -91,11 +99,11 @@ void test("latest-attempt actions receive the active session and lose it after c
     async createSession(prepared, context) { expectedSession = await baseTransport.createSession(prepared, context); return expectedSession; },
   };
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
-  const pi = { registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] };
-  workflowExtension(pi as never, home, undefined, transport);
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
+  const pi = { registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] };
+  workflowExtension(testExtensionApi(pi), home, undefined, transport);
   const actionRuns: boolean[] = [];
-  registerWorkflowExtension({ version: "1.0.0", headline: "Active attempt actions", description: "Active attempt action test", agentAttemptActions: { inspectActiveAttempt147: { label: "Inspect active attempt", visible: (context) => context.run.workflowName === "active-attempt-actions", run: (context) => { actionRuns.push(context.liveSession === expectedSession); } } } });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Active attempt actions", agentAttemptActions: { inspectActiveAttempt147: { label: "Inspect active attempt", visible: (context) => context.run.workflowName === "active-attempt-actions", run: (context) => { actionRuns.push(context.liveSession === expectedSession); } } } });
   const workflow = tools.find(({ name }) => name === "workflow");
   const command = commands[0]?.handler;
   assert.ok(workflow && command);
@@ -104,13 +112,98 @@ void test("latest-attempt actions receive the active session and lose it after c
   const running = workflow.execute("id", { name: "active-attempt-actions", script: "return agent('work');", foreground: true }, new AbortController().signal, undefined, context);
   await promptStarted;
   commandInvocations = 1;
-  await command("", context as never);
+  await executeCommand(command, "", context);
   assert.deepEqual(actionRuns, [true]);
   releasePrompt();
   await running;
   commandInvocations = 2;
-  await command("", context as never);
+  await executeCommand(command, "", context);
   assert.deepEqual(actionRuns, [true, false]);
+});
+void test("navigator attempt actions retain live steering and takeover handoff", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-navigator-handoff-actions-"));
+  let listener: ((event: import("../src/types.js").WorkflowAgentSessionEvent) => void) | undefined;
+  let releasePrompt!: () => void;
+  let markPromptStarted!: () => void;
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
+  const promptStarted = new Promise<void>((resolve) => { markPromptStarted = resolve; });
+  const message = { role: "assistant" as const, content: [{ type: "text" as const, text: "done" }] };
+  const messages = [message];
+  const steered: string[] = [];
+  const createSession = async (): Promise<TestPiSession> => ({
+    sessionId: "handoff-action-session",
+    sessionFile: "/sessions/handoff-action.jsonl",
+    messages,
+    getSessionStats: () => ({ tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 }, cost: 0.5 }),
+    subscribe(candidate) { listener = candidate; return () => { listener = undefined; }; },
+    async prompt() { markPromptStarted(); listener?.({ type: "turn_start" }); await promptGate; listener?.({ type: "turn_end", message }); },
+    steer: async (text) => { steered.push(text); },
+    abort: async () => {},
+    dispose() {},
+  });
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
+  let expectedSession: import("../src/types.js").WorkflowAgentSession | undefined;
+  const baseTransport = testTransport(createSession);
+  const transport: import("../src/types.js").AgentTransport = { id: "local", async createSession(prepared, context) { expectedSession = await baseTransport.createSession(prepared, context); return expectedSession; } };
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home, undefined, transport);
+  const actionResults: Array<{ live: boolean; transferred: boolean; steered: string }> = [];
+  registerWorkflowExtension({ version: "1.0.0", headline: "Handoff actions", agentAttemptActions: { takeOver: { label: "Take over live attempt", visible: (context) => context.liveSession !== undefined && context.handoff !== undefined, run: async (context) => { const handoff = context.handoff; if (!handoff) throw new Error("missing handoff"); await context.liveSession?.steer("continue"); const opening = handoff.request(async () => { handoff.takeover(); }); releasePrompt(); await opening; actionResults.push({ live: context.liveSession === expectedSession, transferred: handoff.transferred, steered: steered.at(-1) ?? "" }); } } } });
+  const workflow = tools.find(({ name }) => name === "workflow");
+  const command = commands[0]?.handler;
+  assert.ok(workflow && command);
+  const context = { cwd: home, mode: "rpc", hasUI: true, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt" }] }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {}, select: async (_title: string, options: string[]) => { if (options.some((option) => option.includes("handoff-actions"))) return actionResults.length ? "Close" : options.find((option) => option.includes("handoff-actions")); if (options.includes("Agents...")) return actionResults.length ? "Back" : "Agents..."; if (options.some((option) => option.startsWith("#1 "))) return options.find((option) => option.startsWith("#1 ")); if (options.includes("Take over live attempt")) return "Take over live attempt"; return "Back"; }, confirm: async () => false, input: async () => undefined } };
+  const running = workflow.execute("id", { name: "handoff-actions", script: "return agent('work');", foreground: true }, new AbortController().signal, undefined, context);
+  await promptStarted;
+  await executeCommand(command, "", context);
+  await running;
+  assert.deepEqual(actionResults, [{ live: true, transferred: true, steered: "continue" }]);
+});
+void test("host cancellation releases a navigator handoff", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-navigator-handoff-cancel-"));
+  let listener: ((event: import("../src/types.js").WorkflowAgentSessionEvent) => void) | undefined;
+  let releasePrompt!: () => void;
+  let markPromptStarted!: () => void;
+  let markActionStarted!: () => void;
+  const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
+  const promptStarted = new Promise<void>((resolve) => { markPromptStarted = resolve; });
+  const actionStarted = new Promise<void>((resolve) => { markActionStarted = resolve; });
+  const message = { role: "assistant" as const, content: [{ type: "text" as const, text: "done" }] };
+  const messages = [message];
+  let promptAborted = false;
+  const createSession = async (): Promise<TestPiSession> => ({
+    sessionId: "handoff-cancel-session",
+    sessionFile: "/sessions/handoff-cancel.jsonl",
+    messages,
+    getSessionStats: () => ({ tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 }, cost: 0.5 }),
+    subscribe(candidate) { listener = candidate; return () => { listener = undefined; }; },
+    async prompt() { markPromptStarted(); listener?.({ type: "turn_start" }); await promptGate; if (!promptAborted) listener?.({ type: "turn_end", message }); },
+    steer: async () => {},
+    abort: async () => { promptAborted = true; releasePrompt(); listener?.({ type: "turn_end", message }); },
+    dispose() {},
+  });
+  const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
+  const baseTransport = testTransport(createSession);
+  const transport: import("../src/types.js").AgentTransport = { id: "local", async createSession(prepared, context) { return baseTransport.createSession(prepared, context); } };
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home, undefined, transport);
+  let actionFinished = false;
+  let handoffLaunched = false;
+  registerWorkflowExtension({ version: "1.0.0", headline: "Handoff cancellation", agentAttemptActions: { holdHandoff: { label: "Hold handoff", visible: (context) => context.liveSession !== undefined && context.handoff !== undefined, run: async (context) => { const handoff = context.handoff; if (!handoff) throw new Error("missing handoff"); markActionStarted(); await handoff.request(async () => { handoffLaunched = true; }); actionFinished = true; } } } });
+  const workflow = tools.find(({ name }) => name === "workflow");
+  const command = commands[0]?.handler;
+  assert.ok(workflow && command);
+  const controller = new AbortController();
+  const context = { cwd: home, mode: "rpc", hasUI: true, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAvailable: () => [{ provider: "openai", id: "gpt" }] }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {}, select: async (_title: string, options: string[]) => { if (options.some((option) => option.includes("handoff-cancel"))) return actionFinished ? "Close" : options.find((option) => option.includes("handoff-cancel")); if (options.includes("Agents...")) return actionFinished ? "Back" : "Agents..."; if (options.some((option) => option.startsWith("#1 "))) return options.find((option) => option.startsWith("#1 ")); if (options.includes("Hold handoff")) return "Hold handoff"; return "Back"; }, confirm: async () => false, input: async () => undefined } };
+  const running = workflow.execute("id", { name: "handoff-cancel", script: "return agent('work');", foreground: true }, controller.signal, undefined, context);
+  await promptStarted;
+  const navigating = executeCommand(command, "", context);
+  await actionStarted;
+  controller.abort();
+  await navigating;
+  await assert.rejects(running, (error: unknown) => error instanceof WorkflowError && error.code === "CANCELLED");
+  assert.equal(actionFinished, true);
+  assert.equal(handoffLaunched, false);
 });
 void test("TUI navigator exposes agent-scoped worktree actions without transcript actions", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-agent-actions-"));
@@ -131,9 +224,9 @@ void test("TUI navigator exposes agent-scoped worktree actions without transcrip
   const worktree = await store.worktree("copy-owner");
   const copied: string[] = [];
   const notifications: Array<{ message: string; type: string | undefined }> = [];
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
-  const pi = { registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] };
-  workflowExtension(pi as never, home, async (value) => { copied.push(value); });
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
+  const pi = { registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] };
+  workflowExtension(testExtensionApi(pi), home, async (value) => { copied.push(value); });
   let customCalls = 0;
   let pickerCalls = 0;
   let detailActions = 0;
@@ -179,6 +272,7 @@ void test("TUI navigator exposes agent-scoped worktree actions without transcrip
           // Select the agent node, then open its actions inline (no separate picker).
           component.handleInput?.("j");
           component.handleInput?.("j");
+          component.handleInput?.("j");
           component.handleInput?.("tui.select.confirm");
           const withActions = component.render(80).join("\n");
           assert.match(withActions, /Agent actions/);
@@ -200,11 +294,9 @@ void test("TUI navigator exposes agent-scoped worktree actions without transcrip
           chooseAction("Copy worktree path");
           chooseAction("Copy agent ID");
           chooseAction("Back");
-          // Back at the tree: climb to the run root so run-level actions apply.
-          component.handleInput?.("h");
-          component.handleInput?.("h");
-          component.handleInput?.("h");
-          component.handleInput?.("a");
+          // Back at the tree: climb to the Workflow root so run-level actions apply.
+          for (let step = 0; step < 12 && !component.render(80).join("\n").split("\n").some((line) => line.startsWith("→") && line.includes("Workflow ·")); step += 1) component.handleInput?.("h");
+          component.handleInput?.("tui.select.confirm");
           chooseAction("Copy run path");
         } else if (customCalls === 2) {
           component.handleInput?.("a");
@@ -217,7 +309,7 @@ void test("TUI navigator exposes agent-scoped worktree actions without transcrip
   };
   const command = commands[0]?.handler;
   assert.ok(command);
-  await command("", ctx as never);
+  await executeCommand(command, "", ctx);
   assert.deepEqual(copied, [worktree.branch, worktree.path, "agent", store.directory, runId]);
   assert.ok(notifications.some(({ message }) => message === "Copied branch."));
   assert.ok(notifications.some(({ message }) => message === "Copied worktree path."));
@@ -235,13 +327,13 @@ void test("navigator stop asks for confirmation before cancelling", async () => 
   await store.create({ id: "run", workflowName: "live", cwd, sessionId: "session", state: "running", agents: [], agentSessions: [] }, snapshot);
   await store.saveOwnership([{ id: "run:1", label: "worker", state: "running", options: { label: "worker", cwd, tools: [] } }]);
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
   const confirmations: string[] = [];
   let customCalls = 0;
   let pickerCalls = 0;
   let disposed = false;
   let closeNavigator = () => {};
-  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: typeof start) { if (name === "session_start") start = handler; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  workflowExtension(testExtensionApi({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] }), home);
   assert.ok(start && commands[0]);
   const ctx = {
     cwd, mode: "tui", hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" },
@@ -267,7 +359,7 @@ void test("navigator stop asks for confirmation before cancelling", async () => 
   const command = commands[0];
   assert.ok(command);
   await start({}, ctx);
-  const pending = command.handler("", ctx as never);
+  const pending = executeCommand(command.handler, "", ctx);
   for (let attempt = 0; attempt < 100 && confirmations.length === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(confirmations.length, 1);
   assert.match(confirmations[0] ?? "", /live|run/);
@@ -293,7 +385,7 @@ void test("navigator stop stays visible through cleanup and ignores repeated inp
   delayedOwnership.set(store.directory, { start: () => { cleanupStarted = true; }, cleanup });
   const isCleanupStarted = () => cleanupStarted;
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
   const confirmations: string[] = [];
   const statuses: Array<string | undefined> = [];
   const notices: string[] = [];
@@ -301,7 +393,7 @@ void test("navigator stop stays visible through cleanup and ignores repeated inp
   let pickerCalls = 0;
   let rendered = "";
   let closeNavigator = () => {};
-  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: typeof start) { if (name === "session_start") start = handler; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  workflowExtension(testExtensionApi({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] }), home);
   assert.ok(start && commands[0]);
   const ctx = {
     cwd, mode: "tui", hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" },
@@ -325,7 +417,7 @@ void test("navigator stop stays visible through cleanup and ignores repeated inp
   const command = commands[0];
   assert.ok(command);
   await start({}, ctx);
-  const pending = command.handler("", ctx as never);
+  const pending = executeCommand(command.handler, "", ctx);
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (isCleanupStarted()) break;
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -357,12 +449,12 @@ void test("non-TUI navigator Stop confirms before cancelling", async () => {
   const store = new RunStore(cwd, "session", "run", home);
   const snapshot = createLaunchSnapshot({ script: "return true", args: null, metadata: { name: "select-stop" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
   await store.create({ id: "run", workflowName: "select-stop", cwd, sessionId: "session", state: "running", agents: [], agentSessions: [] }, snapshot);
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   let selectCalls = 0;
   let confirmations = 0;
   const notices: string[] = [];
-  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  workflowExtension(testExtensionApi({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] }), home);
   const ctx = {
     cwd, mode: "rpc", hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" },
     ui: {
@@ -380,7 +472,7 @@ void test("non-TUI navigator Stop confirms before cancelling", async () => {
   };
   assert.ok(start && commands[0]);
   await start({}, ctx);
-  await commands[0].handler("", ctx as never);
+  await executeCommand(commands[0].handler, "", ctx);
   assert.equal(confirmations, 1);
   assert.equal((await store.load()).run.state, "stopped");
   assert.ok(notices.some((notice) => notice.includes("Stopped workflow run.")));
@@ -392,8 +484,8 @@ void test("navigator dashboard auto-refreshes the selected run", async () => {
   const store = new RunStore(cwd, "session", "run", home);
   const snapshot = createLaunchSnapshot({ script: "export const meta={name:'live',description:'live'}", args: null, metadata: { name: "live", description: "live" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
   await store.create({ id: "run", workflowName: "live", cwd, sessionId: "session", state: "running", phase: "before", agents: [], agentSessions: [] }, snapshot);
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
-  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
+  workflowExtension(testExtensionApi({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] }), home);
   let selectCall = 0;
   const ctx = {
     cwd, mode: "tui", hasUI: true, sessionManager: { getSessionId: () => "session" },
@@ -416,7 +508,9 @@ void test("navigator dashboard auto-refreshes the selected run", async () => {
         assert.ok(grown.length <= 8);
         assert.match(grown.join("\n"), /phase: after/);
         assert.match(grown.join("\n"), /Tree/);
-        for (let index = 0; index < 10; index += 1) component.handleInput?.("tui.select.pageDown");
+        component.handleInput?.("tui.editor.cursorRight");
+        component.handleInput?.("tui.editor.cursorRight");
+        for (let index = 0; index < 12; index += 1) component.handleInput?.("tui.select.down");
         const bottom = component.render(200);
         assert.ok(bottom.length <= 8);
         assert.match(bottom.join("\n"), /agent-11/);
@@ -425,14 +519,14 @@ void test("navigator dashboard auto-refreshes the selected run", async () => {
         await new Promise((resolve) => setTimeout(resolve, 1100));
         const compact = component.render(200);
         assert.ok(compact.length <= 8);
-        assert.match(compact.join("\n"), /Tree/);
+        assert.match(compact.join("\n"), /Workflow/);
         assert.doesNotMatch(compact.join("\n"), /→ Stop/);
         component.dispose?.();
         return undefined;
       },
     },
   };
-  await commands[0]?.handler("", ctx as never);
+  await executeCommand(commands[0]?.handler, "", ctx);
 });
 void test("navigator returns to the picker after cancelling a recovered run dashboard", async () => {
   const home = mkdtempSync(join(tmpdir(), "pi-extensible-workflows-actions-"));
@@ -440,10 +534,10 @@ void test("navigator returns to the picker after cancelling a recovered run dash
   const store = new RunStore(cwd, "session", "run", home);
   const snapshot = createLaunchSnapshot({ script: "return true", args: null, metadata: { name: "actions" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
   await store.create({ id: "run", workflowName: "actions", cwd, sessionId: "session", state: "running", agents: [], agentSessions: [] }, snapshot);
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
   const notices: string[] = [];
-  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  workflowExtension(testExtensionApi({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] }), home);
   const sessionContext = { cwd, hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify(message: string) { notices.push(message); } } };
   assert.ok(start);
   await start({}, sessionContext);
@@ -459,6 +553,11 @@ void test("navigator returns to the picker after cancelling a recovered run dash
       const dashboard = component.render(200).join("\n");
       assert.match(dashboard, /interrupted/);
       assert.match(dashboard, /Tree/);
+      const narrowTree = component.render(79).join("\n");
+      assert.match(narrowTree, /enter run actions/);
+      component.handleInput?.("tui.select.confirm");
+      assert.match(component.render(40).join("\n"), /Run actions/);
+      component.handleInput?.("tui.select.cancel");
       component.handleInput?.("a");
       assert.match(component.render(200).join("\n"), /Resume/);
       component.handleInput?.("tui.select.cancel");
@@ -468,7 +567,7 @@ void test("navigator returns to the picker after cancelling a recovered run dash
       return result;
     },
   } };
-  await commands[0]?.handler("", ctx as never);
+  await executeCommand(commands[0]?.handler, "", ctx);
   assert.equal(pickerCalls, 2);
   assert.equal(customCalls, 1);
   assert.equal((await store.load()).run.state, "interrupted");
@@ -481,9 +580,9 @@ void test("navigator keeps consecutive checkpoint decisions in the same dashboar
   await store.create({ id: "run", workflowName: "checkpoints", cwd, sessionId: "session", state: "awaiting_input", agents: [], agentSessions: [] }, snapshot);
   await store.awaitCheckpoint({ path: "checkpoint/ship", name: "ship", prompt: "Ship?", context: null });
   await store.awaitCheckpoint({ path: "checkpoint/deploy", name: "deploy", prompt: "Deploy?", context: null });
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
-  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: { handler: (args: string, ctx: never) => Promise<void> }) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], sendMessage() {} } as never, home);
+  workflowExtension(testExtensionApi({ registerTool() {}, registerCommand(_name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"], sendMessage() {} }), home);
   const sessionContext = { cwd, hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {}, select: async () => "Skip" } };
   assert.ok(start);
   await start({}, sessionContext);
@@ -525,7 +624,7 @@ void test("navigator keeps consecutive checkpoint decisions in the same dashboar
       return result;
     },
   } };
-  await commands[0]?.handler("", ctx as never);
+  await executeCommand(commands[0]?.handler, "", ctx);
   assert.equal(customCalls, 5);
   assert.deepEqual(await store.replay("checkpoint/ship"), { path: "checkpoint/ship", value: true });
   assert.deepEqual(await store.replay("checkpoint/deploy"), { path: "checkpoint/deploy", value: false });
@@ -538,11 +637,11 @@ void test("navigator returns to the picker after deleting a run", async () => {
   const keepStore = new RunStore(cwd, "session", "keep", home);
   await oldStore.create({ id: "old", workflowName: "old", cwd, sessionId: "session", state: "completed", agents: [], agentSessions: [] }, snapshot);
   await keepStore.create({ id: "keep", workflowName: "keep", cwd, sessionId: "session", state: "completed", agents: [], agentSessions: [] }, snapshot);
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
   const pickerOptions: string[][] = [];
   let pickerCalls = 0;
   let customCalls = 0;
-  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  workflowExtension(testExtensionApi({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] }), home);
   const ctx = { cwd, mode: "tui", hasUI: true, sessionManager: { getSessionId: () => "session" }, ui: { notify() {}, confirm: async () => true, select: async (prompt: string, options: string[]) => { if (prompt === "Workflow actions") return "Delete"; pickerCalls += 1; pickerOptions.push(options); return pickerCalls === 1 ? options.find((option) => option.includes("old")) : "Close"; }, custom: async (factory: (tui: { requestRender(): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }) => {
       customCalls += 1;
       let result: string | undefined;
@@ -554,7 +653,7 @@ void test("navigator returns to the picker after deleting a run", async () => {
       component.dispose?.();
       return result;
     } } };
-  await commands[0]?.handler("", ctx as never);
+  await executeCommand(commands[0]?.handler, "", ctx);
   assert.equal(customCalls, 1);
   assert.equal(pickerCalls, 2);
   assert.ok(pickerOptions[1]?.some((option) => option.includes("keep")));
@@ -581,8 +680,8 @@ void test("navigator opens the workflow script in the configured external editor
   let pickerCalls = 0;
   let starts = 0;
   let renders = 0;
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
-  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home, undefined, undefined, join(home, "agent"));
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
+  workflowExtension(testExtensionApi({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] }), home, undefined, undefined, join(home, "agent"));
   const ctx = {
     cwd, mode: "tui", hasUI: true, sessionManager: { getSessionId: () => "session" },
     ui: {
@@ -590,9 +689,10 @@ void test("navigator opens the workflow script in the configured external editor
       custom: async (factory: (tui: { terminal: { rows: number }; stop(): void; start(): void; requestRender(force?: boolean): void }, theme: { fg(color: string, text: string): string }, keybindings: { matches(data: string, binding: string): boolean }, done: (value?: string) => void) => { render(width: number): string[]; handleInput?(data: string): void; dispose?(): void }) => {
         const component = factory({ terminal: { rows: 8 }, stop() { stops += 1; }, start() { starts += 1; }, requestRender() { renders += 1; } }, { fg: (_color, text) => text }, { matches: (data, binding) => data === binding }, () => {});
         component.handleInput?.("a");
-        component.handleInput?.("tui.select.down");
-        component.handleInput?.("tui.select.down");
-        component.handleInput?.("tui.select.confirm");
+        for (let step = 0; step < 12; step += 1) {
+          if (component.render(80).join("\n").includes("→ Open script in editor")) { component.handleInput?.("tui.select.confirm"); break; }
+          component.handleInput?.("tui.select.down");
+        }
         const deadline = Date.now() + 5_000;
         while (Date.now() < deadline) {
           if (starts === 1 && existsSync(editedPath) && readFileSync(editedPath, "utf8").includes("SCRIPT_START")) break;
@@ -608,7 +708,7 @@ void test("navigator opens the workflow script in the configured external editor
     },
   };
   try {
-    await commands[0]?.handler("", ctx as never);
+    await executeCommand(commands[0]?.handler, "", ctx);
     assert.equal(stops, 1);
     assert.equal(starts, 1);
     assert.ok(renders > 0);
@@ -652,8 +752,8 @@ void test("navigator opens a persisted top-level agent prompt and result in the 
   let stops = 0;
   let starts = 0;
   let pickerCalls = 0;
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
-  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
+  workflowExtension(testExtensionApi({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] }), home);
   const ctx = {
     cwd, mode: "tui", hasUI: true, sessionManager: { getSessionId: () => "session" },
     ui: {
@@ -664,6 +764,7 @@ void test("navigator opens a persisted top-level agent prompt and result in the 
         assert.doesNotMatch(phase, /Open result in editor/);
         component.handleInput?.("tui.select.down");
         assert.doesNotMatch(component.render(120).join("\n"), /Open result in editor/);
+        component.handleInput?.("tui.select.down");
         component.handleInput?.("tui.select.down");
         component.handleInput?.("tui.select.confirm");
         const actions = component.render(120).join("\n");
@@ -723,7 +824,7 @@ void test("navigator opens a persisted top-level agent prompt and result in the 
     },
   };
   try {
-    await commands[0]?.handler("", ctx as never);
+    await executeCommand(commands[0]?.handler, "", ctx);
     assert.equal(stops, 3);
     assert.equal(starts, 3);
   } finally {
@@ -746,8 +847,8 @@ void test("navigator omits transcript actions outside and inside Herdr", async (
       const withAgent = new RunStore(cwd, "session", "agent-run", home);
       await withAgent.create({ id: "agent-run", workflowName: "agent-run", cwd, sessionId: "session", state: "completed", agents: [{ id: "agent", name: "agent", path: "agent", state: "completed", resultPath: "agent/result", model: { provider: "openai", model: "gpt" }, tools: [], attempts: 1, attemptDetails: [{ attempt: 1, transport: "local", session: { transport: "local", sessionId: "native-agent", locator: { sessionFile: join(home, "agent.jsonl") } }, setup: { hookNames: [], model: { provider: "openai", model: "gpt" }, tools: [], cwd: "/repo" }, accounting: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } }] }], agentSessions: [] }, snapshot);
       await withAgent.complete("agent/result", { done: true });
-      const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
-      workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+      const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
+      workflowExtension(testExtensionApi({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] }), home);
       const dashboardActions: string[][] = [];
       const agentActions: string[][] = [];
       const workflowPickers: string[][] = [];
@@ -775,8 +876,8 @@ void test("navigator omits transcript actions outside and inside Herdr", async (
       };
       const command = commands[0]?.handler;
       assert.ok(command);
-      await command("", ctx as never);
-      await command("", ctx as never);
+      await executeCommand(command, "", ctx);
+      await executeCommand(command, "", ctx);
       const renderedActions = dashboardActions.flat().join("\n");
       const runPicker = workflowPickers[0] ?? [];
       assert.equal(runPicker.includes("Inspect session in pane"), false);
@@ -824,18 +925,18 @@ void test("navigator attention-orders runs, disambiguates names, shows breadcrum
   assert.match(dashC, /error: AGENT_FAILED: timeout/);
 
   // Interactive: attention order + name disambiguation + bulk delete
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
   const prompts: string[] = [];
   const selections: string[][] = [];
-  const pi = { registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["read", "workflow"] };
-  workflowExtension(pi as never, home);
+  const pi = { registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["read", "workflow"] };
+  workflowExtension(testExtensionApi(pi), home);
   let selectCall = 0;
   const confirmResult = true;
   const notified: string[] = [];
   const ctx = { cwd, hasUI: true, sessionManager: { getSessionId: () => "s" }, ui: { notify(msg: string) { notified.push(msg); }, select: async (_prompt: string, options: string[]) => { prompts.push(_prompt); selections.push(options); selectCall += 1; if (selectCall === 1) return "Delete all completed"; return "Close"; }, confirm: async () => confirmResult } };
   const command = commands[0]?.handler;
   assert.ok(command);
-  await command("", ctx as never);
+  await executeCommand(command, "", ctx);
 
   // Verify attention order: running (build bbbb) before failed (deploy) before completed (build aaaa)
   const pickerOptions = selections[0] ?? [];
@@ -872,17 +973,17 @@ void test("navigator bulk deletes only failed runs after confirmation", async ()
   }));
   const failedArtifact = await stores[0]?.saveResult({ owned: true });
   assert.ok(failedArtifact && existsSync(failedArtifact));
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
   const selections: string[][] = [];
   const notifications: string[] = [];
   let selectCall = 0;
   let confirmCall = 0;
-  const pi = { registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] };
-  workflowExtension(pi as never, home);
+  const pi = { registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] };
+  workflowExtension(testExtensionApi(pi), home);
   const ctx = { cwd, hasUI: true, sessionManager: { getSessionId: () => "session" }, ui: { notify(message: string) { notifications.push(message); }, select: async (_prompt: string, options: string[]) => { selections.push(options); selectCall += 1; return selectCall < 3 ? "Delete all failed" : "Close"; }, confirm: async (title: string, message: string) => { confirmCall += 1; if (confirmCall === 1) { assert.equal(title, "Delete failed runs?"); assert.match(message, /cannot be undone/); assert.equal(existsSync(stores[0]?.directory ?? ""), true); assert.equal(existsSync(stores[1]?.directory ?? ""), true); } return confirmCall === 2; } } };
   const command = commands[0]?.handler;
   assert.ok(command);
-  await command("", ctx as never);
+  await executeCommand(command, "", ctx);
   assert.ok(selections[0]?.includes("Delete all failed"));
   assert.ok(selections[1]?.includes("Delete all failed"));
   assert.ok(!selections[2]?.includes("Delete all failed"));
@@ -899,13 +1000,13 @@ void test("navigator remains usable when retry provenance is unavailable", async
   const snapshot = createLaunchSnapshot({ script: "return true", args: null, metadata: { name: "broken-retry" }, settings: DEFAULT_SETTINGS, models: ["openai/gpt"], tools: [], agentTypes: [], schemas: [] });
   const store = new RunStore(cwd, "session", "broken-retry", home);
   await store.create({ id: "broken-retry", workflowName: "broken-retry", cwd, sessionId: "session", state: "failed", retry: { sourceRunId: "deleted-source", lineageRootRunId: "broken-retry", completedPaths: [], incompletePaths: [], namedWorktrees: [] }, agents: [], agentSessions: [] }, snapshot);
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
   const selections: string[][] = [];
-  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  workflowExtension(testExtensionApi({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on() {}, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] }), home);
   const ctx = { cwd, mode: "rpc", hasUI: true, sessionManager: { getSessionId: () => "session" }, ui: { notify() {}, confirm: async () => false, select: async (prompt: string, options: string[]) => { selections.push(options); if (prompt === "Workflows\n") return selections.length === 1 ? options[0] ?? "Close" : "Close"; return "Back"; } } };
   const command = commands[0]?.handler;
   assert.ok(command);
-  await assert.doesNotReject(command("", ctx as never));
+  await assert.doesNotReject(executeCommand(command, "", ctx));
   assert.ok(selections.length >= 2);
   assert.ok(selections[1]?.includes("Delete"));
 });
@@ -919,7 +1020,7 @@ void test("navigator stop reports cleanup failures without closing unexpectedly"
   await store.saveOwnership([{ id: "run:1", label: "worker", state: "running", options: { label: "worker", cwd, tools: [] } }]);
   failedOwnership.add(store.directory);
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
-  const commands: Array<{ handler: (args: string, ctx: never) => Promise<void> }> = [];
+  const commands: Array<{ handler: (args: string, ctx: unknown) => Promise<void> }> = [];
   const notices: string[] = [];
   const statuses: Array<string | undefined> = [];
   let customCalls = 0;
@@ -927,7 +1028,7 @@ void test("navigator stop reports cleanup failures without closing unexpectedly"
   let componentDisposed = false;
   let rendered = "";
   let closeNavigator = () => {};
-  workflowExtension({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: typeof start) { if (name === "session_start") start = handler; }, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] } as never, home);
+  workflowExtension(testExtensionApi({ registerTool() {}, registerCommand(_name: string, options: (typeof commands)[number]) { commands.push(options); }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, getThinkingLevel: () => "medium" as const, getActiveTools: () => ["workflow"] }), home);
   assert.ok(start && commands[0]);
   const ctx = {
     cwd, mode: "tui", hasUI: true, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" },
@@ -952,7 +1053,7 @@ void test("navigator stop reports cleanup failures without closing unexpectedly"
   const command = commands[0];
   assert.ok(command);
   await start({}, ctx);
-  const pending = command.handler("", ctx as never);
+  const pending = executeCommand(command.handler, "", ctx);
   for (let attempt = 0; attempt < 100 && !statuses.some((status) => status?.includes("Could not stop workflow")); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.ok(statuses.some((status) => status?.includes("Could not stop workflow")));
   assert.equal(componentDisposed, false);

@@ -36,10 +36,47 @@ export interface PortableWorkflowBundleInput {
   resources?: PortableWorkflowBundleResources;
 }
 
-function packageJson(): Record<string, unknown> {
+type PackageMetadata = {
+  name?: string;
+  version?: string;
+  bin?: string | Record<string, string>;
+};
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readJsonObject(path: string): Record<string, unknown> | undefined {
+  try {
+    const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+    return isJsonObject(value) ? value : undefined;
+  } catch { return undefined; }
+}
+
+function readPackageMetadata(path: string): PackageMetadata | undefined {
+  const value = readJsonObject(path);
+  if (!value) return undefined;
+  const metadata: PackageMetadata = {};
+  if (typeof value.name === "string") metadata.name = value.name;
+  if (typeof value.version === "string") metadata.version = value.version;
+  if (typeof value.bin === "string") metadata.bin = value.bin;
+  else if (isJsonObject(value.bin)) {
+    const bin: Record<string, string> = {};
+    let valid = true;
+    for (const [name, entry] of Object.entries(value.bin)) {
+      if (typeof entry !== "string") { valid = false; break; }
+      bin[name] = entry;
+    }
+    if (valid) metadata.bin = bin;
+  }
+  return metadata;
+}
+
+function packageJson(): PackageMetadata {
   const directory = dirname(fileURLToPath(import.meta.url));
   for (const path of [join(directory, "../package.json"), join(directory, "../../package.json")]) {
-    try { return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>; } catch { /* Try the source and built layouts. */ }
+    const metadata = readPackageMetadata(path);
+    if (metadata) return metadata;
   }
   return {};
 }
@@ -334,7 +371,6 @@ function workflowModule(workflow: WorkflowCatalogFunction, functionSource: strin
     "  registerWorkflowExtension({",
     `    version: ${JSON.stringify("1.0.0")},`,
     `    headline: ${JSON.stringify("Portable workflow bundle")},`,
-    `    description: ${JSON.stringify(workflow.description)},`,
     ...(withRoles ? [`    roleDirectories: [new URL("./roles", import.meta.url)],`] : []),
     ...(aliases.length ? [`    modelAliases: { ${aliases.map(([name, target]) => `${JSON.stringify(name)}: { resolve: () => ${JSON.stringify(target)} }`).join(", ")} },`] : []),
     "    functions: {",
@@ -358,6 +394,7 @@ function roleMarkdown(role: AgentDefinition): string {
   if (role.thinking !== undefined) metadata.push(`thinking: ${JSON.stringify(role.thinking)}`);
   if (role.tools !== undefined) metadata.push(`tools: ${JSON.stringify(role.tools)}`);
   if (role.overrideSystemPrompt !== undefined) metadata.push(`overrideSystemPrompt: ${String(role.overrideSystemPrompt)}`);
+  if (role.contextFiles !== undefined) metadata.push(`contextFiles: ${JSON.stringify(role.contextFiles)}`);
   if (role.disabledAgentResources !== undefined) metadata.push(`disabledAgentResources: ${JSON.stringify(role.disabledAgentResources)}`);
   metadata.push("---");
   return `${metadata.join("\n")}\n${role.prompt ?? ""}\n`;
@@ -378,7 +415,8 @@ function copyResources(root: string, resources: PortableWorkflowBundleResources 
       if (sensitive(source)) throw new Error(`Bundle resource may contain credentials and cannot be selected: ${source}`);
       let name = basename(source);
       if (kind === "dependencies") {
-        try { const packageName = (JSON.parse(readFileSync(join(source, "package.json"), "utf8")) as { name?: unknown }).name; if (typeof packageName === "string" && packageName.trim()) name = packageName; } catch { /* Files can be dependency entry points. */ }
+        const packageName = readPackageMetadata(join(source, "package.json"))?.name;
+        if (typeof packageName === "string" && packageName.trim()) name = packageName;
       }
       if (!name || name === "." || name === ".." || name.includes("\\") || name.startsWith("/")) throw new Error(`Invalid bundle resource name: ${name}`);
       if (names.includes(name)) throw new Error(`Duplicate bundle resource name: ${name}`);

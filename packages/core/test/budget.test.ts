@@ -3,10 +3,11 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { testExtensionApi } from "./support.js";
 import workflowExtension, { budgetRelaxed, createLaunchSnapshot, DEFAULT_SETTINGS, FairAgentScheduler, mergeBudget, registerWorkflowExtension, resumeBudgetAllowed, RunStore, validateBudget, validateBudgetPatch, WorkflowAgentExecutor, WorkflowBudgetRuntime, WORKFLOW_BUDGET_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WorkflowError } from "../src/index.js";
 import { loadingRegistry } from "../src/registry.js";
 import { listRunIds } from "../src/persistence.js";
-import { testTransport, type TestPiSession } from "./test-transport.js";
+import { testTransport, type TestPiSession, type TestPiSessionEvent } from "./test-transport.js";
 
 void test("validates aggregate budgets and patches", () => {
   const budget = validateBudget({ tokens: { soft: 5, hard: 10 }, costUsd: { soft: 1, hard: 2.5 }, durationMs: { hard: 100 }, agentLaunches: { soft: 0, hard: 1 } });
@@ -35,8 +36,10 @@ type BudgetResponse = { content: unknown; usage?: BudgetMessage["usage"] };
 
 function budgetUsage(input: number, output: number, cost = 0): NonNullable<BudgetMessage["usage"]> { return { input, output, cacheRead: 100, cacheWrite: 200, cost: { total: cost } }; }
 
+function budgetMessageEvent(type: "message_start" | "message_end", message: BudgetMessage): TestPiSessionEvent { return { type, message }; }
+
 function budgetSession(responses: readonly BudgetResponse[], steered: string[] = [], aborted = { value: false }): TestPiSession {
-  let listener: ((event: never) => void) | undefined;
+  let listener: ((event: TestPiSessionEvent) => void) | undefined;
   let responseIndex = 0;
   const messages: BudgetMessage[] = [];
   return {
@@ -59,10 +62,10 @@ function budgetSession(responses: readonly BudgetResponse[], steered: string[] =
         const response = responses[responseIndex++];
         if (!response) throw new Error("No mock response");
         const start = { role: "assistant", content: response.content };
-        listener?.({ type: "message_start", message: start } as never);
+        listener?.(budgetMessageEvent("message_start", start));
         const message = { ...start, ...(response.usage ? { usage: response.usage } : {}) };
         messages.push(message);
-        listener?.({ type: "message_end", message } as never);
+        listener?.(budgetMessageEvent("message_end", message));
       }
     },
     async steer(message) { steered.push(message); },
@@ -99,25 +102,28 @@ void test("navigator budget resume and approval use the live trust context", asy
   const store = new RunStore(cwd, "session", runId, home);
   await store.create({ id: runId, workflowName: "navigator-budget", cwd, sessionId: "session", state: "budget_exhausted", agents: [], agentSessions: [], budget, budgetVersion: 1, usage }, createLaunchSnapshot({ script: "return await agent('work', { model: 'reviewer-model' });", args: null, metadata: { name: "navigator-budget" }, settings: { concurrency: 1, modelAliases: { "reviewer-model": "old/model" } }, modelAliases: { "reviewer-model": "old/model" }, models: ["openai/gpt", "old/model"], tools: [], agentTypes: [], roles: {}, schemas: [] }));
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
-  let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
+  let shutdown: (() => Promise<void>) | undefined;
   let resolverCalls = 0;
   const createSession = async (): Promise<TestPiSession> => ({ transport: "local", session: { transport: "local", sessionId: "navigator-budget-session", locator: { sessionFile: "/sessions/navigator-budget.jsonl" } }, messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }], getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }), prompt: async () => {}, steer: async () => {}, dispose() {} });
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand(_name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) { command = options.handler; }, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], ui: {} } as never, home, undefined, testTransport(createSession), agentDir);
-  registerWorkflowExtension({ version: "1.0.0", headline: "Navigator policy", description: "Navigator alias policy", modelAliases: { "reviewer-model": { resolve(context) { resolverCalls += 1; assert.equal(context.projectTrusted, false); assert.ok(context.availableModels.has("new/model")); return "new/model"; } } } });
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"] }), home, undefined, testTransport(createSession), agentDir);
+  registerWorkflowExtension({ version: "1.0.0", headline: "Navigator policy", modelAliases: { "reviewer-model": { resolve(context) { resolverCalls += 1; assert.equal(context.projectTrusted, false); assert.ok(context.availableModels.has("new/model")); return "new/model"; } } } });
   const context = { cwd, hasUI: false, isProjectTrusted: () => false, model: { provider: "openai", id: "gpt" }, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }, { provider: "new", id: "model" }], getAvailable: () => [{ provider: "openai", id: "gpt" }, { provider: "new", id: "model" }] }, sessionManager: { getSessionId: () => "session" }, ui: { notify() {} } };
-  assert.ok(start && command);
+  const resume = tools.find(({ name }) => name === "workflow_resume");
+  const respond = tools.find(({ name }) => name === "workflow_respond");
+  assert.ok(start && resume && respond && shutdown);
   await start({}, context);
-  await command(`resume ${runId} {"tokens":{"hard":10}}`, context);
+  await resume.execute("id", { runId, budget: { tokens: { hard: 10 } }, foreground: false }, undefined, undefined, context);
   const proposal = (await store.pendingWorkflowDecisions())[0];
   assert.ok(proposal);
-  await command(`budget-approve ${runId} ${proposal.proposalId}`, context);
+  await respond.execute("id", { runId, proposalId: proposal.proposalId, approved: true }, undefined, undefined, context);
   for (let attempt = 0; attempt < 1000 && (await store.load()).run.state !== "completed"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
   const loaded = await store.load();
   assert.equal(loaded.run.state, "completed", JSON.stringify(loaded.run.error));
   assert.equal(resolverCalls, 1);
   assert.deepEqual(loaded.snapshot.modelAliases, { "reviewer-model": "new/model" });
   loadingRegistry().freeze();
+  await shutdown();
 });
 void test("budget runtime aggregates nested attempts, retries, cache exclusion, and versioned soft events", () => {
   let now = 0;
@@ -208,7 +214,7 @@ void test("completed final overruns complete, while later budgeted work reaches 
   const cwd = join(home, "project");
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   let sessionCount = 0;
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], } as never, home, async () => {}, testTransport(async () => { sessionCount += 1; return budgetSession([{ content: [{ type: "text", text: "done" }], usage: budgetUsage(2, 0) }]); }));
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow"], }), home, async () => {}, testTransport(async () => { sessionCount += 1; return budgetSession([{ content: [{ type: "text", text: "done" }], usage: budgetUsage(2, 0) }]); }));
   const workflow = tools.find(({ name }) => name === "workflow");
   assert.ok(workflow);
   const context = { cwd, model: { provider: "openai", id: "gpt" }, sessionManager: { getSessionId: () => "session" } };
@@ -240,11 +246,12 @@ void test("workflow_resume persists exact proposals and approval or rejection co
   const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }> = [];
   const events: Array<{ channel: string; data: unknown }> = [];
   let start: ((event: unknown, ctx: unknown) => Promise<void>) | undefined;
-  workflowExtension({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "workflow_respond"], events: { emit(channel: string, data: unknown) { events.push({ channel, data }); } } } as never, home, undefined, undefined, agentDir);
+  let shutdown: (() => Promise<void>) | undefined;
+  workflowExtension(testExtensionApi({ registerTool(tool: (typeof tools)[number]) { tools.push(tool); }, registerCommand() {}, on(name: string, handler: unknown) { if (name === "session_start") start = handler as typeof start; if (name === "session_shutdown") shutdown = handler as typeof shutdown; }, sendMessage() {}, getThinkingLevel: () => "medium", getActiveTools: () => ["workflow", "workflow_respond"], events: { emit(channel: string, data: unknown) { events.push({ channel, data }); } } }), home, undefined, undefined, agentDir);
   let resolverCalls = 0;
-  registerWorkflowExtension({ version: "1.0.0", headline: "Budget model policy", description: "Budget model policy", modelAliases: { "reviewer-model": { resolve(context) { resolverCalls += 1; assert.equal(context.projectTrusted, false); assert.ok(context.availableModels.has("new/model")); return "new/model"; } } } });
+  registerWorkflowExtension({ version: "1.0.0", headline: "Budget model policy", modelAliases: { "reviewer-model": { resolve(context) { resolverCalls += 1; assert.equal(context.projectTrusted, false); assert.ok(context.availableModels.has("new/model")); return "new/model"; } } } });
   const context = { cwd, model: { provider: "openai", id: "gpt" }, isProjectTrusted: () => false, modelRegistry: { getAll: () => [{ provider: "openai", id: "gpt" }, { provider: "new", id: "model" }], getAvailable: () => [{ provider: "openai", id: "gpt" }, { provider: "new", id: "model" }] }, sessionManager: { getSessionId: () => "session" } };
-  assert.ok(start);
+  assert.ok(start && shutdown);
   await start({}, context);
   const resume = tools.find(({ name }) => name === "workflow_resume");
   const respond = tools.find(({ name }) => name === "workflow_respond");
@@ -283,4 +290,5 @@ void test("workflow_resume persists exact proposals and approval or rejection co
   assert.deepEqual(events.filter(({ channel }) => channel === WORKFLOW_BUDGET_EVENT).map(({ data }) => (data as { type: string }).type), ["adjustment_requested", "adjustment_rejected", "adjustment_requested", "adjustment_approved", "soft_crossed"]);
   assert.ok(events.some(({ channel, data }) => channel === WORKFLOW_RUN_STATE_CHANGED_EVENT && (data as { state: string }).state === "running"));
   loadingRegistry().freeze();
+  await shutdown();
 });

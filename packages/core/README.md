@@ -6,7 +6,7 @@
 
 Turn multi-agent tasks into deterministic jobs that fan out in parallel, pause for approval, and resume without rerunning completed work.
 
-[Documentation](https://vekexasia.github.io/pi-extensible-workflows/) | [Developer guide](https://vekexasia.github.io/pi-extensible-workflows/developers.html) | [Agent guide](https://vekexasia.github.io/pi-extensible-workflows/agents.html) | [Extension authoring](https://vekexasia.github.io/pi-extensible-workflows/extensions.html) | [Video overview](https://youtu.be/qAiivspEHmU)
+[Documentation](https://vekexasia.github.io/pi-extensible-workflows/) | [Developer guide](https://vekexasia.github.io/pi-extensible-workflows/developers.html) | [Roles](https://vekexasia.github.io/pi-extensible-workflows/roles.html) | [Extension authoring](https://vekexasia.github.io/pi-extensible-workflows/extensions.html) | [LLM guide](https://vekexasia.github.io/pi-extensible-workflows/llm.md) | [Video overview](https://youtu.be/qAiivspEHmU)
 
 Requires Node.js 22.19 or newer. This is a trusted Pi extension with the same filesystem and process access as Pi.
 
@@ -21,7 +21,7 @@ The repository is an npm-workspaces monorepo. The public package is maintained i
 
 ## Capabilities
 
-The default path is a named inline workflow: write a `script` that fans out independent work with `parallel(...)`, awaits the keyed results, passes them into one summarizing `agent(...)`, and returns. Provide exactly one of `script` or `scriptPath` and a non-empty `name`; a reviewed JavaScript file's contents are captured in the run at launch. Registered functions are available as globals inside scripts, and `args` remains available to pass JSON values into the script. Runs are backgrounded by default; set `foreground: true` when the final value must be returned in the same tool call. If a foreground tool call detaches before its result is accepted by the next event-loop turn, the terminal success or failure is promoted to exactly one follow-up message.
+The default path is a named inline workflow: write a `script` that fans out independent work with `parallel(...)`, awaits the keyed results, passes them into one summarizing `agent(...)`, and returns. Provide exactly one of `script` or `scriptPath` and a non-empty `name`; a reviewed JavaScript file's contents are captured in the run at launch. Registered functions are available as globals inside scripts, and `args` remains available to pass JSON values into the script. Runs are backgrounded by default; set `foreground: true` when the final value must be returned in the same tool call. Use `/workflow` to open the workflow picker, then choose a run and its contextual dashboard actions, including moving an attached foreground workflow to the background. The terminal result is then delivered as exactly one follow-up message. If a foreground tool call detaches before its result is accepted by the next event-loop turn, the terminal success or failure is promoted to exactly one follow-up message.
 
 ```js
 const reviews = await parallel("review", {
@@ -39,18 +39,20 @@ return await agent(
 
 The main Pi agent writes these scripts on the fly for each task; an external review or approval flow can write one to a JavaScript file and launch it with `scriptPath`. Extensions can add reusable functions, and completed workflows can resume without rerunning completed work.
 
+Direct consumers of `createLocalPiSession()` receive a session with extensions already bound. Await `session.dispose()` so `session_shutdown` runs before the native session is released; disposal is idempotent.
+
 Learn more about roles, workflow contracts, and extension APIs in the documentation:
 
 - [Workflow tool and invocation API](https://vekexasia.github.io/pi-extensible-workflows/developers.html#tool-api)
 - [Global and project settings](https://vekexasia.github.io/pi-extensible-workflows/developers.html#settings)
 - [Aggregate run budgets](https://vekexasia.github.io/pi-extensible-workflows/developers.html#budgets)
 - [Workflow DSL and worktrees](https://vekexasia.github.io/pi-extensible-workflows/developers.html#dsl)
+- [Role files and per-call customization](https://vekexasia.github.io/pi-extensible-workflows/roles.html)
 - [Extension authoring guide](https://vekexasia.github.io/pi-extensible-workflows/extensions.html)
 - [Copy-paste extension template](https://github.com/vekexasia/pi-extensible-workflows/tree/main/packages/core/examples/workflow-extension-template)
 - [Run artifacts and lifecycle events](https://vekexasia.github.io/pi-extensible-workflows/developers.html#lifecycle)
 - [Run inspection and recovery](https://vekexasia.github.io/pi-extensible-workflows/developers.html#operations)
-- [Agent patterns and model selection](https://vekexasia.github.io/pi-extensible-workflows/agents.html#patterns)
-- [Checkpoints](https://vekexasia.github.io/pi-extensible-workflows/agents.html#checkpoints)
+- [LLM guide for installation, configuration, roles, extension authoring, and TypeBox function inference](https://vekexasia.github.io/pi-extensible-workflows/llm.md#registered-functions)
 
 
 ## License

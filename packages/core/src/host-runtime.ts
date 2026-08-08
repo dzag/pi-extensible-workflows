@@ -4,11 +4,12 @@ import { type PersistedRun, type RunStore, type WorktreeReference } from "./pers
 import { fail, deepFreeze, errorCode, jsonValue, object } from "./utils.js";
 import { validateAgentOptions, validateShellOptions, workflowPrompt } from "./validation.js";
 import { type WorkflowRegistryApi } from "./registry.js";
-import { ERROR_CODES, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentOptions, type AgentRecord, type BudgetEvent, type JsonValue, type ModelSpec, type RunState, type WorkflowBridge, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowExecution, type WorkflowFunctionContext, type WorkflowMetadata, type WorkflowRunContext, type WorkflowWorktreeReference } from "./types.js";
+import { ERROR_CODES, WORKFLOW_AGENT_STATE_CHANGED_EVENT, WORKFLOW_BUDGET_EVENT, WORKFLOW_CHECKPOINT_STATE_CHANGED_EVENT, WORKFLOW_PHASE_CHANGED_EVENT, WORKFLOW_RUN_COMPLETED_EVENT, WORKFLOW_RUN_FAILED_EVENT, WORKFLOW_RUN_RESUMED_EVENT, WORKFLOW_RUN_STARTED_EVENT, WORKFLOW_RUN_STATE_CHANGED_EVENT, WORKFLOW_WORKTREE_CREATED_EVENT, WorkflowError, type AgentOptions, type AgentRecord, type BudgetEvent, type JsonValue, type ModelSpec, type ParallelResult, type ParallelTasks, type RunState, type WorkflowBridge, type WorkflowCheckpointState, type WorkflowErrorCode, type WorkflowErrorShape, type WorkflowEventBase, type WorkflowExecution, type WorkflowFunctionContext, type WorkflowMetadata, type WorkflowRunContext, type WorkflowWorktreeCallback, type WorkflowWorktreeReference } from "./types.js";
 import { structuralPath as operationPath } from "./persistence.js";
 
 const HARD_TERMINAL_RUN_STATES: ReadonlySet<string> = new Set(["completed", "failed", "stopped"]);
 type WorkflowEventSink = { emit: (name: string, payload: unknown) => unknown };
+function isWorkflowErrorCode(value: unknown): value is WorkflowErrorCode { return ERROR_CODES.some((candidate) => candidate === value); }
 const inheritedHostAgentPath = new AsyncLocalStorage<readonly string[]>();
 const inheritedHostWorktreeOwner = new AsyncLocalStorage<string>();
 
@@ -25,6 +26,7 @@ export type WorkflowRunRecord = {
   providerErrorRecovery?: (failure: AgentProviderFailure) => Promise<AgentProviderRecovery>;
   execution?: WorkflowExecution;
   completion?: Promise<unknown>;
+  foreground?: boolean;
   checkpointResolvers: Map<string, (value: boolean) => void>;
   update?: (result: WorkflowToolUpdate) => void;
 };
@@ -120,7 +122,7 @@ export class WorkflowEventPublisher {
   async runResumed(store: RunStore, metadata: WorkflowMetadata): Promise<void> { await this.#publish(store, metadata, WORKFLOW_RUN_RESUMED_EVENT, {}); }
 
   async runState(store: RunStore, metadata: WorkflowMetadata, previousState: RunState, state: RunState, reason?: string): Promise<void> {
-    await this.#publish(store, metadata, WORKFLOW_RUN_STATE_CHANGED_EVENT, { previousState, state, ...(reason ? { reason } : {}), ...(ERROR_CODES.includes(reason as WorkflowErrorCode) ? { errorCode: reason } : {}) });
+    await this.#publish(store, metadata, WORKFLOW_RUN_STATE_CHANGED_EVENT, { previousState, state, ...(reason ? { reason } : {}), ...(isWorkflowErrorCode(reason) ? { errorCode: reason } : {}) });
     if ((previousState === "paused" || previousState === "interrupted" || previousState === "budget_exhausted") && state === "running") await this.runResumed(store, metadata);
   }
 
@@ -187,7 +189,7 @@ function publicWorktreeReference(reference: WorkflowWorktreeReference): Readonly
   if (!object(reference) || typeof reference.path !== "string" || typeof reference.branch !== "string") fail("WORKTREE_FAILED", "Worktree reference is invalid");
   return Object.freeze({ path: reference.path, branch: reference.branch });
 }
-async function hostWithWorktree(args: readonly unknown[], resolveWorktree: ((owner: string, signal: AbortSignal, location?: string, commit?: boolean) => Promise<Readonly<WorkflowWorktreeReference>>) | undefined, signal: AbortSignal): Promise<JsonValue> {
+async function hostWithWorktree<Result extends JsonValue>(args: readonly unknown[], resolveWorktree: ((owner: string, signal: AbortSignal, location?: string, commit?: boolean) => Promise<Readonly<WorkflowWorktreeReference>>) | undefined, signal: AbortSignal): Promise<Result> {
   if (args.length !== 2 && args.length !== 3) fail("INVALID_METADATA", "withWorktree requires a name, optional options, and callback");
   const name = args[0];
   const options = args.length === 3 ? args[1] : undefined;
@@ -202,13 +204,16 @@ async function hostWithWorktree(args: readonly unknown[], resolveWorktree: ((own
   if (!resolveWorktree) fail("WORKTREE_FAILED", "No worktree bridge is available");
   const owner = operationPath("worktree", "named", name.trim());
   const reference = publicWorktreeReference(await resolveWorktree(owner, signal, typeof location === "string" ? location : undefined, commit));
-  return inheritedHostWorktreeOwner.run(owner, async () => await (callback as (reference: Readonly<WorkflowWorktreeReference>) => unknown)(reference)) as Promise<JsonValue>;
+  return inheritedHostWorktreeOwner.run(owner, () => (callback as WorkflowWorktreeCallback<Result>)(reference));
 }
 export function workflowRunContext(cwd: string, sessionId: string, runId: string, workflow: WorkflowMetadata, args: JsonValue, signal: AbortSignal): Readonly<WorkflowRunContext> {
   return Object.freeze({ cwd, sessionId, runId, workflow: deepFreeze(structuredClone(workflow)), args: deepFreeze(structuredClone(args)), signal });
 }
+function keyedJsonResult<Tasks extends ParallelTasks = ParallelTasks>(entries: readonly (readonly [string, JsonValue])[]): ParallelResult<Tasks> {
+  return Object.fromEntries(entries) as ParallelResult<Tasks>;
+}
 
-async function hostParallel(rawOperation: unknown, rawTasks: unknown): Promise<JsonValue> {
+async function hostParallel<Tasks extends ParallelTasks>(rawOperation: unknown, rawTasks: unknown): Promise<ParallelResult<Tasks>> {
   if (typeof rawOperation !== "string" || !rawOperation.trim()) fail("INVALID_METADATA", "parallel requires a stable explicit name");
   const tasks = namedRecord(rawTasks, "parallel tasks");
   for (const [name, run] of tasks) {
@@ -218,7 +223,9 @@ async function hostParallel(rawOperation: unknown, rawTasks: unknown): Promise<J
   const results = await Promise.all(tasks.map(async ([name, run]) => {
     try {
       const parent = inheritedHostAgentPath.getStore() ?? [];
-      return { name, value: await inheritedHostAgentPath.run([...parent, rawOperation, name], run as () => unknown) as JsonValue };
+      const value = await inheritedHostAgentPath.run([...parent, rawOperation, name], run as () => unknown);
+      if (!jsonValue(value)) fail("RESULT_INVALID", "parallel task result must be JSON-compatible");
+      return { name, value };
     } catch (error) {
       const typed = error instanceof WorkflowError ? error : new WorkflowError("INTERNAL_ERROR", error instanceof Error ? error.message : String(error));
       if (typed.code === "CANCELLED") throw typed;
@@ -227,7 +234,7 @@ async function hostParallel(rawOperation: unknown, rawTasks: unknown): Promise<J
   }));
   const failure = results.find((result) => result.error);
   if (failure?.error) throw failure.error;
-  return Object.fromEntries(results.map((result) => [result.name, result.value as JsonValue]));
+  return keyedJsonResult<Tasks>(results.flatMap((result) => "value" in result ? [[result.name, result.value] as const] : []));
 }
 
 async function hostPipeline(rawOperation: unknown, rawItems: unknown, rawStages: unknown): Promise<JsonValue> {
@@ -245,9 +252,12 @@ async function hostPipeline(rawOperation: unknown, rawItems: unknown, rawStages:
     try {
       for (const [stageName, run] of stages) {
         const parent = inheritedHostAgentPath.getStore() ?? [];
-        current = await inheritedHostAgentPath.run([...parent, rawOperation, name, stageName], () => (run as (value: unknown) => unknown)(current));
+        const value = await inheritedHostAgentPath.run([...parent, rawOperation, name, stageName], () => (run as (value: unknown) => unknown)(current));
+        if (!jsonValue(value)) fail("RESULT_INVALID", "pipeline stage result must be JSON-compatible");
+        current = value;
       }
-      return { name, value: current as JsonValue };
+      if (!jsonValue(current)) fail("RESULT_INVALID", "pipeline result must be JSON-compatible");
+      return { name, value: current };
     } catch (error) {
       const typed = error instanceof WorkflowError ? error : new WorkflowError("INTERNAL_ERROR", error instanceof Error ? error.message : String(error));
       if (typed.code === "CANCELLED") throw typed;
@@ -256,7 +266,7 @@ async function hostPipeline(rawOperation: unknown, rawItems: unknown, rawStages:
   }));
   const failure = results.find((result) => result.error);
   if (failure?.error) throw failure.error;
-  return Object.fromEntries(results.map((result) => [result.name, result.value as JsonValue]));
+  return keyedJsonResult(results.flatMap((result) => "value" in result ? [[result.name, result.value] as const] : []));
 }
 
 export function nextNamedOccurrence(counters: Map<string, number>, label: string): string {
@@ -307,9 +317,9 @@ export function withWorkflowFunctions(bridge: WorkflowBridge, store: RunStore, r
         return bridge.shell(args[0], options, signal, { structuralPath: [...inherited], callSite: `function:${path}`, occurrence, ...(scopedWorktreeOwner ? { worktreeOwner: scopedWorktreeOwner } : {}) });
       },
       prompt: workflowPrompt,
-      parallel: (...args: readonly unknown[]) => hostParallel(args[0], args[1]),
+      parallel: <Tasks extends ParallelTasks>(operationName: string, tasks: Tasks) => hostParallel<Tasks>(operationName, tasks),
       pipeline: (...args: readonly unknown[]) => hostPipeline(args[0], args[1], args[2]),
-      withWorktree: (...args: readonly unknown[]) => hostWithWorktree(args, bridge.worktree, signal),
+      withWorktree: <Result extends JsonValue>(...args: readonly unknown[]) => hostWithWorktree<Result>(args, bridge.worktree, signal),
       checkpoint: async (...args: readonly unknown[]) => {
         if (!bridge.checkpoint || !object(args[0]) || !jsonValue(args[0])) fail("INTERNAL_ERROR", "No checkpoint bridge is available");
         return bridge.checkpoint(args[0], signal);

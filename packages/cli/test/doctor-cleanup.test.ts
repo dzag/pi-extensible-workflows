@@ -8,6 +8,7 @@ import { createLaunchSnapshot, DEFAULT_SETTINGS, type RunState } from "pi-extens
 import { acquireSessionLease, RunStore, structuralPath } from "pi-extensible-workflows/persistence";
 import { doctorCleanup } from "../src/doctor-cleanup.js";
 import { runCli } from "../src/cli.js";
+import { readCliTestPersistedRun, readCliTestSessionOwner } from "./support.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const snapshot = createLaunchSnapshot({ script: "export const meta={name:'cleanup'}", args: {}, metadata: { name: "cleanup" }, settings: DEFAULT_SETTINGS, models: [], tools: [], agentTypes: [], schemas: [] });
@@ -258,7 +259,8 @@ void test("doctor cleanup fails closed for unsafe run mutations", async () => {
     { name: "symlinked state.json", message: /Run unsafe is corrupt or incomplete: Run artifact is not a regular file: .*state\.json/, mutate: (paths: { home: string; cwd: string }, store: RunStore) => { const state = join(store.directory, "state.json"); const target = join(paths.home, "state-target.json"); const contents = readFileSync(state, "utf8"); rmSync(state); writeFileSync(target, contents); symlinkSync(target, state); } },
     { name: "rewritten workflow.js", message: /Run unsafe is corrupt or incomplete: Persisted workflow source does not match its launch snapshot/, mutate: (_paths: { home: string; cwd: string }, store: RunStore) => { writeFileSync(join(store.directory, "workflow.js"), "rewritten workflow"); } },
     { name: "dangling ownership parent", message: /Run unsafe is corrupt or incomplete: Persisted ownership parent is missing/, mutate: (paths: { home: string; cwd: string }, store: RunStore) => { writeFileSync(join(store.directory, "ownership.json"), JSON.stringify([{ id: "owner", label: "owner", state: "completed", parentId: "missing", options: { label: "owner", cwd: paths.cwd, tools: [] } }])); } },
-    { name: "self parentRunId", message: /Run unsafe is corrupt or incomplete: Borrowed worktree source run is invalid/, mutate: (_paths: { home: string; cwd: string }, store: RunStore) => { const statePath = join(store.directory, "state.json"); const state = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>; state.parentRunId = "unsafe"; writeFileSync(statePath, JSON.stringify(state)); } },
+    { name: "invalid role override object", message: /ownership\[0\]\.options\.role\.tools is invalid/, mutate: (paths: { home: string; cwd: string }, store: RunStore) => { writeFileSync(join(store.directory, "ownership.json"), JSON.stringify([{ id: "owner", label: "owner", state: "completed", options: { label: "owner", cwd: paths.cwd, tools: [], role: { name: "reviewer", tools: 1 } } }])); } },
+    { name: "self parentRunId", message: /Run unsafe is corrupt or incomplete: Borrowed worktree source run is invalid/, mutate: (_paths: { home: string; cwd: string }, store: RunStore) => { const statePath = join(store.directory, "state.json"); const state = readCliTestPersistedRun(statePath); state.parentRunId = "unsafe"; writeFileSync(statePath, JSON.stringify(state)); } },
   ] as const;
   for (const mutation of mutations) {
     const paths = fixture();
@@ -279,7 +281,7 @@ void test("doctor cleanup fails closed for unsafe run mutations", async () => {
 void test("doctor cleanup fails closed for unsafe session inventories", async () => {
   const now = 1_000_000_000_000;
   const mutations = [
-    { name: "non-directory session root", mutate: (paths: { home: string; cwd: string }, store: RunStore) => { const session = dirname(dirname(store.directory)); rmSync(session, { recursive: true }); writeFileSync(session, "preserve session root"); } },
+    { name: "non-directory session root", mutate: (_paths: { home: string; cwd: string }, store: RunStore) => { const session = dirname(dirname(store.directory)); rmSync(session, { recursive: true }); writeFileSync(session, "preserve session root"); } },
     { name: "missing runs directory", mutate: (_paths: { home: string; cwd: string }, store: RunStore) => { rmSync(dirname(store.directory), { recursive: true }); } },
     { name: "symlinked runs directory", mutate: (paths: { home: string; cwd: string }, store: RunStore) => { const runs = dirname(store.directory); const target = join(paths.home, "runs-target"); renameSync(runs, target); symlinkSync(target, runs); } },
     { name: "extra session root entry", mutate: (_paths: { home: string; cwd: string }, store: RunStore) => { writeFileSync(join(dirname(dirname(store.directory)), "unexpected"), "preserve"); } },
@@ -307,7 +309,7 @@ void test("doctor cleanup stops when the session lease token changes during resc
     const loaded = await originalLoad.call(this);
     if (this.runId === run.runId && ++loads === 4) {
       const ownerPath = join(dirname(this.directory), "owner.json");
-      const owner = JSON.parse(readFileSync(ownerPath, "utf8")) as Record<string, unknown>;
+      const owner = readCliTestSessionOwner(ownerPath);
       writeFileSync(ownerPath, JSON.stringify({ ...owner, token: "changed-token" }));
     }
     return loaded;

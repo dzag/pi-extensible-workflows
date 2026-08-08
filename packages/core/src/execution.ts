@@ -6,13 +6,39 @@ import { StringDecoder } from "node:string_decoder";
 import { RunStore, structuralPath as operationPath } from "./persistence.js";
 import type { AgentAttempt } from "./agent-execution.js";
 import type { AgentIdentity, AgentAttemptSummary, JsonValue, ShellIdentity, ShellOptions, ShellResult, WorkflowAgentSessionReference, WorkflowBridge, WorkflowErrorCode, WorkflowExecution } from "./types.js";
-import { WorkflowError } from "./types.js";
+import { ERROR_CODES, WorkflowError, roleNameOf } from "./types.js";
 import { asWorkflowError, errorText, fail, isWorkflowAuthored, jsonValue, markWorkflowAuthored, object, positiveInteger } from "./utils.js";
 import { instrumentWorkflow, validateAgentOptions, validateShellCommand, validateShellOptions } from "./validation.js";
 
 export const RPC_LIMIT_BYTES = 10 * 1024 * 1024;
 type WorkerErrorShape = { code?: string; message: string; authored?: boolean; failedAt?: string };
+function isWorkflowErrorCode(value: unknown): value is WorkflowErrorCode { return ERROR_CODES.some((candidate) => candidate === value); }
 export const HEARTBEAT_TIMEOUT_MS = 5000;
+type RpcMessage =
+  | { type: "heartbeat" }
+  | { type: "result"; value: JsonValue }
+  | { type: "error"; error: WorkerErrorShape }
+  | { type: "rpc"; id: number; method: string; args: JsonValue[] }
+  | { type: "rpcResult"; id: number; ok: true; value: JsonValue }
+  | { type: "rpcResult"; id: number; ok: false; error: WorkerErrorShape }
+  | { type: "cancel" };
+function hasOwn(value: object, key: string): boolean { return Object.prototype.hasOwnProperty.call(value, key); }
+function isWorkerErrorShape(value: unknown): value is WorkerErrorShape {
+  return object(value) && typeof value.message === "string" && (value.code === undefined || typeof value.code === "string") && (value.authored === undefined || typeof value.authored === "boolean") && (value.failedAt === undefined || typeof value.failedAt === "string");
+}
+function isRpcMessage(value: unknown): value is RpcMessage {
+  if (!object(value) || typeof value.type !== "string") return false;
+  if (value.type === "heartbeat" || value.type === "cancel") return true;
+  if (value.type === "result") return hasOwn(value, "value") && jsonValue(value.value);
+  if (value.type === "error") return isWorkerErrorShape(value.error);
+  if (value.type === "rpc") return positiveInteger(value.id) && typeof value.method === "string" && Boolean(value.method.trim()) && Array.isArray(value.args) && value.args.every((arg) => jsonValue(arg));
+  if (value.type === "rpcResult") {
+    if (!positiveInteger(value.id) || typeof value.ok !== "boolean") return false;
+    if (value.ok) return hasOwn(value, "value") && !hasOwn(value, "error") && jsonValue(value.value);
+    return !hasOwn(value, "value") && isWorkerErrorShape(value.error);
+  }
+  return false;
+}
 const HEARTBEAT_INTERVAL_MS = 1000;
 
 const OUTCOME_ERRORS = new Set<string>(["AGENT_TIMEOUT", "AGENT_FAILED", "RESULT_INVALID"]);
@@ -285,6 +311,8 @@ Promise.resolve().then(() => new vm.Script("(async(__pi_extensible_workflows_age
   .finally(() => clearInterval(heartbeat));
 `;
 
+export function encoded(value: JsonValue): string;
+export function encoded(value: unknown): asserts value is JsonValue;
 export function encoded(value: unknown): string {
   if (!jsonValue(value)) fail("RPC_LIMIT_EXCEEDED", "RPC values must be JSON-compatible");
   const json = JSON.stringify(value);
@@ -393,7 +421,7 @@ export function executeShellCommand(command: string, options: ShellOptions, sign
   });
 }
 function workflowErrorFromWorker(error: WorkerErrorShape): WorkflowError {
-  const code = typeof error.code === "string" ? error.code as WorkflowErrorCode : "INTERNAL_ERROR";
+  const code = isWorkflowErrorCode(error.code) ? error.code : "INTERNAL_ERROR";
   const typed = markWorkflowAuthored(new WorkflowError(code, error.message), Boolean(error.authored) || error.code === undefined);
   return error.failedAt === undefined ? typed : Object.assign(typed, { failedAt: error.failedAt });
 }
@@ -436,12 +464,13 @@ export function runWorkflow(script: string, args: JsonValue = null, bridge: Work
     child.on("message", (raw: unknown) => {
       try {
         if (typeof raw !== "string" || Buffer.byteLength(raw) > RPC_LIMIT_BYTES) fail("RPC_LIMIT_EXCEEDED", "RPC value exceeds the 10 MB JSON boundary");
-        const message = JSON.parse(raw) as { type?: string; id?: number; method?: string; args?: JsonValue[]; ok?: boolean; value?: JsonValue; error?: WorkerErrorShape };
-        if (!jsonValue(message)) fail("RPC_LIMIT_EXCEEDED", "Worker RPC must contain JSON-compatible values");
+        const parsed: unknown = JSON.parse(raw);
+        if (!isRpcMessage(parsed)) fail("INTERNAL_ERROR", "Worker RPC message is invalid");
+        const message = parsed;
         if (message.type === "heartbeat") { lastHeartbeatAt = performance.now(); return; }
-        if (message.type === "result") { encoded(message.value); finish(); resolve(message.value ?? null); return; }
-        if (message.type === "error") { finish(); reject(workflowErrorFromWorker(message.error ?? { code: "INTERNAL_ERROR", message: "Worker failed" })); return; }
-        if (message.type === "rpc" && message.id !== undefined) void handleRpc(message.id, message.method ?? "", message.args ?? []);
+        if (message.type === "result") { encoded(message.value); finish(); resolve(message.value); return; }
+        if (message.type === "error") { finish(); reject(workflowErrorFromWorker(message.error)); return; }
+        if (message.type === "rpc") void handleRpc(message.id, message.method, message.args);
       } catch (error) { stop(error instanceof WorkflowError ? error.code : "INTERNAL_ERROR", error instanceof Error ? error.message : String(error)); }
     });
     child.on("error", (error: Error) => { stop("INTERNAL_ERROR", error.message); });
@@ -466,7 +495,7 @@ export function runWorkflow(script: string, args: JsonValue = null, bridge: Work
         const opts = validateAgentOptions(values[1]);
         const identity = readAgentIdentity(values[2]);
         const path = agentIdentityPath(identity);
-        const label = typeof opts.label === "string" ? opts.label : typeof opts.role === "string" ? opts.role : "agent";
+        const label = typeof opts.label === "string" ? opts.label : roleNameOf(opts.role) ?? "agent";
         try {
           const result = await bridge.agent(values[0], opts, controller.signal, identity);
           value = branded({ name: label, ok: true, value: result ?? null });
@@ -480,7 +509,9 @@ export function runWorkflow(script: string, args: JsonValue = null, bridge: Work
         const command = validateShellCommand(values[0]);
         const options = validateShellOptions(values[1]);
         const identity = readShellIdentity(values[2]);
-        value = readShellResult(await bridge.shell(command, options, controller.signal, identity)) as unknown as JsonValue;
+        const result = readShellResult(await bridge.shell(command, options, controller.signal, identity));
+        if (!jsonValue(result)) fail("RPC_LIMIT_EXCEEDED", "RPC values must be JSON-compatible");
+        value = result;
       } else if (method === "checkpoint") {
         if (!bridge.checkpoint || !object(values[0])) fail("INTERNAL_ERROR", "checkpoint requires an available bridge and object input");
         const name = typeof values[0].name === "string" ? values[0].name : "checkpoint";

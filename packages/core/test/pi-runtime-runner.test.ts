@@ -1,0 +1,337 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { defineTool } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { createLiveSessionHandoff } from "../src/session-handoff.js";
+import { createRuntimeHandoffAdapter } from "../src/pi-runtime-adapter.js";
+import { createPiRuntimeAgentRunner, runtimeToolFromPiDefinition } from "../src/pi-runtime-runner.js";
+import type { RuntimeAgentRunRequest, RuntimeTool } from "../src/runtime/agent-runner.js";
+import type { AgentTransport, AgentTransportContext, PreparedAgentSession, WorkflowAgentMessage, WorkflowAgentSession, WorkflowAgentSessionEvent, WorkflowAgentTurnResult } from "../src/types.js";
+import { testExtensionContext } from "./support.js";
+type SessionPrompt = (text: string, emit: (event: WorkflowAgentSessionEvent) => void) => Promise<WorkflowAgentTurnResult>;
+function sessionFor(prompt: SessionPrompt, options: { tools?: readonly string[]; lastAssistant?: () => WorkflowAgentMessage | undefined; abort?: () => Promise<void>; steer?: (message: string) => Promise<void>; dispose?: () => Promise<void>; stats?: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number }; cost: number }; getStats?: () => { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number }; cost: number } } ): WorkflowAgentSession {
+  let listener: ((event: WorkflowAgentSessionEvent) => void) | undefined;
+  return {
+    reference: { transport: "local", sessionId: "runner-session" },
+    getState: () => ({ model: { provider: "test", model: "model" }, tools: [...(options.tools ?? [])] }),
+    getSessionStats: () => options.getStats?.() ?? options.stats ?? { tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 }, cost: 0.5 },
+    getLastAssistant: () => options.lastAssistant?.(),
+    subscribe(next) { listener = next; return () => { if (listener === next) listener = undefined; }; },
+    async prompt(text) { return prompt(text, (event) => { listener?.(event); }); },
+    async steer(message) { await options.steer?.(message); },
+    async abort() { await options.abort?.(); },
+    async dispose() { await options.dispose?.(); },
+  };
+}
+function requestFor(signal: AbortSignal, overrides: Omit<Partial<RuntimeAgentRunRequest>, "signal"> = {}): RuntimeAgentRunRequest {
+  return { task: "work", cwd: "/repo", model: { provider: "test", model: "model" }, enabledTools: [], customTools: [], run: { id: "run", namespaceId: "host", workflowName: "flow" }, agent: { id: "worker", structuralPath: ["worker"] }, signal, ...overrides };
+}
+function runnerFor(session: WorkflowAgentSession, prepared: Readonly<PreparedAgentSession> = { cwd: "/repo", model: { provider: "test", model: "model" }, tools: [], sessionLabel: "worker" }, transport: AgentTransport = { id: "local", async createSession() { return session; } }, callbacks?: Parameters<typeof createPiRuntimeAgentRunner>[0]["callbacks"]) {
+  const controller = new AbortController();
+  const context: AgentTransportContext = { run: { cwd: "/repo", sessionId: "host", runId: "run", workflow: { name: "flow" }, args: null, signal: controller.signal }, identity: { structuralPath: ["worker"], callSite: "worker", occurrence: 1 }, attempt: 1, signal: controller.signal };
+  return { runner: createPiRuntimeAgentRunner({ transport, prepared, context, handoff: createLiveSessionHandoff(), ...(callbacks ? { callbacks } : {}) }), controller };
+}
+void test("Pi runtime runner owns one complete session invocation", async () => {
+  let prompts = 0;
+  let disposals = 0;
+  const session: WorkflowAgentSession = {
+    reference: { transport: "local", sessionId: "session" },
+    getState: () => ({ model: { provider: "test", model: "model" }, tools: [] }),
+    getSessionStats: () => ({ tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 }, cost: 0.5 }),
+    getLastAssistant: () => ({ role: "assistant", content: [{ type: "text", text: "done" }] }),
+    subscribe: () => () => undefined,
+    async prompt() { prompts += 1; return { assistant: { role: "assistant", content: [{ type: "text", text: "done" }] } }; },
+    async steer() {},
+    async abort() {},
+    async dispose() { disposals += 1; },
+  };
+  const transport: import("../src/types.js").AgentTransport = { id: "local", async createSession() { return session; } };
+  const controller = new AbortController();
+  const context: AgentTransportContext = { run: { cwd: "/repo", sessionId: "host", runId: "run", workflow: { name: "flow" }, args: null, signal: controller.signal }, identity: { structuralPath: ["worker"], callSite: "worker", occurrence: 1 }, attempt: 1, signal: controller.signal };
+  const prepared: PreparedAgentSession = { cwd: "/repo", model: { provider: "test", model: "model" }, tools: [], sessionLabel: "worker" };
+  const runner = createPiRuntimeAgentRunner({ transport, prepared, context, handoff: createLiveSessionHandoff() });
+  const request = { task: "work", cwd: "/repo", model: prepared.model, enabledTools: [], customTools: [], run: { id: "run", namespaceId: "host", workflowName: "flow" }, agent: { id: "worker", structuralPath: ["worker"] }, signal: controller.signal } as const;
+  const result = await runner.run(request);
+  assert.equal(result.value, "done");
+  assert.equal(prompts, 1);
+  assert.equal(disposals, 1);
+});
+
+void test("Pi tool mapping keeps the native context and error flag", async () => {
+  const definition = defineTool({
+    name: "failed", label: "Failed", description: "Fail", parameters: Type.Object({}),
+    async execute(_id, _params, _signal, _onUpdate, context) {
+      assert.equal(context, testExtensionContext);
+      return { content: [{ type: "text" as const, text: "failed" }], details: {}, isError: true };
+    },
+  });
+  const tool = runtimeToolFromPiDefinition(definition, testExtensionContext);
+  const result = await tool.execute({ id: "call", input: {}, signal: new AbortController().signal });
+  assert.equal(result.isError, true);
+});
+void test("Pi runtime runner wires neutral custom tools before the Pi session starts", async () => {
+  let received: unknown;
+  let mapped: PreparedAgentSession | undefined;
+  const tool: RuntimeTool = { name: "echo", description: "Echo", parameters: { type: "object" }, async execute(call) { received = call.input; return { value: call.input }; } };
+  const session = sessionFor(async () => ({ assistant: { role: "assistant", content: [{ type: "text", text: "done" }] } }), { tools: ["echo"] });
+  const transport: AgentTransport = { id: "local", async createSession(prepared) { mapped = prepared; return session; } };
+  const { runner, controller } = runnerFor(session, undefined, transport);
+  const result = await runner.run(requestFor(controller.signal, { customTools: [tool] }));
+  assert.equal(result.value, "done");
+  const definition = mapped?.customTools?.find(({ name }) => name === "echo");
+  if (!definition) throw new Error("mapped runtime tool is missing");
+  await definition.execute("call", { ok: true }, controller.signal, undefined, testExtensionContext);
+  assert.deepEqual(received, { ok: true });
+});
+void test("Pi runtime runner finalizes structured results into its returned value", async () => {
+  let last: WorkflowAgentMessage | undefined;
+  let preparedWithResult: PreparedAgentSession | undefined;
+  const resultTool = defineTool({
+    name: "workflow_result", label: "Workflow Result", description: "Result", parameters: Type.Object({ answer: Type.Number() }),
+    async execute() { return { content: [{ type: "text" as const, text: "accepted" }], details: {} }; },
+  });
+  const message: WorkflowAgentMessage = { role: "assistant", content: [{ type: "toolCall", id: "result", name: "workflow_result", arguments: { answer: 7 } }] };
+  const session = sessionFor(async (_text, emit) => {
+    last = message;
+    emit({ type: "message_start", message });
+    const tool = preparedWithResult?.resultTool;
+    if (!tool) throw new Error("result tool is missing");
+    await tool.execute("result", { answer: 7 }, undefined, undefined, testExtensionContext);
+    emit({ type: "tool_execution_end", toolCallId: "result", toolName: "workflow_result", isError: false });
+    emit({ type: "message_end", message });
+    return { assistant: message };
+  }, { lastAssistant: () => last });
+  const transport: AgentTransport = { id: "local", async createSession(prepared) { preparedWithResult = prepared; return session; } };
+  const { runner, controller } = runnerFor(session, { cwd: "/repo", model: { provider: "test", model: "model" }, tools: [], sessionLabel: "worker", resultTool }, transport);
+  const result = await runner.run(requestFor(controller.signal, { resultSchema: { type: "object", properties: { answer: { type: "number" } } } }));
+  assert.deepEqual(result.value, { answer: 7 });
+});
+void test("Pi runtime runner exposes the prepared result tool during handoff takeover", async () => {
+  let activePrepared: Readonly<PreparedAgentSession> | undefined;
+  let nativeAccepted = false;
+  let startHandoff: (() => void) | undefined;
+  let opening: Promise<void> | undefined;
+  const resultTool = defineTool({
+    name: "workflow_result", label: "Workflow Result", description: "Result", parameters: Type.Object({ answer: Type.Number() }),
+    async execute() { nativeAccepted = true; return { content: [{ type: "text" as const, text: "accepted" }], details: {} }; },
+  });
+  const message: WorkflowAgentMessage = { role: "assistant", content: [{ type: "toolCall", id: "result", name: "workflow_result", arguments: { answer: 42 } }] };
+  const session = sessionFor(async (_text, emit) => {
+    emit({ type: "turn_start" });
+    startHandoff?.();
+    emit({ type: "message_end", message });
+    emit({ type: "turn_end", message });
+    if (!opening) throw new Error("handoff was not requested");
+    await opening;
+    return { assistant: message };
+  }, {});
+  const prepared: PreparedAgentSession = { cwd: "/repo", model: { provider: "test", model: "model" }, tools: [], sessionLabel: "worker", resultTool };
+  const { runner, controller } = runnerFor(session, prepared, undefined, {
+    onSession: async (_session, _handoff, sessionPrepared) => { activePrepared = sessionPrepared; },
+  });
+  const result = await runner.run(requestFor(controller.signal, {
+    onControl: (control) => {
+      const handoff = control.handoff;
+      if (!handoff) throw new Error("runtime handoff is missing");
+      startHandoff = () => {
+        opening = handoff.request(async () => {
+          const tool = activePrepared?.resultTool;
+          if (!tool) throw new Error("live session result tool is missing");
+          await tool.execute("result", { answer: 42 }, undefined, undefined, testExtensionContext);
+          handoff.takeover();
+        });
+        void opening.then(() => { handoff.release("test resume"); }, () => { handoff.release("test failed"); });
+      };
+    },
+    resultSchema: { type: "object", properties: { answer: { type: "number" } } },
+  }));
+  assert.equal(nativeAccepted, true);
+  assert.deepEqual(result.value, { answer: 42 });
+});
+void test("Pi runtime runner maps a neutral result schema to a Pi result tool", async () => {
+  let preparedWithResult: PreparedAgentSession | undefined;
+  const message: WorkflowAgentMessage = { role: "assistant", content: [{ type: "toolCall", id: "result", name: "workflow_result", arguments: { answer: 11 } }] };
+  const session = sessionFor(async (_text, emit) => {
+    const tool = preparedWithResult?.resultTool;
+    if (!tool) throw new Error("result tool is missing");
+    await tool.execute("result", { answer: 11 }, undefined, undefined, testExtensionContext);
+    emit({ type: "message_end", message });
+    return { assistant: message };
+  }, {});
+  const transport: AgentTransport = { id: "local", async createSession(prepared) { preparedWithResult = prepared; return session; } };
+  const { runner, controller } = runnerFor(session, undefined, transport);
+  const result = await runner.run(requestFor(controller.signal, { resultSchema: { type: "object", properties: { answer: { type: "number" } } } }));
+  assert.deepEqual(result.value, { answer: 11 });
+});
+void test("Pi runtime runner leaves retry ownership with its caller", async () => {
+  let sessions = 0;
+  let prompts = 0;
+  let disposals = 0;
+  const transport: AgentTransport = { id: "local", async createSession() {
+    sessions += 1;
+    const current = sessions;
+    return sessionFor(async () => { prompts += 1; if (current === 1) throw new Error("first attempt"); return { assistant: { role: "assistant", content: [{ type: "text", text: "done" }] } }; }, { dispose: async () => { disposals += 1; } });
+  } };
+  const prepared: PreparedAgentSession = { cwd: "/repo", model: { provider: "test", model: "model" }, tools: [], sessionLabel: "worker" };
+  const { runner, controller } = runnerFor(sessionFor(async () => ({ assistant: { role: "assistant", content: [{ type: "text", text: "unused" }] } }), {}), prepared, transport);
+  await assert.rejects(runner.run(requestFor(controller.signal)), /first attempt/);
+  const result = await runner.run(requestFor(controller.signal));
+  assert.equal(result.value, "done");
+  assert.deepEqual({ sessions, prompts, disposals }, { sessions: 2, prompts: 2, disposals: 2 });
+});
+void test("Pi runtime runner cancels and disposes an in-flight prompt", async () => {
+  let started!: () => void;
+  const promptStarted = new Promise<void>((resolve) => { started = resolve; });
+  let aborts = 0;
+  let disposals = 0;
+  const session = sessionFor(async () => { started(); return new Promise<WorkflowAgentTurnResult>(() => undefined); }, { abort: async () => { aborts += 1; }, dispose: async () => { disposals += 1; } });
+  const { runner, controller } = runnerFor(session);
+  const running = runner.run(requestFor(controller.signal));
+  await promptStarted;
+  controller.abort();
+  await assert.rejects(running, (error: unknown) => error instanceof Error && error.name === "WorkflowError" && "code" in error && (error as { code?: unknown }).code === "CANCELLED");
+  assert.deepEqual({ aborts, disposals }, { aborts: 1, disposals: 1 });
+});
+void test("Pi runtime runner times out and disposes an in-flight prompt", async () => {
+  let aborts = 0;
+  let disposals = 0;
+  const session = sessionFor(async () => new Promise<WorkflowAgentTurnResult>(() => undefined), { abort: async () => { aborts += 1; }, dispose: async () => { disposals += 1; } });
+  const { runner, controller } = runnerFor(session);
+  await assert.rejects(runner.run(requestFor(controller.signal, { timeoutMs: 10 })), (error: unknown) => error instanceof Error && "code" in error && (error as { code?: unknown }).code === "AGENT_TIMEOUT");
+  assert.deepEqual({ aborts, disposals }, { aborts: 1, disposals: 1 });
+});
+void test("Pi runtime runner keeps a completed value when cancellation arrives during finalization", async () => {
+  const session = sessionFor(async () => ({ assistant: { role: "assistant", content: [{ type: "text", text: "done" }] } }), {});
+  const control = { current: undefined as AbortController | undefined };
+  const { runner, controller } = runnerFor(session, undefined, undefined, { onBeforeComplete: () => { control.current?.abort(); } });
+  control.current = controller;
+  const result = await runner.run(requestFor(controller.signal));
+  assert.equal(result.value, "done");
+});
+void test("Pi runtime runner exposes steering and awaits the control callback", async () => {
+  const steered: string[] = [];
+  const session = sessionFor(async () => ({ assistant: { role: "assistant", content: [{ type: "text", text: "done" }] } }), { steer: async (message) => { steered.push(message); } });
+  let controlHandoff: unknown;
+  const { runner, controller } = runnerFor(session);
+  await runner.run(requestFor(controller.signal, { onControl: async (control) => { controlHandoff = control.handoff; await control.steer("continue"); } }));
+  assert.ok(controlHandoff);
+  assert.deepEqual(steered, ["continue"]);
+});
+void test("Pi runtime runner observes a caller-supplied handoff and resumes with continuation", async () => {
+  const remote = createLiveSessionHandoff();
+  const requestHandoff = createRuntimeHandoffAdapter(remote);
+  let last: WorkflowAgentMessage | undefined;
+  let startHandoff: (() => void) | undefined;
+  let opening: Promise<void> | undefined;
+  const prompts: string[] = [];
+  const first = { role: "assistant", content: [{ type: "toolCall", id: "tool", name: "read", arguments: {} }] };
+  const continued = { role: "assistant", content: [{ type: "text", text: "continued" }] };
+  const session = sessionFor(async (text, emit) => {
+    prompts.push(text);
+    if (prompts.length === 1) {
+      last = first;
+      emit({ type: "turn_start" });
+      startHandoff?.();
+      emit({ type: "message_end", message: first });
+      emit({ type: "turn_end", message: first });
+      await opening;
+      return { assistant: first };
+    }
+    last = continued;
+    return { assistant: continued };
+  }, { lastAssistant: () => last });
+  const { runner, controller } = runnerFor(session);
+  await runner.run(requestFor(controller.signal, {
+    onControl: (control) => {
+      assert.equal(control.handoff, requestHandoff);
+      startHandoff = () => {
+        opening = requestHandoff.request(async () => { requestHandoff.takeover(); last = { role: "assistant", content: [], stopReason: "aborted" }; });
+        void opening.then(() => { requestHandoff.release("test resume"); });
+      };
+    },
+    handoff: requestHandoff,
+  }));
+  assert.equal(prompts[1], "Continue the task from the current session state.");
+  assert.equal(requestHandoff.transferred, true);
+});
+void test("Pi runtime runner persists tool progress and live state", async () => {
+  const updates: Array<{ toolCalls: readonly { state: string }[]; state: { tools: readonly string[] } | undefined; persist: boolean }> = [];
+  const message = { role: "assistant", content: [{ type: "text", text: "done" }] };
+  const session = sessionFor(async (_text, emit) => {
+    emit({ type: "state_changed", state: { model: { provider: "test", model: "model" }, tools: ["read"] } });
+    emit({ type: "tool_execution_start", toolCallId: "call", toolName: "read" });
+    emit({ type: "tool_execution_end", toolCallId: "call", toolName: "read", isError: false });
+    emit({ type: "message_end", message });
+    return { assistant: message };
+  }, { tools: ["read"] });
+  const { runner, controller } = runnerFor(session, { cwd: "/repo", model: { provider: "test", model: "model" }, tools: ["read"], sessionLabel: "worker" });
+  await runner.run(requestFor(controller.signal, { enabledTools: ["read"], onProgress: (progress) => { updates.push({ toolCalls: progress.toolCalls, state: progress.state ? { tools: progress.state.tools } : undefined, persist: progress.persist }); } }));
+  assert.ok(updates.some(({ toolCalls }) => toolCalls.some(({ state }) => state === "running")));
+  assert.ok(updates.some(({ toolCalls }) => toolCalls.some(({ state }) => state === "completed")));
+  assert.ok(updates.some(({ state, persist }) => persist && state?.tools[0] === "read"));
+});
+void test("Pi runtime runner avoids progress materialization without a handler", async () => {
+  let statsCalls = 0;
+  const message: WorkflowAgentMessage = { role: "assistant", content: [{ type: "text", text: "done" }] };
+  const session = sessionFor(async (_text, emit) => {
+    emit({ type: "state_changed", state: { model: { provider: "test", model: "model" }, tools: [] } });
+    emit({ type: "message_end", message });
+    return { assistant: message };
+  }, { getStats: () => {
+    statsCalls += 1;
+    return { tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 }, cost: 0.5 };
+  } });
+  const { runner, controller } = runnerFor(session);
+  const result = await runner.run(requestFor(controller.signal));
+  assert.equal(result.value, "done");
+  assert.equal(statsCalls, 1);
+});
+void test("Pi runtime runner keeps session event observation best effort", async () => {
+  let statsCalls = 0;
+  const message: WorkflowAgentMessage = { role: "assistant", content: [{ type: "text", text: "done" }] };
+  const session = sessionFor(async (_text, emit) => {
+    emit({ type: "state_changed", state: { model: { provider: "test", model: "model" }, tools: [] } });
+    emit({ type: "message_end", message });
+    return { assistant: message };
+  }, { getStats: () => {
+    statsCalls += 1;
+    if (statsCalls === 2) throw new Error("progress stats failed");
+    return { tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 }, cost: 0.5 };
+  } });
+  const { runner, controller } = runnerFor(session);
+  const result = await runner.run(requestFor(controller.signal, { onProgress: () => undefined }));
+  assert.equal(result.value, "done");
+  assert.ok(statsCalls >= 3);
+});
+void test("Pi runtime runner preserves disposal failures after success", async () => {
+  let disposals = 0;
+  const session = sessionFor(async () => ({ assistant: { role: "assistant", content: [{ type: "text", text: "done" }] } }), { dispose: async () => { disposals += 1; throw new Error("dispose failed"); } });
+  const { runner, controller } = runnerFor(session);
+  await assert.rejects(runner.run(requestFor(controller.signal)), /dispose failed/);
+  assert.equal(disposals, 1);
+});
+void test("Pi runtime runner preserves the primary failure when disposal also fails", async () => {
+  let disposals = 0;
+  const session = sessionFor(async () => { throw new Error("prompt failed"); }, { dispose: async () => { disposals += 1; throw new Error("dispose failed"); } });
+  const { runner, controller } = runnerFor(session);
+  await assert.rejects(runner.run(requestFor(controller.signal)), /prompt failed/);
+  assert.equal(disposals, 1);
+});
+void test("Pi runtime runner reports unavailable usage without inventing accounting", async () => {
+  const session = sessionFor(async () => ({ assistant: { role: "assistant", content: [{ type: "text", text: "done" }] } }), { stats: { tokens: { input: Number.NaN, output: 2, cacheRead: 3, cacheWrite: 4, total: 9 }, cost: 0.5 } });
+  const { runner, controller } = runnerFor(session);
+  const result = await runner.run(requestFor(controller.signal));
+  assert.deepEqual(result.usage, { availability: "unavailable" });
+});
+void test("Pi runtime runner keeps a provider pause outside the attempt deadline", async () => {
+  let prompts = 0;
+  const session = sessionFor(async () => {
+    prompts += 1;
+    if (prompts === 1) throw Object.assign(new Error("limited"), { status: 429 });
+    return { assistant: { role: "assistant", content: [{ type: "text", text: "done" }] } };
+  }, {});
+  const { runner, controller } = runnerFor(session);
+  const result = await runner.run(requestFor(controller.signal, { timeoutMs: 10, onProviderLimit: async () => { await new Promise<void>((resolve) => setTimeout(resolve, 20)); } }));
+  assert.equal(result.value, "done");
+  assert.equal(prompts, 2);
+});
